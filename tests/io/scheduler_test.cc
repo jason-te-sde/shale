@@ -130,6 +130,19 @@ TEST(ManualSchedulerDeathTest, ACallFromAnotherThreadDuringARunAborts) {
       "concurrent use of ManualScheduler");
 }
 
+TEST(ManualSchedulerDeathTest, DestroyingItFromOneOfItsOwnTasksAborts) {
+  // The scheduler would be freed under the task that is running, and the call that runs it would
+  // go on to use it.
+  EXPECT_DEATH(
+      {
+        auto scheduler = std::make_unique<ManualScheduler>();
+        ManualScheduler* const raw = scheduler.get();
+        scheduler->Schedule([&scheduler] { scheduler.reset(); });
+        static_cast<void>(raw->RunPending());
+      },
+      "own tasks");
+}
+
 TEST(ManualSchedulerDeathTest, AnEmptyTaskAborts) {
   EXPECT_DEATH(
       {
@@ -146,6 +159,17 @@ struct BlockedWorker {
   std::future<void> started_signal = started.get_future();
   std::promise<void> release;
   std::shared_future<void> release_signal = release.get_future().share();
+
+  // Waits for the worker to be inside the first task, for at most ten seconds. If it never gets
+  // there, the worker is released so that nothing in the test can wait for it for ever, and the
+  // result is false: a broken scheduler fails the test instead of hanging it.
+  bool WaitForStart() {
+    if (started_signal.wait_for(std::chrono::seconds(10)) == std::future_status::ready) {
+      return true;
+    }
+    release.set_value();
+    return false;
+  }
 
   // The first task: tells the test that the worker is inside it, waits to be released, then runs
   // `after`.
@@ -180,7 +204,7 @@ TEST(ThreadSchedulerTest, DestructorDrainsQueue) {
   int counter = 0;
   auto scheduler = NewThreadScheduler();
   scheduler->Schedule(worker.BlockingTask([&counter] { counter++; }));
-  worker.started_signal.wait();
+  ASSERT_TRUE(worker.WaitForStart()) << "the worker never started the first task";
   for (int i = 0; i < 100; i++) {
     scheduler->Schedule([&counter] { counter++; });
   }
@@ -210,7 +234,7 @@ TEST(ThreadSchedulerTest, DestructorRunsTasksQueuedWhileItDrains) {
   auto scheduler = NewThreadScheduler();
   Scheduler* const raw = scheduler.get();
   scheduler->Schedule(worker.BlockingTask([] {}));
-  worker.started_signal.wait();
+  ASSERT_TRUE(worker.WaitForStart()) << "the worker never started the first task";
   // Queued behind the blocked task, so it runs after the destructor has begun, and queues a
   // follow-up from the worker thread while the scheduler is stopping.
   scheduler->Schedule([&counter, raw] {
@@ -298,8 +322,11 @@ TEST(ThreadSchedulerDeathTest, DestroyingItFromOneOfItsOwnTasksAborts) {
       {
         std::unique_ptr<Scheduler> scheduler = NewThreadScheduler();
         std::promise<void> never;
+        std::future<void> never_signal = never.get_future();
         scheduler->Schedule([&scheduler] { scheduler.reset(); });
-        never.get_future().wait();
+        // Not reached if the scheduler aborts, as it must. If it does not, the test fails, in a
+        // moment, rather than waits for ever.
+        never_signal.wait_for(std::chrono::seconds(10));
       },
       "own tasks");
 }

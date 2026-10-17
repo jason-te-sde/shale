@@ -1,5 +1,6 @@
 #include "shale/scheduler.h"
 
+#include <atomic>
 #include <cstddef>
 #include <deque>
 #include <functional>
@@ -83,40 +84,56 @@ class ThreadScheduler final : public Scheduler {
 
 std::unique_ptr<Scheduler> NewThreadScheduler() { return std::make_unique<ThreadScheduler>(); }
 
+class ManualScheduler::Impl {
+ public:
+  // The thread that is inside a call, or none.
+  mutable std::atomic<std::thread::id> user{};
+  // How many Use objects the thread in `user` has open. Only that thread touches it.
+  mutable int depth = 0;
+  // True while a task runs. Touched only by the thread in `user`.
+  bool running = false;
+  std::deque<std::function<void()>> queue;
+};
+
 class ManualScheduler::Use {
  public:
-  explicit Use(const ManualScheduler* scheduler) : scheduler_(scheduler) {
+  explicit Use(const ManualScheduler* scheduler) : impl_(*scheduler->impl_) {
     const std::thread::id self = std::this_thread::get_id();
     // Relaxed is enough to recognise ourselves: only this thread ever stores its own id, so no
     // other thread can make this load return it.
-    if (scheduler_->user_.load(std::memory_order_relaxed) == self) {
-      scheduler_->depth_++;
+    if (impl_.user.load(std::memory_order_relaxed) == self) {
+      impl_.depth++;
       return;
     }
     std::thread::id none;
-    const bool acquired =
-        scheduler_->user_.compare_exchange_strong(none, self, std::memory_order_acquire);
+    const bool acquired = impl_.user.compare_exchange_strong(none, self, std::memory_order_acquire);
     SHALE_CHECK(acquired, "concurrent use of ManualScheduler: it is not thread-safe");
-    scheduler_->depth_ = 1;
+    impl_.depth = 1;
   }
 
   Use(const Use&) = delete;
   Use& operator=(const Use&) = delete;
 
   ~Use() {
-    if (--scheduler_->depth_ == 0) {
-      scheduler_->user_.store(std::thread::id(), std::memory_order_release);
+    if (--impl_.depth == 0) {
+      impl_.user.store(std::thread::id(), std::memory_order_release);
     }
   }
 
  private:
-  const ManualScheduler* const scheduler_;
+  const Impl& impl_;
 };
+
+ManualScheduler::ManualScheduler() : impl_(std::make_unique<Impl>()) {}
+
+ManualScheduler::~ManualScheduler() {
+  SHALE_CHECK(!impl_->running, "a ManualScheduler destroyed from one of its own tasks");
+}
 
 void ManualScheduler::Schedule(std::function<void()> task) {
   SHALE_CHECK(task != nullptr, "Scheduler::Schedule needs a task");
   const Use use(this);
-  queue_.push_back(std::move(task));
+  impl_->queue.push_back(std::move(task));
 }
 
 bool ManualScheduler::RunsOnCallerThread() const { return true; }
@@ -131,22 +148,23 @@ size_t ManualScheduler::RunPending() {
 
 bool ManualScheduler::RunOne() {
   const Use use(this);
-  SHALE_CHECK(!running_, "RunOne or RunPending called from inside a task: tasks run one at a time");
-  if (queue_.empty()) {
+  SHALE_CHECK(!impl_->running,
+              "RunOne or RunPending called from inside a task: tasks run one at a time");
+  if (impl_->queue.empty()) {
     return false;
   }
   // Take the task off the queue before running it, so that it can queue more work.
-  std::function<void()> task = std::move(queue_.front());
-  queue_.pop_front();
-  running_ = true;
+  std::function<void()> task = std::move(impl_->queue.front());
+  impl_->queue.pop_front();
+  impl_->running = true;
   task();
-  running_ = false;
+  impl_->running = false;
   return true;
 }
 
 size_t ManualScheduler::pending() const {
   const Use use(this);
-  return queue_.size();
+  return impl_->queue.size();
 }
 
 }  // namespace shale

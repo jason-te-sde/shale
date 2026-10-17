@@ -1,12 +1,9 @@
 #ifndef SHALE_SCHEDULER_H_
 #define SHALE_SCHEDULER_H_
 
-#include <atomic>
 #include <cstddef>
-#include <deque>
 #include <functional>
 #include <memory>
-#include <thread>
 
 namespace shale {
 
@@ -64,9 +61,20 @@ std::unique_ptr<Scheduler> NewThreadScheduler();
 /// that would run a second task inside the first. A task may call Schedule() and pending() on the
 /// scheduler it runs on.
 ///
-/// Destroying it drops the tasks still queued without running them.
+/// Destroying it drops the tasks still queued without running them. It must not be destroyed from
+/// one of its own tasks, which would free it under the task that is running: that aborts the
+/// process.
 class ManualScheduler final : public Scheduler {
  public:
+  /// Creates a scheduler with nothing queued.
+  ManualScheduler();
+
+  /// Drops the tasks still queued without running them. Aborts if called from one of its own tasks.
+  ~ManualScheduler() override;
+
+  ManualScheduler(const ManualScheduler&) = delete;
+  ManualScheduler& operator=(const ManualScheduler&) = delete;
+
   /// Queues `task` behind the tasks already queued. It does not run it.
   /// @param task what to run; must not be empty.
   void Schedule(std::function<void()> task) override;
@@ -86,16 +94,14 @@ class ManualScheduler final : public Scheduler {
   size_t pending() const;
 
  private:
+  // What the scheduler keeps. It is out of line so that this header needs no thread or atomic
+  // types: it is what a user of the engine includes. Defined in scheduler.cc.
+  class Impl;
   // Marks the scheduler as in use by the calling thread for the lifetime of the object, and aborts
   // if another thread is already inside it. Defined in scheduler.cc.
   class Use;
 
-  mutable std::atomic<std::thread::id> user_{};
-  // How many Use objects the thread in `user_` has open. Only that thread touches it.
-  mutable int depth_ = 0;
-  // True while a task runs. Touched only by the thread in `user_`.
-  bool running_ = false;
-  std::deque<std::function<void()>> queue_;
+  const std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace shale
