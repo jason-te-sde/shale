@@ -71,6 +71,10 @@ shale_add_test(version_state SOURCES core/version_state_test.cc LIBS shale_core)
 shale_add_test(compaction_picker SOURCES core/compaction_picker_test.cc LIBS shale_core)
 shale_add_test(compaction_filter SOURCES core/compaction_filter_test.cc LIBS shale_core)
 
+# The database layer's tests run against the fault-injecting Env, which the test kit provides.
+shale_add_test(builder SOURCES db/builder_test.cc LIBS shale_db shale_testkit)
+shale_add_test(version_set SOURCES db/version_set_test.cc LIBS shale_db shale_testkit)
+
 # Clang's thread-safety analysis is what makes SHALE_GUARDED_BY more than a comment, and nothing
 # else would notice if it silently stopped working. So the build itself is tested: one translation
 # unit that reads a guarded member without the lock must be rejected, and the same unit with the
