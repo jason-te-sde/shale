@@ -142,12 +142,32 @@ TEST(CompactionFilterTest, TombstoneAtTheOldestSnapshotIsDropped) {
 }
 
 TEST(CompactionFilterTest, TombstoneInAMiddleStripeIsKept) {
-  // Only the oldest snapshot decides: the one at 8 sees the deletion at 6 and so hides a@3 from
-  // itself, but dropping it would show a@3 to the snapshot at 8, and the one at 4 needs it anyway.
+  // The deletion at 6 hides a@3 from the snapshot at 8 and from the latest state; a@3 stays only
+  // for the snapshot at 4. The deletion stays as well, because that snapshot is older than it:
+  // dropped, it would show a@3 to the other two.
   CompactionFilter filter({4, 8});
   EXPECT_EQ(RunFilter(filter, {D("a", 6), V("a", 3)}, /*is_base=*/true),
             (Kept{{"a", 6}, {"a", 3}}));
   EXPECT_EQ(filter.stats().tombstones_dropped, 0u);
+}
+
+// A deletion goes only in the oldest stripe, at the base level: the one case in which the entry
+// alone is enough to know that nobody needs it. Where the answer would depend on the entries after
+// it, which Next() has not seen, the deletion is kept, so the rule is safe and not exact. These two
+// are the cases it keeps although no observer could tell the difference.
+TEST(CompactionFilterTest, TombstoneRuleIsConservative) {
+  // A snapshot at 0 sees nothing of any key, and the latest state would see "deleted" either way,
+  // but the deletion is above the snapshot, so it is not in the oldest stripe.
+  CompactionFilter at_zero({0});
+  EXPECT_EQ(RunFilter(at_zero, {D("a", 9)}, /*is_base=*/true), (Kept{{"a", 9}}));
+  EXPECT_EQ(at_zero.stats().tombstones_dropped, 0u);
+
+  // The snapshot at 2 cannot see a@3 either, so the deletion at 6 hides nothing from anyone. a@3
+  // is shadowed, since the deletion before it is in its stripe, and the deletion stays.
+  CompactionFilter at_two({2});
+  EXPECT_EQ(RunFilter(at_two, {D("a", 6), V("a", 3)}, /*is_base=*/true), (Kept{{"a", 6}}));
+  EXPECT_EQ(at_two.stats().tombstones_dropped, 0u);
+  EXPECT_EQ(at_two.stats().shadowed_dropped, 1u);
 }
 
 TEST(CompactionFilterTest, TombstoneBelowBaseLevelStaysWhateverTheSnapshots) {
@@ -182,6 +202,29 @@ TEST(CompactionFilterTest, EachUserKeyIsJudgedOnItsOwn) {
             (Kept{{"a", 9}, {"a", 5}, {"b", 4}, {"c", 8}, {"c", 2}}));
   EXPECT_EQ(filter.stats().kept, 5u);
   EXPECT_EQ(filter.stats().shadowed_dropped, 2u);
+}
+
+TEST(CompactionFilterTest, TheSameInternalKeyTwiceIsNotAnError) {
+  // The second copy is shadowed by the first, as any entry in the same stripe is.
+  CompactionFilter filter({});
+  EXPECT_EQ(RunFilter(filter, {V("a", 5), V("a", 5), V("b", 4)}, false),
+            (Kept{{"a", 5}, {"b", 4}}));
+  EXPECT_EQ(filter.stats().shadowed_dropped, 1u);
+
+  // Also within a snapshot's stripe, and when the copies differ in type, a value first as the
+  // order has it.
+  CompactionFilter with_snapshot({5});
+  EXPECT_EQ(RunFilter(with_snapshot, {V("a", 5), D("a", 5), V("a", 3)}, true), (Kept{{"a", 5}}));
+  EXPECT_EQ(with_snapshot.stats().shadowed_dropped, 2u);
+}
+
+TEST(CompactionFilterTest, ASnapshotAtTheLargestSequenceNumberIsAccepted) {
+  // Every possible entry is at or before it, so all of them are in its stripe.
+  EXPECT_EQ(RunWith({kMaxSequenceNumber}, {V("a", kMaxSequenceNumber), V("a", 7)}, false),
+            (Kept{{"a", kMaxSequenceNumber}}));
+  EXPECT_EQ(
+      RunWith({8, kMaxSequenceNumber}, {V("a", kMaxSequenceNumber), V("a", 9), V("a", 7)}, false),
+      (Kept{{"a", kMaxSequenceNumber}, {"a", 7}}));
 }
 
 TEST(CompactionFilterTest, TheBaseLevelFlagIsPerKey) {
@@ -272,8 +315,8 @@ TEST(CompactionFilterTest, MatchesBruteForceVisibility) {
   uint64_t dropped_tombstones = 0;
   uint64_t kept_tombstones = 0;
   uint64_t shadowed = 0;
-  uint64_t kept_for_snapshots =
-      0;  // older versions of a key that stay because a snapshot sees them
+  // Older versions of a key that stay because a snapshot sees them.
+  uint64_t kept_for_snapshots = 0;
   for (uint64_t seed = 0; seed < 500; seed++) {
     SCOPED_TRACE("seed " + std::to_string(seed));
     Random rnd(seed);
@@ -337,11 +380,17 @@ TEST(CompactionFilterTest, MatchesBruteForceVisibility) {
       }
     }
 
-    // Exactness: what is kept is exactly what some observer sees, less the deletions that nothing
-    // above or below can still need. A filter that kept more would be safe and wasteful.
-    const SequenceNumber oldest_snapshot =
-        snapshots.empty() ? kMaxSequenceNumber
-                          : *std::min_element(snapshots.begin(), snapshots.end());
+    // Exactness of shadowing: the entries kept are those some observer sees, except for the
+    // deletions the documented rule drops. That rule is conservative, not exact (see
+    // TombstoneRuleIsConservative), so it is written out here as the header states it, and not
+    // derived from what observers see. A filter that kept more than this would be safe and
+    // wasteful, and one that kept less is caught by the comparison above.
+    const auto tombstone_dropped = [&](const Entry& e) {
+      // At the base level, and in the oldest stripe: no snapshot is older than the deletion.
+      return is_base && e.type == ValueType::kDeletion &&
+             std::none_of(snapshots.begin(), snapshots.end(),
+                          [&](SequenceNumber snapshot) { return snapshot < e.seq; });
+    };
     KeptSet expected;
     for (const SequenceNumber observer : observers) {
       for (const std::string& user_key : user_keys) {
@@ -352,12 +401,7 @@ TEST(CompactionFilterTest, MatchesBruteForceVisibility) {
             newest = &e;
           }
         }
-        if (newest == nullptr) {
-          continue;
-        }
-        const bool droppable =
-            is_base && newest->type == ValueType::kDeletion && newest->seq <= oldest_snapshot;
-        if (!droppable) {
+        if (newest != nullptr && !tombstone_dropped(*newest)) {
           expected.emplace(newest->user_key, newest->seq);
         }
       }

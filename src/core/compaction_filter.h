@@ -6,9 +6,12 @@
 // A compaction merges several tables into a stream of internal keys in CompareInternalKey() order,
 // for each user key newest first, and writes some of them out. What it may leave out is decided by
 // who can still look: the latest state of the database, and every snapshot that is still open. An
-// entry that none of them can see is garbage; an entry that any of them sees must stay, or that
-// reader's answer changes. The filter decides this one entry at a time, and exactly, not
-// conservatively: it keeps the newest entry that each observer sees and nothing else.
+// entry that none of them can see is garbage; one that any of them sees must stay, unless dropping
+// it leaves that reader's answer as it was, which holds only for a deletion with nothing beneath
+// it. The filter decides this one entry at a time. Shadowing is exact: an entry is dropped as
+// shadowed if and only if no observer sees it. The drop of a deletion is conservative: it is
+// made only in the one case that a single entry is enough to prove safe, and a deletion that no
+// observer needs may be kept. See the class.
 //
 // This is the pure kernel's: no I/O, no clock, no threads, no locks.
 
@@ -30,11 +33,18 @@ namespace shale {
 /// entry of each user key at or before its own sequence number, which is the newest entry of that
 /// key in the stripe, or in an older one if the stripe holds none. So within one user key:
 ///  - an entry is shadowed, and dropped, when the entry before it, which is newer, is in the same
-///    stripe: no observer reaches it, because each of them that could see it sees the newer one.
+///    stripe. This is exact: no observer reaches a shadowed entry, because each of them that could
+///    see it sees the newer one, and an entry that is not shadowed is the newest of its stripe,
+///    which that stripe's observer sees.
 ///  - a deletion is dropped as well when it is in the oldest stripe, that is when no snapshot is
 ///    older than it, and no level below the output can hold the key. Nothing older is left for it
-///    to hide, and nobody older is left to need it.
-/// Everything else is kept: it is the newest entry of its stripe, so its observer sees it.
+///    to hide, and nobody older is left to need it. This is conservative: it is safe, and it keeps
+///    a deletion that no observer needs whenever an older snapshot is open, because telling that a
+///    deletion hides nothing would take the entries after it, which the filter has not seen. With
+///    a snapshot at 0, a deletion at 9 stays although the snapshot sees nothing and the latest
+///    state sees "deleted" either way.
+/// Everything else is kept. A filter that looked ahead could drop more deletions; no entry it keeps
+/// is unneeded except such deletions.
 class CompactionFilter {
  public:
   /// Creates a filter for a compaction that runs while `snapshots` are open: their sequence

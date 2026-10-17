@@ -352,6 +352,48 @@ TEST(CompactionPickerTest, TrivialMoveNeedsExactlyOneInputFile) {
   EXPECT_FALSE(plan.IsTrivialMove(options)) << "a file at the next level";
 }
 
+TEST(CompactionPickerTest, TrivialMoveGrandparentLimitSaturates) {
+  // Ten times this target does not fit in 64 bits. Wrapped, the limit would be 2^64 - 2 and a
+  // grandparent total of 2^64 - 1 would be refused; saturated, the limit is the largest number
+  // there is and nothing is over it.
+  CompactionOptions options;
+  options.target_file_size = UINT64_MAX / 5;
+  CompactionPlan plan;
+  plan.level = 1;
+  plan.inputs[0] = {F(11, "d", "h")};
+  plan.grandparents = {F(31, "e", "f", UINT64_MAX)};
+  EXPECT_TRUE(plan.IsTrivialMove(options));
+  options.target_file_size = UINT64_MAX;
+  EXPECT_TRUE(plan.IsTrivialMove(options));
+}
+
+TEST(CompactionPickerTest, ManualCompactionIsNeverATrivialMove) {
+  // A manual compaction is asked for to rewrite files and give back what they hold that is dead,
+  // which a move down a level does not do.
+  const CompactionOptions options;
+  CompactionPlan plan;
+  plan.level = 1;
+  plan.inputs[0] = {F(11, "d", "h")};
+  EXPECT_TRUE(plan.IsTrivialMove(options));
+  plan.manual = true;
+  EXPECT_FALSE(plan.IsTrivialMove(options));
+
+  // The same file, asked for by range: nothing overlaps it, and still it is rewritten.
+  const VersionState state = StateWith({{1, F(11, "d", "h")}});
+  const std::optional<CompactionPlan> manual = PickRangeCompaction(state, 1, "d", "h", options);
+  ASSERT_TRUE(manual.has_value());
+  ASSERT_EQ(Numbers(manual->inputs[0]), (NumberList{11}));
+  ASSERT_TRUE(manual->inputs[1].empty());
+  EXPECT_TRUE(manual->manual);
+  EXPECT_FALSE(manual->IsTrivialMove(options));
+
+  // Picked because the level is over its limit, it is a move.
+  const VersionState oversized = StateWith({{1, F(11, "d", "h", 11 * kMiB)}});
+  const CompactionPlan picked = Picked(oversized, options);
+  EXPECT_FALSE(picked.manual);
+  EXPECT_TRUE(picked.IsTrivialMove(options));
+}
+
 TEST(CompactionPickerTest, LastLevelIsNeverAnInputLevel) {
   const VersionState state =
       StateWith({{6, F(61, "a", "m", 2000000 * kMiB)}, {6, F(62, "n", "z", 2000000 * kMiB)}});
@@ -461,6 +503,33 @@ TEST(CompactionPickerTest, PureFunction) {
   ASSERT_TRUE(range_1.has_value());
   EXPECT_EQ(range_1, range_2);
   EXPECT_EQ(state, before);
+}
+
+TEST(CompactionPickerDeathTest, NonPositiveOptionsAreRefused) {
+  // Each of the three would otherwise divide by zero or shrink a limit to nothing, and a NaN score
+  // is never due, so the level would silently never compact. Each is checked wherever it is read.
+  const VersionState state = StateWith({{0, F(1, "a", "b")}, {1, F(11, "a", "b")}});
+
+  CompactionOptions no_trigger;
+  no_trigger.l0_compaction_trigger = 0;
+  EXPECT_DEATH(LevelScore(state, 0, no_trigger), "l0_compaction_trigger");
+  EXPECT_DEATH(PickCompaction(state, no_trigger), "l0_compaction_trigger");
+  no_trigger.l0_compaction_trigger = -4;
+  EXPECT_DEATH(LevelScore(state, 0, no_trigger), "l0_compaction_trigger");
+
+  CompactionOptions no_base;
+  no_base.max_bytes_for_level_base = 0;
+  EXPECT_DEATH(MaxBytesForLevel(1, no_base), "max_bytes_for_level_base");
+  EXPECT_DEATH(LevelScore(state, 1, no_base), "max_bytes_for_level_base");
+  EXPECT_DEATH(PickCompaction(state, no_base), "max_bytes_for_level_base");
+
+  CompactionOptions no_multiplier;
+  no_multiplier.level_size_multiplier = 0;
+  EXPECT_DEATH(MaxBytesForLevel(1, no_multiplier), "level_size_multiplier");
+  EXPECT_DEATH(LevelScore(state, 1, no_multiplier), "level_size_multiplier");
+  EXPECT_DEATH(PickCompaction(state, no_multiplier), "level_size_multiplier");
+  no_multiplier.level_size_multiplier = -10;
+  EXPECT_DEATH(MaxBytesForLevel(3, no_multiplier), "level_size_multiplier");
 }
 
 TEST(CompactionPickerDeathTest, PreconditionsAreChecked) {

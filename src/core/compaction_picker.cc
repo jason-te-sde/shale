@@ -110,7 +110,9 @@ const FileMetaData& NextFileAfterPointer(const std::vector<FileMetaData>& files,
 }  // namespace
 
 bool CompactionPlan::IsTrivialMove(const CompactionOptions& options) const {
-  return inputs[0].size() == 1 && inputs[1].empty() &&
+  // A manual compaction is asked for to rewrite files, to drop what they hold that is dead, and a
+  // move down a level rewrites nothing.
+  return !manual && inputs[0].size() == 1 && inputs[1].empty() &&
          TotalFileSize(grandparents) <=
              SaturatingMultiply(kTrivialMoveGrandparentFiles, options.target_file_size);
 }

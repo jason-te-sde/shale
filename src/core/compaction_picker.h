@@ -53,10 +53,12 @@ struct CompactionPlan {
   /// picker chose because a level was too big.
   bool manual = false;
 
-  /// Returns true if the one input file can move to level + 1 as it is, without being read: it is
-  /// the only input at `level`, no file at level + 1 overlaps it, and its grandparents total no
-  /// more than ten times options.target_file_size, because a file moved down that overlaps more
-  /// would hand the next compaction too much to merge at once.
+  /// Returns true if the one input file can move to level + 1 as it is, without being read: the
+  /// plan is not manual, the file is the only input at `level`, no file at level + 1 overlaps it,
+  /// and its grandparents total no more than ten times options.target_file_size, because a file
+  /// moved down that overlaps more would hand the next compaction too much to merge at once. A
+  /// manual plan is never a move: it is asked for to rewrite files and give back what they hold
+  /// that is dead, which a move does not do.
   bool IsTrivialMove(const CompactionOptions& options) const;
 
   /// Two plans are equal when every field is.
