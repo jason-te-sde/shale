@@ -18,6 +18,7 @@
 #include "io/env_util.h"
 #include "shale/env.h"
 #include "shale/status.h"
+#include "testkit/fault_env.h"
 #include "testkit/test_util.h"
 #include "util/check.h"
 #include "util/random.h"
@@ -76,6 +77,23 @@ class MemEnvUnderTest : public EnvUnderTest {
 
  private:
   const std::unique_ptr<Env> env_;
+  const std::string dir_ = "/shale_env_contract";
+};
+
+// The fault-injecting Env with no fault configured: it has to be indistinguishable from the plain
+// in-memory one, or a test that finds a bug under faults might be finding a bug in the fault Env.
+class FaultEnvUnderTest : public EnvUnderTest {
+ public:
+  FaultEnvUnderTest() : env_(/*seed=*/1) {
+    const Status s = env_.CreateDir(dir_);
+    SHALE_CHECK(s.ok(), s.ToString());
+  }
+
+  Env* env() override { return &env_; }
+  const std::string& dir() const override { return dir_; }
+
+ private:
+  FaultInjectionEnv env_;
   const std::string dir_ = "/shale_env_contract";
 };
 
@@ -558,7 +576,8 @@ TEST_P(EnvContractTest, CloseTwiceAborts) {
 INSTANTIATE_TEST_SUITE_P(
     Envs, EnvContractTest,
     testing::Values(EnvCase{"posix", [] { return std::make_unique<PosixEnvUnderTest>(); }},
-                    EnvCase{"mem", [] { return std::make_unique<MemEnvUnderTest>(); }}),
+                    EnvCase{"mem", [] { return std::make_unique<MemEnvUnderTest>(); }},
+                    EnvCase{"fault", [] { return std::make_unique<FaultEnvUnderTest>(); }}),
     // The parameter is not called `info`: the macro already has one of that name, and GCC's
     // -Wshadow rejects the lambda that hides it.
     [](const testing::TestParamInfo<EnvCase>& param_info) { return param_info.param.name; });
