@@ -33,6 +33,26 @@ class WriteBatch {
   /// Creates an empty batch.
   WriteBatch();
 
+  /// Copies the batch with every operation in it.
+  WriteBatch(const WriteBatch&) = default;
+
+  /// Takes over the operations of `other`, which is left as a valid empty batch, the same as one
+  /// that was just created: it has no operations and can be used again at once, with Put() for
+  /// one. It does not throw.
+  /// @param other the batch to take from.
+  WriteBatch(WriteBatch&& other) noexcept;
+
+  /// Replaces the operations of this batch with a copy of those in `other`.
+  WriteBatch& operator=(const WriteBatch&) = default;
+
+  /// Replaces the operations of this batch with those of `other`, which is left as a valid empty
+  /// batch as it is by the move constructor. It does not throw.
+  /// @param other the batch to take from.
+  WriteBatch& operator=(WriteBatch&& other) noexcept;
+
+  /// Destroys the batch.
+  ~WriteBatch() = default;
+
   /// Adds an operation that sets `key` to `value`. The bytes are copied. Neither may exceed the
   /// limits above, but if one does the entry is accepted here and the write is refused. An entry
   /// too large to encode at all, 4 GiB or more in the key or the value, is not stored, and is not

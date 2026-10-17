@@ -15,6 +15,8 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "io/memtable.h"
@@ -448,6 +450,112 @@ TEST(WriteBatchTest, ClearResets) {
   b.Put("x", "y");
   EXPECT_EQ(b.Count(), 1u);
   EXPECT_EQ(PrintContents(b), "Put(x, y)@0");
+}
+
+// A batch holding the three operations of ThreeOps() plus an oversized key, so that every field a
+// move has to reset is non-zero.
+WriteBatch BatchWithEveryFieldSet() {
+  WriteBatch b = ThreeOps();
+  b.Put(std::string(kMaxKeySize + 1, 'k'), "v");
+  return b;
+}
+
+// Checks that `b` is what a new batch is: a bare header, no operations, nothing to iterate.
+void ExpectValidEmptyBatch(const WriteBatch& b) {
+  EXPECT_EQ(b.Count(), 0u);
+  EXPECT_EQ(b.ApproximateSize(), 12u);
+  EXPECT_EQ(WriteBatchInternal::ByteSize(&b), 12u);
+  EXPECT_EQ(WriteBatchInternal::Sequence(&b), 0u);
+  EXPECT_EQ(WriteBatchInternal::PayloadBytes(&b), 0u);
+  EXPECT_FALSE(WriteBatchInternal::HasOversizedEntry(&b));
+  Recorder recorder;
+  EXPECT_TRUE(b.Iterate(&recorder).ok());
+  EXPECT_TRUE(recorder.calls.empty());
+  EXPECT_EQ(PrintContents(b), "");
+}
+
+// The moves must not throw: a std::vector of batches relocates them with a move only if it cannot.
+static_assert(std::is_nothrow_move_constructible_v<WriteBatch>);
+static_assert(std::is_nothrow_move_assignable_v<WriteBatch>);
+
+TEST(WriteBatchTest, MovedFromBatchIsAValidEmptyBatch) {
+  WriteBatch from = BatchWithEveryFieldSet();
+  const WriteBatch to(std::move(from));
+  static_cast<void>(to);
+  ExpectValidEmptyBatch(from);
+}
+
+TEST(WriteBatchTest, MovedFromBatchCanBeReused) {
+  WriteBatch from = BatchWithEveryFieldSet();
+  const WriteBatch to(std::move(from));
+  static_cast<void>(to);
+  from.Put("x", "y");
+  EXPECT_EQ(from.Count(), 1u);
+  EXPECT_EQ(PrintContents(from), "Put(x, y)@0");
+}
+
+TEST(WriteBatchTest, MoveConstructedBatchHoldsTheOriginalContents) {
+  WriteBatch from = BatchWithEveryFieldSet();
+  const std::string bytes(WriteBatchInternal::Contents(&from));
+  const uint64_t payload = WriteBatchInternal::PayloadBytes(&from);
+  ASSERT_GT(payload, 0u);
+  const std::string printed = PrintContents(from);
+
+  const WriteBatch to(std::move(from));
+  EXPECT_EQ(WriteBatchInternal::Contents(&to), bytes);
+  EXPECT_EQ(to.Count(), 4u);
+  EXPECT_EQ(WriteBatchInternal::Sequence(&to), 200u);
+  EXPECT_EQ(WriteBatchInternal::PayloadBytes(&to), payload);
+  EXPECT_TRUE(WriteBatchInternal::HasOversizedEntry(&to));
+  EXPECT_EQ(PrintContents(to), printed);
+}
+
+TEST(WriteBatchTest, MoveAssignedFromBatchIsAValidEmptyBatch) {
+  WriteBatch from = BatchWithEveryFieldSet();
+  WriteBatch to;
+  to.Put("old", "contents");
+  to = std::move(from);
+  ExpectValidEmptyBatch(from);
+}
+
+TEST(WriteBatchTest, MoveAssignedFromBatchCanBeReused) {
+  WriteBatch from = BatchWithEveryFieldSet();
+  WriteBatch to;
+  to = std::move(from);
+  from.Put("x", "y");
+  EXPECT_EQ(from.Count(), 1u);
+  EXPECT_EQ(PrintContents(from), "Put(x, y)@0");
+}
+
+TEST(WriteBatchTest, MoveAssignedBatchReplacesWhatItHeldWithTheOriginalContents) {
+  WriteBatch from = BatchWithEveryFieldSet();
+  const std::string bytes(WriteBatchInternal::Contents(&from));
+  const uint64_t payload = WriteBatchInternal::PayloadBytes(&from);
+  const std::string printed = PrintContents(from);
+
+  WriteBatch to;
+  to.Put("old", "contents");
+  to = std::move(from);
+  EXPECT_EQ(WriteBatchInternal::Contents(&to), bytes);
+  EXPECT_EQ(to.Count(), 4u);
+  EXPECT_EQ(WriteBatchInternal::Sequence(&to), 200u);
+  EXPECT_EQ(WriteBatchInternal::PayloadBytes(&to), payload);
+  EXPECT_TRUE(WriteBatchInternal::HasOversizedEntry(&to));
+  EXPECT_EQ(PrintContents(to), printed);
+}
+
+TEST(WriteBatchTest, CopiesStayIndependent) {
+  WriteBatch original = ThreeOps();
+  WriteBatch copy(original);
+  copy.Put("extra", "op");
+  EXPECT_EQ(original.Count(), 3u);
+  EXPECT_EQ(copy.Count(), 4u);
+
+  WriteBatch assigned;
+  assigned = original;
+  assigned.Delete("extra");
+  EXPECT_EQ(original.Count(), 3u);
+  EXPECT_EQ(assigned.Count(), 4u);
 }
 
 TEST(WriteBatchTest, ApproximateSizeGrowsWithEveryOperation) {

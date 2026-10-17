@@ -5,6 +5,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "io/memtable.h"
 #include "io/write_batch_internal.h"
@@ -71,6 +72,31 @@ WriteBatch::Handler::~Handler() = default;
 
 WriteBatch::WriteBatch() { Clear(); }
 
+// A moved-from batch must still hold a header, since Count() and Sequence() read one without
+// checking, and the implicit move leaves rep_ as an empty string. Clearing it afterwards does not
+// allocate in practice: a header fits in the small buffer of a moved-from string, so these stay
+// noexcept, which a std::vector of batches needs to relocate them by moving. The checker follows
+// Clear() into std::string::assign and sees a possible bad_alloc; one at this size would be an
+// allocator that failed on no allocation at all, and ending the process is the right answer to it.
+// NOLINTNEXTLINE(bugprone-exception-escape)
+WriteBatch::WriteBatch(WriteBatch&& other) noexcept
+    : rep_(std::move(other.rep_)),
+      payload_bytes_(other.payload_bytes_),
+      oversized_(other.oversized_) {
+  other.Clear();
+}
+
+// NOLINTNEXTLINE(bugprone-exception-escape): see the move constructor above.
+WriteBatch& WriteBatch::operator=(WriteBatch&& other) noexcept {
+  if (this != &other) {
+    rep_ = std::move(other.rep_);
+    payload_bytes_ = other.payload_bytes_;
+    oversized_ = other.oversized_;
+    other.Clear();
+  }
+  return *this;
+}
+
 void WriteBatch::Clear() {
   rep_.assign(kHeaderSize, '\0');
   payload_bytes_ = 0;
@@ -106,10 +132,12 @@ void WriteBatch::Delete(std::string_view key) {
 
 Status WriteBatch::Iterate(Handler* handler) const {
   std::string_view input(rep_);
-  // Unreachable today: rep_ always holds a header, because the constructor, Clear() and
-  // SetContents() all see to it. It stays because the header is read without further checks below
-  // and in Count(), and a change that broke the rule should get a Status here instead of a read
-  // past the end.
+  // Unreachable through the public interface: rep_ always holds a header, because the constructor,
+  // the move operations (which leave the moved-from batch cleared), Clear() and SetContents() all
+  // see to it, and copying carries the header along. Nothing a caller can do reaches it, not even
+  // using a batch after it was moved from. It stays because the header is read without further
+  // checks below and in Count(), and a change that broke the rule should get a Status here
+  // instead of a read past the end.
   if (input.size() < kHeaderSize) {
     return Status::Corruption("malformed WriteBatch (too small)");
   }
