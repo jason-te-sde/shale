@@ -241,9 +241,10 @@ class VersionSet {
   // On success the new MANIFEST is the open one and the earlier one is closed.
   Status OpenNewManifest(uint64_t number, const VersionEdit& snapshot);
 
-  // Whether CURRENT may be naming MANIFEST `number`, for after a switch to it failed: false only if
-  // CURRENT is seen to name something else, or to be absent.
-  bool CurrentMayNameManifest(uint64_t number);
+  // Whether CURRENT may be naming the MANIFEST that a switch was making, for after the switch
+  // failed: false only if CURRENT is seen to be absent, or to name the MANIFEST that was open
+  // before. A read of CURRENT that is neither of these, unreadable or wrong, leaves it that it may.
+  bool CurrentMayNameNewManifest();
 
   // Makes `state` the current version, and remembers the version for LiveFiles().
   void Install(VersionState state);

@@ -681,6 +681,32 @@ TEST_F(VersionSetTest, FailedSwitchWithUnreadableCurrentKeepsTheNewManifest) {
       versions->LogAndApply(AddFile(0, Meta(versions->NewFileNumber(), "c", "d"))).IsIOError());
 }
 
+TEST_F(VersionSetTest, FailedSwitchWithMisreadCurrentKeepsTheNewManifest) {
+  // A read that works is not always right: CURRENT has no checksum, so one that comes back with a
+  // bit flipped is one that names, as far as the read can tell, neither MANIFEST. That the rename
+  // went through, and that CURRENT names the new file, is not undone by it. Deleting the new file
+  // on that evidence leaves CURRENT naming nothing, and the database cannot be opened again; the
+  // new file may only be deleted when CURRENT is seen to name the old one.
+  const auto versions = NewVersionSet();
+  ASSERT_OK(versions->CreateNew());
+  const uint64_t file = versions->NewFileNumber();
+  env_.FailOpAfter(Op::kSyncDir, 1);  // the one that follows the rename
+  env_.SetReadCorruptionProbability(1.0);
+  const Status s = versions->WriteNewManifest(AddFile(0, Meta(file, "a", "b")));
+  env_.ClearFaults();
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+
+  const std::string current = CurrentContents();
+  EXPECT_NE(current, "MANIFEST-000001\n") << "the rename went through";
+  EXPECT_EQ(DbFiles().size(), 3u) << "CURRENT, the old MANIFEST and the new one";
+  const auto recovered = NewVersionSet();
+  ASSERT_OK(recovered->Recover());
+  EXPECT_EQ(recovered->current()->NumFiles(0), 1) << "the new MANIFEST holds the edit";
+  EXPECT_TRUE(
+      versions->LogAndApply(AddFile(0, Meta(versions->NewFileNumber(), "c", "d"))).IsIOError())
+      << "and the version set has stopped, as after any failed switch";
+}
+
 TEST_F(VersionSetTest, CurrentWithoutNewlineIsCorruption) {
   const auto versions = NewVersionSet();
   ASSERT_OK(versions->CreateNew());

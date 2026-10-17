@@ -260,7 +260,7 @@ Status VersionSet::OpenNewManifest(uint64_t number, const VersionEdit& snapshot)
     writer.reset();
     static_cast<void>(file->Close());
     file.reset();
-    if (CurrentMayNameManifest(number)) {
+    if (CurrentMayNameNewManifest()) {
       // The rename happened, and the directory sync that failed was what would have made it
       // durable, so CURRENT names this file now and may after a crash, or it names the old one.
       // Both files are kept, and nothing more is written to either until a switch succeeds.
@@ -284,7 +284,7 @@ Status VersionSet::OpenNewManifest(uint64_t number, const VersionEdit& snapshot)
   return Status::OK();
 }
 
-bool VersionSet::CurrentMayNameManifest(uint64_t number) {
+bool VersionSet::CurrentMayNameNewManifest() {
   const std::string current_name = CurrentFileName(dbname_);
   if (!env_->FileExists(current_name)) {
     return false;
@@ -293,8 +293,16 @@ bool VersionSet::CurrentMayNameManifest(uint64_t number) {
   if (!ReadFileToString(env_, current_name, &contents).ok()) {
     return true;  // not known, and deleting the file that CURRENT names would be the worst answer
   }
-  const std::string manifest = DescriptorFileName(dbname_, number);
-  return contents == manifest.substr(dbname_.size() + 1) + "\n";
+  // Only what proves that the rename did not happen lets the new file go: CURRENT is read to be
+  // the MANIFEST that was open before it. A read that matches nothing is not proof of that, since
+  // CURRENT has no checksum and a read can come back wrong, and what the rename that went through
+  // made of it cannot be undone by a read that is wrong: the new file stays, and a later sweep
+  // deletes it if CURRENT turns out not to name it.
+  if (manifest_file_number_ != 0) {
+    const std::string previous = DescriptorFileName(dbname_, manifest_file_number_);
+    return contents != previous.substr(dbname_.size() + 1) + "\n";
+  }
+  return true;
 }
 
 void VersionSet::Install(VersionState state) {
