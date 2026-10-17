@@ -4,12 +4,26 @@
 // Helpers shared by the tests of every layer. They live in the shale_testkit library, which only
 // test targets link.
 
+#include <gtest/gtest.h>
+
 #include <cstddef>
 #include <string>
+
+#include "shale/status.h"
 
 namespace shale {
 
 class Random;
+
+/// Succeeds if `s` is OK. Otherwise fails with the text of `s`, so that a test that checks a Status
+/// reports what went wrong and not just that something did. Use it through ASSERT_OK / EXPECT_OK.
+testing::AssertionResult IsOk(const Status& s);
+
+/// Fails the test, and returns from the test body, unless the Status expression `expr` is OK.
+#define ASSERT_OK(expr) ASSERT_TRUE(::shale::IsOk(expr))
+
+/// Fails the test, and carries on, unless the Status expression `expr` is OK.
+#define EXPECT_OK(expr) EXPECT_TRUE(::shale::IsOk(expr))
 
 /// Returns `len` bytes drawn from `*rnd`, each a printable ASCII character (0x20 through 0x7e).
 std::string RandomString(Random* rnd, size_t len);

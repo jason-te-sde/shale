@@ -44,14 +44,22 @@ Status PosixError(std::string_view operation, const std::string& path, int error
 // On Linux fdatasync flushes the data and the metadata needed to read it back, such as the file
 // size, and skips the timestamps. On macOS neither fsync nor fdatasync asks the drive to empty its
 // write cache, so a power failure can lose data that was reported as synced; F_FULLFSYNC does ask.
-// It is not supported on every file system, such as some network mounts, and then plain fsync is
-// the best there is. A directory has no data to separate from its metadata, so it takes fsync.
+// A directory has no data to separate from its metadata, so it takes fsync on Linux.
+//
+// On failure it returns -1 with errno describing the failure, for the caller to report.
 int SyncDescriptor(int fd, [[maybe_unused]] bool is_directory) {
 #if defined(__APPLE__) && defined(F_FULLFSYNC)
   if (::fcntl(fd, F_FULLFSYNC) == 0) {
     return 0;
   }
-  return ::fsync(fd);
+  // F_FULLFSYNC is not implemented by every file system, such as some network and FUSE mounts, and
+  // those refuse it with one of these errors. Plain fsync is then the best there is. Any other
+  // error, EIO above all, means the sync itself failed, and falling back would let fsync report
+  // success for data that never reached the disk: it is returned as it is.
+  if (errno == ENOTSUP || errno == EOPNOTSUPP || errno == ENOTTY || errno == EINVAL) {
+    return ::fsync(fd);
+  }
+  return -1;
 #elif defined(__linux__)
   return is_directory ? ::fsync(fd) : ::fdatasync(fd);
 #else
@@ -94,7 +102,7 @@ class PosixSequentialFile final : public SequentialFile {
   Status Skip(uint64_t n) override {
     const ExclusiveUse::Scope scope(&use_, fname_);
     if (n > kMaxFileOffset) {
-      return Status::InvalidArgument("skip is larger than any file offset: " + fname_);
+      return Status::IOError("skip in " + fname_, "offset is larger than any file offset");
     }
     if (::lseek(fd_, static_cast<off_t>(n), SEEK_CUR) == static_cast<off_t>(-1)) {
       return PosixError("skip in", fname_, errno);
@@ -464,7 +472,9 @@ class PosixEnv final : public Env {
 
 Env* Env::Default() {
   // The one object of static storage duration the engine has. It holds no state, so there is
-  // nothing to race on and nothing to order against other destructors at exit.
+  // nothing to race on. It is destroyed at exit like any function-local static, so a static object
+  // elsewhere that is destroyed later and calls Env::Default() from its destructor would reach a
+  // destroyed object; nothing in the engine does.
   static PosixEnv env;
   return &env;
 }

@@ -25,16 +25,6 @@
 namespace shale {
 namespace {
 
-testing::AssertionResult IsOk(const Status& s) {
-  if (s.ok()) {
-    return testing::AssertionSuccess();
-  }
-  return testing::AssertionFailure() << s.ToString();
-}
-
-#define ASSERT_OK(expr) ASSERT_TRUE(IsOk(expr))
-#define EXPECT_OK(expr) EXPECT_TRUE(IsOk(expr))
-
 // An Env together with a fresh, empty directory to work in. The directory disappears with the
 // object, so a test never sees what an earlier one left behind.
 class EnvUnderTest {
@@ -449,6 +439,57 @@ TEST_P(EnvContractTest, DroppingALockReleasesIt) {
   std::unique_ptr<FileLock> second;
   ASSERT_OK(env_->LockFile(lock_path, &second));
   ASSERT_OK(env_->UnlockFile(std::move(second)));
+}
+
+TEST_P(EnvContractTest, LockFileCreatesTheFile) {
+  std::unique_ptr<FileLock> lock;
+  ASSERT_OK(env_->LockFile(Path("LOCK"), &lock));
+  EXPECT_TRUE(env_->FileExists(Path("LOCK")));
+  ASSERT_OK(env_->UnlockFile(std::move(lock)));
+  EXPECT_TRUE(env_->FileExists(Path("LOCK"))) << "unlocking leaves the lock file in place";
+}
+
+// A file that is removed or replaced lives on, nameless, for as long as a handle is open on it.
+TEST_P(EnvContractTest, RemovedFileStaysReadableThroughOpenHandle) {
+  WriteFile("f", "hello world");
+  std::unique_ptr<SequentialFile> sequential;
+  std::unique_ptr<RandomAccessFile> random_access;
+  ASSERT_OK(env_->NewSequentialFile(Path("f"), &sequential));
+  ASSERT_OK(env_->NewRandomAccessFile(Path("f"), &random_access));
+
+  ASSERT_OK(env_->RemoveFile(Path("f")));
+  EXPECT_FALSE(env_->FileExists(Path("f")));
+
+  char scratch[100];
+  std::string_view result;
+  ASSERT_OK(sequential->Read(5, &result, scratch));
+  EXPECT_EQ(result, "hello");
+  ASSERT_OK(random_access->Read(6, 5, &result, scratch));
+  EXPECT_EQ(result, "world");
+}
+
+TEST_P(EnvContractTest, RemovedFileDoesNotComeBackWhenItsWriterContinues) {
+  std::unique_ptr<WritableFile> writer;
+  ASSERT_OK(env_->NewWritableFile(Path("f"), &writer));
+  ASSERT_OK(writer->Append("one"));
+  ASSERT_OK(env_->RemoveFile(Path("f")));
+  ASSERT_OK(writer->Append("two"));
+  ASSERT_OK(writer->Close());
+  EXPECT_FALSE(env_->FileExists(Path("f")));
+}
+
+TEST_P(EnvContractTest, ARecreatedFileIsNotTheOldOne) {
+  WriteFile("f", "first");
+  std::unique_ptr<RandomAccessFile> old_reader;
+  ASSERT_OK(env_->NewRandomAccessFile(Path("f"), &old_reader));
+  ASSERT_OK(env_->RemoveFile(Path("f")));
+  WriteFile("f", "second");
+
+  char scratch[100];
+  std::string_view result;
+  ASSERT_OK(old_reader->Read(0, 100, &result, scratch));
+  EXPECT_EQ(result, "first");
+  EXPECT_EQ(ReadFile("f"), "second");
 }
 
 TEST_P(EnvContractTest, SleepAdvancesClock) {

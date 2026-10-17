@@ -13,6 +13,13 @@
 
 namespace shale {
 
+testing::AssertionResult IsOk(const Status& s) {
+  if (s.ok()) {
+    return testing::AssertionSuccess();
+  }
+  return testing::AssertionFailure() << s.ToString();
+}
+
 std::string RandomString(Random* rnd, size_t len) {
   std::string result(len, '\0');
   for (char& c : result) {

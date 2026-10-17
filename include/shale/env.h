@@ -67,6 +67,13 @@ class RandomAccessFile {
 ///
 /// A handle is used by one thread at a time, as for SequentialFile. Any call after Close(),
 /// including a second Close(), is a bug in the caller and aborts the process.
+///
+/// After Append(), Flush() or Sync() returns an error, the only call that is valid is Close(), and
+/// what the file holds is unspecified: some of the appended bytes, in order, may have reached it
+/// and the rest not. Retrying is not safe either. Some operating systems report success from a
+/// second fsync() of data that the first one failed to write and then dropped, so a Sync() that
+/// succeeds after a failed one proves nothing. A caller that needs the bytes writes them again to a
+/// new file.
 class WritableFile {
  public:
   /// Releases the handle. It does not flush: see the class description.
@@ -211,6 +218,15 @@ class Env {
 /// - It is safe to use from any number of threads. An open handle keeps its file alive on its own,
 ///   so a file that was removed or replaced stays readable through the handles that were open on
 ///   it, as on POSIX, and a handle may outlive the Env that made it.
+///
+/// It differs from POSIX in these ways, besides what is said above:
+/// - CreateDir() succeeds when the parent directory does not exist.
+/// - The root `/` does not exist as a directory until CreateDir("/") is called, so
+///   GetChildren("/") fails before that.
+/// - A lock belongs to a path name, not to a file. It survives RemoveFile() and RenameFile() of the
+///   locked file and stays on the name, where a POSIX lock would follow the file.
+/// - RemoveFile() of a directory reports "No such file or directory", and RenameFile() moves files
+///   only, not directories.
 std::unique_ptr<Env> NewMemEnv();
 
 }  // namespace shale

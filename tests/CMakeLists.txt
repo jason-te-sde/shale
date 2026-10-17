@@ -44,7 +44,7 @@ shale_add_test(filename SOURCES util/filename_test.cc LIBS shale_util)
 shale_add_test(env_contract SOURCES io/env_contract_test.cc LIBS shale_io shale_testkit)
 shale_add_test(env_posix SOURCES io/env_posix_test.cc LIBS shale_io shale_testkit)
 shale_add_test(exclusive_use SOURCES io/exclusive_use_test.cc LIBS shale_io)
-shale_add_test(mem_env SOURCES io/mem_env_test.cc LIBS shale_io)
+shale_add_test(mem_env SOURCES io/mem_env_test.cc LIBS shale_io shale_testkit)
 
 # Clang's thread-safety analysis is what makes SHALE_GUARDED_BY more than a comment, and nothing
 # else would notice if it silently stopped working. So the build itself is tested: one translation

@@ -2,27 +2,61 @@
 // behaviour every Env shares is in env_contract_test.
 
 #include <gtest/gtest.h>
+#include <signal.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
+#include "io/env_util.h"
 #include "shale/env.h"
 #include "shale/status.h"
 #include "testkit/test_util.h"
+#include "util/random.h"
 
 namespace shale {
 namespace {
 
-testing::AssertionResult IsOk(const Status& s) {
-  if (s.ok()) {
-    return testing::AssertionSuccess();
-  }
-  return testing::AssertionFailure() << s.ToString();
-}
+void IgnoreSignal(int) {}
 
-#define ASSERT_OK(expr) ASSERT_TRUE(IsOk(expr))
+// Caps the size of any file this process writes, so that a write which crosses the cap is cut
+// short: write() stores the bytes up to the cap and returns that count, and the next write fails
+// with EFBIG. That is a deterministic partial write followed by a deterministic error, on macOS and
+// on Linux, with no fault-injection hook in the code under test. Crossing the cap raises SIGXFSZ,
+// whose default action kills the process, so the signal is caught and dropped for as long as the
+// cap is in force.
+//
+// The cap applies to the whole process, gtest's own output included, so a test keeps it in force
+// only around the calls it means to cut short and checks the results after it is lifted.
+class ScopedFileSizeLimit {
+ public:
+  explicit ScopedFileSizeLimit(rlim_t bytes) {
+    struct sigaction ignore{};
+    ignore.sa_handler = &IgnoreSignal;
+    sigemptyset(&ignore.sa_mask);
+    EXPECT_EQ(sigaction(SIGXFSZ, &ignore, &saved_action_), 0);
+    EXPECT_EQ(getrlimit(RLIMIT_FSIZE, &saved_limit_), 0);
+    struct rlimit capped = saved_limit_;
+    capped.rlim_cur = bytes;
+    EXPECT_EQ(setrlimit(RLIMIT_FSIZE, &capped), 0);
+  }
+
+  ScopedFileSizeLimit(const ScopedFileSizeLimit&) = delete;
+  ScopedFileSizeLimit& operator=(const ScopedFileSizeLimit&) = delete;
+
+  ~ScopedFileSizeLimit() {
+    // Only the soft limit was lowered, so it can be raised back.
+    EXPECT_EQ(setrlimit(RLIMIT_FSIZE, &saved_limit_), 0);
+    EXPECT_EQ(sigaction(SIGXFSZ, &saved_action_, nullptr), 0);
+  }
+
+ private:
+  struct rlimit saved_limit_{};
+  struct sigaction saved_action_{};
+};
 
 TEST(PosixEnvTest, DefaultIsSingleton) {
   ASSERT_NE(Env::Default(), nullptr);
@@ -87,7 +121,116 @@ TEST(PosixEnvTest, AppendsStayInUserSpaceUntilFlushed) {
   ASSERT_OK(writer->Flush());
   ASSERT_OK(env->GetFileSize(path, &size));
   EXPECT_EQ(size, 3u);
+
+  // The buffer holds 64 KiB. Two appends of 40000 bytes do not both fit, so the second one first
+  // hands the 40000 buffered bytes to the OS to keep the order, and then waits in the buffer
+  // itself.
+  const std::string chunk(40000, 'x');
+  ASSERT_OK(writer->Append(chunk));
+  ASSERT_OK(env->GetFileSize(path, &size));
+  EXPECT_EQ(size, 3u) << "an append that fits in the buffer must not be written yet";
+  ASSERT_OK(writer->Append(chunk));
+  ASSERT_OK(env->GetFileSize(path, &size));
+  EXPECT_EQ(size, 3u + 40000u) << "an append that does not fit must flush the buffer before it";
   ASSERT_OK(writer->Close());
+  ASSERT_OK(env->GetFileSize(path, &size));
+  EXPECT_EQ(size, 3u + 80000u);
+
+  static_cast<void>(env->RemoveFile(path));
+  static_cast<void>(env->RemoveDir(dir));
+}
+
+TEST(PosixEnvTest, FlushAfterAPartialWriteDoesNotRepeatBytesThatReachedTheFile) {
+  // The flush is cut short after 1000 of 2000 bytes. The 1000 that reached the file must leave the
+  // buffer, or the Close that follows writes them a second time.
+  constexpr uint64_t kLimit = 1000;
+  Env* env = Env::Default();
+  const std::string dir = NewTempDir("shale_env_posix_");
+  const std::string path = dir + "/f";
+  Random rnd(401);
+  const std::string data = RandomBinaryString(&rnd, 2000);
+  std::unique_ptr<WritableFile> writer;
+  ASSERT_OK(env->NewWritableFile(path, &writer));
+  ASSERT_OK(writer->Append(data)) << "2000 bytes fit in the buffer, so nothing is written yet";
+
+  Status flush;
+  Status size_status;
+  uint64_t size_after_failure = 0;
+  {
+    const ScopedFileSizeLimit limit(kLimit);
+    flush = writer->Flush();
+    size_status = env->GetFileSize(path, &size_after_failure);
+  }
+  EXPECT_TRUE(flush.IsIOError()) << flush.ToString();
+  EXPECT_NE(flush.ToString().find(path), std::string::npos) << flush.ToString();
+  ASSERT_OK(size_status);
+  ASSERT_EQ(size_after_failure, kLimit)
+      << "the size cap did not cut the write short, so the partial-write path was not reached";
+
+  ASSERT_OK(writer->Close());
+  std::string contents;
+  ASSERT_OK(ReadFileToString(env, path, &contents));
+  EXPECT_EQ(contents.size(), data.size()) << "bytes were repeated or lost after the partial write";
+  EXPECT_TRUE(contents == data) << "the file is not what was appended";
+
+  static_cast<void>(env->RemoveFile(path));
+  static_cast<void>(env->RemoveDir(dir));
+}
+
+TEST(PosixEnvTest, AppendOfAWholeBufferCutShortKeepsWhatReachedTheFileInOrder) {
+  // The same cut, on the branch that writes a large append straight to the file. The small append
+  // before it is flushed first and fits under the cap; the large one is cut after 700 bytes. What
+  // is in the file is then a prefix of everything appended, in order, with nothing repeated, and
+  // closing the file adds nothing.
+  constexpr uint64_t kLimit = 1000;
+  Env* env = Env::Default();
+  const std::string dir = NewTempDir("shale_env_posix_");
+  const std::string path = dir + "/f";
+  Random rnd(402);
+  const std::string small = RandomBinaryString(&rnd, 300);
+  const std::string large = RandomBinaryString(&rnd, 70000);
+  std::unique_ptr<WritableFile> writer;
+  ASSERT_OK(env->NewWritableFile(path, &writer));
+  ASSERT_OK(writer->Append(small));
+
+  Status append;
+  Status size_status;
+  uint64_t size_after_failure = 0;
+  {
+    const ScopedFileSizeLimit limit(kLimit);
+    append = writer->Append(large);
+    size_status = env->GetFileSize(path, &size_after_failure);
+  }
+  EXPECT_TRUE(append.IsIOError()) << append.ToString();
+  EXPECT_NE(append.ToString().find(path), std::string::npos) << append.ToString();
+  ASSERT_OK(size_status);
+  ASSERT_EQ(size_after_failure, kLimit)
+      << "the size cap did not cut the write short, so the partial-write path was not reached";
+
+  ASSERT_OK(writer->Close());
+  std::string contents;
+  ASSERT_OK(ReadFileToString(env, path, &contents));
+  const std::string appended = small + large;
+  EXPECT_EQ(contents.size(), kLimit);
+  EXPECT_TRUE(contents == appended.substr(0, kLimit))
+      << "the file is not a prefix of the bytes that were appended";
+
+  static_cast<void>(env->RemoveFile(path));
+  static_cast<void>(env->RemoveDir(dir));
+}
+
+TEST(PosixEnvTest, SkipBeyondAnyFileOffsetIsAnIOErrorNamingThePath) {
+  Env* env = Env::Default();
+  const std::string dir = NewTempDir("shale_env_posix_");
+  const std::string path = dir + "/skip_target";
+  ASSERT_OK(WriteStringToFile(env, "abc", path, /*sync=*/false));
+  std::unique_ptr<SequentialFile> reader;
+  ASSERT_OK(env->NewSequentialFile(path, &reader));
+  // The contract is that every failure is an IOError that names the path.
+  const Status s = reader->Skip(UINT64_MAX);
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+  EXPECT_NE(s.ToString().find("skip_target"), std::string::npos) << s.ToString();
+  reader.reset();
 
   static_cast<void>(env->RemoveFile(path));
   static_cast<void>(env->RemoveDir(dir));
@@ -105,8 +248,9 @@ TEST(PosixEnvTest, NewWritableFileInAMissingDirectoryFails) {
 }
 
 #ifdef __linux__
-// /dev/full accepts the open and fails every write with ENOSPC, which is the only way to reach the
-// write error path without filling a disk. It exists on Linux only.
+// /dev/full accepts the open and fails every write with ENOSPC, which checks the error a full disk
+// gives. It writes nothing before it fails, so it cannot reach the partial-write path; the size cap
+// above does. It exists on Linux only.
 TEST(PosixEnvTest, WriteFailureNamesThePathAndTheCause) {
   Env* env = Env::Default();
   ASSERT_TRUE(env->FileExists("/dev/full")) << "this test needs /dev/full";

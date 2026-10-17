@@ -16,19 +16,10 @@
 #include "io/env_util.h"
 #include "shale/env.h"
 #include "shale/status.h"
+#include "testkit/test_util.h"
 
 namespace shale {
 namespace {
-
-testing::AssertionResult IsOk(const Status& s) {
-  if (s.ok()) {
-    return testing::AssertionSuccess();
-  }
-  return testing::AssertionFailure() << s.ToString();
-}
-
-#define ASSERT_OK(expr) ASSERT_TRUE(IsOk(expr))
-#define EXPECT_OK(expr) EXPECT_TRUE(IsOk(expr))
 
 std::string ReadAll(Env* env, const std::string& path) {
   std::string contents;
@@ -84,32 +75,6 @@ TEST(MemEnvTest, RemovedFileStaysReadableThroughOpenHandle) {
   EXPECT_EQ(result, "world");
 }
 
-TEST(MemEnvTest, RemovedFileDoesNotComeBackWhenItsWriterContinues) {
-  const std::unique_ptr<Env> env = NewMemEnv();
-  std::unique_ptr<WritableFile> writer;
-  ASSERT_OK(env->NewWritableFile("/f", &writer));
-  ASSERT_OK(writer->Append("one"));
-  ASSERT_OK(env->RemoveFile("/f"));
-  ASSERT_OK(writer->Append("two"));
-  ASSERT_OK(writer->Close());
-  EXPECT_FALSE(env->FileExists("/f"));
-}
-
-TEST(MemEnvTest, ARecreatedFileIsNotTheOldOne) {
-  const std::unique_ptr<Env> env = NewMemEnv();
-  ASSERT_OK(WriteStringToFile(env.get(), "first", "/f", /*sync=*/false));
-  std::unique_ptr<RandomAccessFile> old_reader;
-  ASSERT_OK(env->NewRandomAccessFile("/f", &old_reader));
-  ASSERT_OK(env->RemoveFile("/f"));
-  ASSERT_OK(WriteStringToFile(env.get(), "second", "/f", /*sync=*/false));
-
-  char scratch[100];
-  std::string_view result;
-  ASSERT_OK(old_reader->Read(0, 100, &result, scratch));
-  EXPECT_EQ(result, "first");
-  EXPECT_EQ(ReadAll(env.get(), "/f"), "second");
-}
-
 TEST(MemEnvTest, HandlesOutliveTheEnv) {
   std::unique_ptr<Env> env = NewMemEnv();
   ASSERT_OK(env->CreateDir("/d"));
@@ -158,16 +123,6 @@ TEST(MemEnvTest, SeparateEnvsDoNotShareLocksOrClocks) {
   ASSERT_OK(b->UnlockFile(std::move(lock_b)));
 }
 
-TEST(MemEnvTest, LockFileCreatesTheFile) {
-  const std::unique_ptr<Env> env = NewMemEnv();
-  ASSERT_OK(env->CreateDir("/db"));
-  std::unique_ptr<FileLock> lock;
-  ASSERT_OK(env->LockFile("/db/LOCK", &lock));
-  EXPECT_TRUE(env->FileExists("/db/LOCK"));
-  ASSERT_OK(env->UnlockFile(std::move(lock)));
-  EXPECT_TRUE(env->FileExists("/db/LOCK")) << "unlocking leaves the lock file, as on POSIX";
-}
-
 TEST(MemEnvTest, AFileNeedsNoDirectory) {
   // The namespace is flat: a path is a key, and the directory in it is not looked up. Directories
   // matter only to the calls that list, remove or sync them.
@@ -201,6 +156,54 @@ TEST(MemEnvTest, ADirectoryNameIsNotListedForAFileWithAPrefixOfIt) {
   std::vector<std::string> children;
   ASSERT_OK(env->GetChildren("/d", &children));
   EXPECT_EQ(children, std::vector<std::string>{"a"});
+}
+
+TEST(MemEnvTest, CreateDirSucceedsWithAMissingParent) {
+  const std::unique_ptr<Env> env = NewMemEnv();
+  ASSERT_OK(env->CreateDir("/no/such/parent/child"));
+  EXPECT_TRUE(env->FileExists("/no/such/parent/child"));
+  EXPECT_FALSE(env->FileExists("/no/such/parent")) << "creating a directory creates only it";
+}
+
+TEST(MemEnvTest, TheRootDoesNotExistUntilItIsCreated) {
+  const std::unique_ptr<Env> env = NewMemEnv();
+  ASSERT_OK(WriteStringToFile(env.get(), "x", "/f", /*sync=*/false));
+  std::vector<std::string> children;
+  EXPECT_FALSE(env->GetChildren("/", &children).ok());
+  ASSERT_OK(env->CreateDir("/"));
+  ASSERT_OK(env->GetChildren("/", &children));
+  EXPECT_EQ(children, std::vector<std::string>{"f"});
+}
+
+TEST(MemEnvTest, ALockStaysOnItsNameWhenTheFileIsRemovedOrRenamed) {
+  const std::unique_ptr<Env> env = NewMemEnv();
+  std::unique_ptr<FileLock> lock;
+  ASSERT_OK(env->LockFile("/LOCK", &lock));
+  std::unique_ptr<FileLock> other;
+
+  ASSERT_OK(env->RenameFile("/LOCK", "/moved"));
+  EXPECT_FALSE(env->LockFile("/LOCK", &other).ok()) << "the lock belongs to the name, not the file";
+  ASSERT_OK(env->LockFile("/moved", &other)) << "the renamed file is not locked under its new name";
+  ASSERT_OK(env->UnlockFile(std::move(other)));
+
+  ASSERT_OK(env->RemoveFile("/moved"));
+  EXPECT_FALSE(env->LockFile("/LOCK", &other).ok())
+      << "removing the file does not release the lock";
+  ASSERT_OK(env->UnlockFile(std::move(lock)));
+  ASSERT_OK(env->LockFile("/LOCK", &other));
+  ASSERT_OK(env->UnlockFile(std::move(other)));
+}
+
+TEST(MemEnvTest, RemoveFileOfADirectoryAndRenameOfADirectoryReportNoSuchFile) {
+  const std::unique_ptr<Env> env = NewMemEnv();
+  ASSERT_OK(env->CreateDir("/d"));
+  const Status removed = env->RemoveFile("/d");
+  EXPECT_TRUE(removed.IsIOError()) << removed.ToString();
+  EXPECT_NE(removed.ToString().find("No such file"), std::string::npos) << removed.ToString();
+  const Status renamed = env->RenameFile("/d", "/e");
+  EXPECT_TRUE(renamed.IsIOError()) << renamed.ToString();
+  EXPECT_NE(renamed.ToString().find("No such file"), std::string::npos) << renamed.ToString();
+  EXPECT_TRUE(env->FileExists("/d")) << "the refused calls must leave the directory alone";
 }
 
 TEST(MemEnvTest, ConcurrentAppendsToDifferentFiles) {
@@ -265,12 +268,17 @@ TEST(MemEnvTest, ConcurrentReadsOfOneFileAgree) {
       }
     });
   }
-  for (int i = 0; i < 500; i++) {
-    ASSERT_OK(writer->Append("more"));
+  // No assertion while the readers are joinable: a failed ASSERT returns from the test, and
+  // destroying a joinable std::thread terminates the process. The first failure is kept and
+  // checked after the join.
+  Status append_status;
+  for (int i = 0; i < 500 && append_status.ok(); i++) {
+    append_status = writer->Append("more");
   }
   for (std::thread& thread : threads) {
     thread.join();
   }
+  ASSERT_OK(append_status);
   ASSERT_OK(writer->Close());
   EXPECT_EQ(reads.load(), 8 * 500) << "the readers did not all run";
   EXPECT_EQ(mismatches.load(), 0);
