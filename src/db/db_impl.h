@@ -43,6 +43,12 @@
 namespace shale {
 
 /// What the database has done, counted, for tests to look at and for the properties that report it.
+///
+/// `wal_bytes_written` is what the log writer handed to the log file, which is what the log takes
+/// on disk: each record with its headers, and the zeros that fill the end of a block. It is what
+/// was written, and not what was acknowledged: a group whose sync failed counts, since its bytes
+/// are in the file, and so does the part of a record that went in before an append failed. The
+/// write amplification is built on it, as the bytes that writing costs the disk.
 struct DBCounters {
   uint64_t flushes = 0;                   ///< Memtables written out as level 0 tables.
   uint64_t compactions = 0;               ///< Compactions that merged files.
@@ -50,7 +56,7 @@ struct DBCounters {
   uint64_t tombstones_dropped = 0;        ///< Deletion entries that a compaction dropped.
   uint64_t shadowed_dropped = 0;          ///< Entries a compaction dropped for a newer one.
   uint64_t user_bytes_written = 0;        ///< Key and value bytes of the writes that were made.
-  uint64_t wal_bytes_written = 0;         ///< Bytes of the records appended to the log.
+  uint64_t wal_bytes_written = 0;         ///< Bytes the log writer handed to the log file.
   uint64_t flush_bytes_written = 0;       ///< Bytes of the tables that flushes wrote.
   uint64_t compaction_bytes_read = 0;     ///< Bytes of the tables that compactions read.
   uint64_t compaction_bytes_written = 0;  ///< Bytes of the tables that compactions wrote.

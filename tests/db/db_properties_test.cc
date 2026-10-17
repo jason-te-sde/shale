@@ -10,10 +10,12 @@
 #include <memory>
 #include <optional>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "core/version_state.h"
@@ -26,6 +28,7 @@
 #include "testkit/test_util.h"
 #include "util/dbformat.h"
 #include "util/filename.h"
+#include "util/random.h"
 
 namespace shale {
 namespace {
@@ -195,28 +198,68 @@ TEST_F(DBPropertiesTest, CountersListEveryFieldInOrder) {
   EXPECT_TRUE(std::regex_match(text, pattern)) << text;
 }
 
-TEST_F(DBPropertiesTest, CountersAreTheDatabaseCounters) {
-  // Every field is made to count something, so that a field that is printed from the wrong member
-  // shows: the writes, a flush, a compaction that drops a deletion and what it shadows, and a stop.
-  Reopen(SmallBuffer());
-  ASSERT_OK(Put("gone", "x"));
+TEST_F(DBPropertiesTest, EveryCounterIsPrintedFromItsOwnMember) {
+  // Every counter is made to count, and to a value of its own: the writes, flushes and compactions
+  // of a database that is also slowed, stopped and moved along by trivial moves, and then an error.
+  // With no two of them equal and none zero, a name printed from the wrong member shows.
+  Options options = SmallBuffer();
+  options.l0_compaction_trigger = 3;
+  options.l0_slowdown_trigger = 2;
+  options.max_bytes_for_level_base = 65536;  // the smallest: a level 1 of 70 KiB is over it
+  Reopen(options);
+  // A deletion and what it hides, and an overwrite: a compaction drops all of it.
+  ASSERT_OK(Put("dead1", "x"));
+  ASSERT_OK(Put("dead2", "y"));
   ASSERT_OK(Put("k", "1"));
   ASSERT_OK(Put("k", "2"));
-  ASSERT_OK(Delete("gone"));
+  ASSERT_OK(Delete("dead1"));
+  ASSERT_OK(Delete("dead2"));
   ASSERT_OK(db_->CompactRange(std::nullopt, std::nullopt));
-  for (int i = 0; i < 60; i++) {
-    ASSERT_OK(Put(UserKey(i), KiB(i), /*sync=*/false));  // fills the memtable: waits, and flushes
+  // Two tables in level 0, which is the slowdown trigger: the writes that follow are slowed.
+  ASSERT_OK(Put("a", "1"));
+  ASSERT_OK(db_->Flush());
+  ASSERT_OK(Put("b", "2"));
+  ASSERT_OK(db_->Flush());
+  ASSERT_OK(Put("c", "3"));
+  ASSERT_OK(Put("d", "4", /*sync=*/false));
+  // Enough to fill the memtable twice with a flush that is not done: the write waits for it.
+  for (int i = 0; i < 40; i++) {
+    ASSERT_OK(Put(UserKey(i), KiB(i), /*sync=*/false));
   }
-  const DBCounters counters = dbfull()->TEST_Counters();
-  ASSERT_GT(counters.flushes, 0u);
-  ASSERT_GT(counters.compactions + counters.trivial_moves, 0u);
-  ASSERT_GT(counters.user_bytes_written, 0u);
-  ASSERT_GT(counters.wal_bytes_written, 0u);
-  ASSERT_GT(counters.flush_bytes_written, 0u);
-  ASSERT_GT(counters.write_groups, 0u);
-  ASSERT_GT(counters.wal_syncs, 0u);
-  ASSERT_GT(counters.write_stops, 0u);
-  EXPECT_EQ(Property("shale.counters"), CountersText(dbfull()->TEST_Counters()));
+  // Level 1 grows over its size, and a table of it moves down whole.
+  for (int i = 0; i < 90; i++) {
+    ASSERT_OK(Put(UserKey(1000 + i), KiB(i), /*sync=*/false));
+  }
+  ASSERT_OK(db_->CompactRange(std::nullopt, std::nullopt));
+  env_->FailOpAfter(Op::kSync, 0);
+  ASSERT_TRUE(Put("lost", "1").IsIOError());
+
+  const DBCounters c = dbfull()->TEST_Counters();
+  const std::vector<std::pair<std::string, uint64_t>> values = {
+      {"flushes", c.flushes},
+      {"compactions", c.compactions},
+      {"trivial_moves", c.trivial_moves},
+      {"tombstones_dropped", c.tombstones_dropped},
+      {"shadowed_dropped", c.shadowed_dropped},
+      {"user_bytes_written", c.user_bytes_written},
+      {"wal_bytes_written", c.wal_bytes_written},
+      {"flush_bytes_written", c.flush_bytes_written},
+      {"compaction_bytes_read", c.compaction_bytes_read},
+      {"compaction_bytes_written", c.compaction_bytes_written},
+      {"write_groups", c.write_groups},
+      {"wal_syncs", c.wal_syncs},
+      {"write_slowdowns", c.write_slowdowns},
+      {"write_stops", c.write_stops},
+      {"bg_errors", c.bg_errors},
+  };
+  std::set<uint64_t> seen;
+  for (const auto& [name, value] : values) {
+    EXPECT_NE(value, 0u) << name << " did not count: the test does not pin it";
+    EXPECT_TRUE(seen.insert(value).second)
+        << name << " = " << value << " is the value of another counter: the test does not pin it\n"
+        << CountersText(c);
+  }
+  EXPECT_EQ(Property("shale.counters"), CountersText(c));
 }
 
 TEST_F(DBPropertiesTest, CountersFollowTheWrites) {
@@ -249,13 +292,32 @@ TEST_F(DBPropertiesTest, WriteAmplificationFormatting) {
 }
 
 TEST_F(DBPropertiesTest, WriteAmplificationIsRoundedToTwoDecimals) {
-  // One put of `u` bytes of key and value is a log record of 15 + u bytes, and nothing else is
-  // written: the ratio is (15 + u) / u.
-  EXPECT_EQ(AmplificationAfterOnePut(31, "a", "b"), "8.50");         // 17 / 2
-  EXPECT_EQ(AmplificationAfterOnePut(32, "ab", "cde"), "4.00");      // 20 / 5
-  EXPECT_EQ(AmplificationAfterOnePut(33, "abc", "defg"), "3.14");    // 22 / 7 = 3.1428
-  EXPECT_EQ(AmplificationAfterOnePut(34, "abcd", "efghi"), "2.67");  // 24 / 9 = 2.6666
-  EXPECT_EQ(AmplificationAfterOnePut(35, "", ""), "0.00") << "a put of no bytes: no ratio";
+  // One put of `u` bytes of key and value is a record of 15 + u bytes and a log header of 7 on
+  // it, and nothing else is written: the ratio is (22 + u) / u.
+  EXPECT_EQ(AmplificationAfterOnePut(31, "a", "b"), "12.00");            // 24 / 2
+  EXPECT_EQ(AmplificationAfterOnePut(32, "a", "bc"), "8.33");            // 25 / 3 = 8.3333
+  EXPECT_EQ(AmplificationAfterOnePut(33, "ab", "cdef"), "4.67");         // 28 / 6 = 4.6666
+  EXPECT_EQ(AmplificationAfterOnePut(34, "abc", "defg"), "4.14");        // 29 / 7 = 4.1428
+  EXPECT_EQ(AmplificationAfterOnePut(35, "abcdef", "ghijklm"), "2.69");  // 35 / 13 = 2.6923
+  EXPECT_EQ(AmplificationAfterOnePut(36, "abcd", "efghi"), "3.44");      // 31 / 9 = 3.4444
+  EXPECT_EQ(AmplificationAfterOnePut(37, "", ""), "0.00") << "a put of no bytes: no ratio";
+}
+
+TEST_F(DBPropertiesTest, WriteAmplificationCountsTheBytesOfTheLogFile) {
+  // The log's share of the ratio is the size of its file, whatever the writes were: records of all
+  // sizes, across blocks, with the headers of their fragments and the padding between blocks.
+  StartOver(38);
+  Random rnd(5);
+  for (int i = 0; i < 40; i++) {
+    const size_t size = i % 5 == 0 ? 40000 + rnd.Uniform(100) : 1 + rnd.Uniform(3000);
+    ASSERT_OK(Put(UserKey(i), std::string(size, 'v'), /*sync=*/false));
+  }
+  const DBCounters c = dbfull()->TEST_Counters();
+  ASSERT_EQ(c.flushes, 0u) << "no table: the ratio is the log's alone";
+  ASSERT_EQ(c.wal_bytes_written, env_->FileContents(NewestLogFile(env_.get(), dbname_)).size());
+  const double expected =
+      static_cast<double>(c.wal_bytes_written) / static_cast<double>(c.user_bytes_written);
+  EXPECT_NEAR(std::stod(Property("shale.write-amplification")), expected, 0.0051);
 }
 
 TEST_F(DBPropertiesTest, StatsHasOneLinePerLevel) {
@@ -333,31 +395,65 @@ TEST_F(DBPropertiesTest, PropertiesCanBeReadWhileWriting) {
   Options options = SmallBuffer();
   options.scheduler = nullptr;
   Reopen(options);
-  std::atomic<bool> done{false};
-  std::atomic<int> unreadable{0};
-  std::atomic<int> reads{0};
-  std::thread reader([&] {
-    while (!done.load()) {
+
+  // The reader is up, and has read every property once, before the first write; and the writer
+  // goes on only when the reader has read them all again since the last pause: reads and writes
+  // alternate whichever thread the machine starts first, so that every property is read while the
+  // database is changing under it.
+  struct ReaderState {
+    std::atomic<bool> stop{false};
+    std::atomic<int> passes{0};
+    std::atomic<int> unreadable{0};
+  };
+  const auto state = std::make_shared<ReaderState>();
+  std::thread reader([this, state] {
+    while (!state->stop.load()) {
       for (const char* name : {"shale.num-files-at-level0", "shale.total-sst-bytes",
                                "shale.counters", "shale.write-amplification", "shale.stats",
                                "shale.approximate-memory-usage", "shale.background-error"}) {
         std::string value;
         if (!db_->GetProperty(name, &value) || value.empty()) {
-          unreadable++;
+          state->unreadable++;
         }
       }
-      reads++;
+      state->passes++;
     }
   });
+  // However the test ends, the reader is stopped and joined before what it reads is closed.
+  struct JoinReader {
+    ReaderState* state;
+    std::thread* thread;
+    ~JoinReader() {
+      state->stop.store(true);
+      thread->join();
+    }
+  } join_reader{state.get(), &reader};
+
+  ASSERT_TRUE(PollUntil([&] { return state->passes.load() >= 1; })) << "the reader never read";
   Status status;
   for (int i = 0; i < 300 && status.ok(); i++) {
     status = Put(UserKey(i), KiB(i), /*sync=*/false);
+    if (i % 25 == 24) {
+      const int passes = state->passes.load();
+      ASSERT_TRUE(PollUntil([&] { return state->passes.load() > passes; }))
+          << "the reader stopped reading while the writer wrote";
+    }
   }
-  done.store(true);
-  reader.join();
   ASSERT_OK(status);
-  EXPECT_EQ(unreadable.load(), 0);
-  EXPECT_GT(reads.load(), 0);
+  EXPECT_EQ(state->unreadable.load(), 0);
+  EXPECT_GE(state->passes.load(), 12) << "at least one read of everything for every 25 writes";
+  EXPECT_GE(dbfull()->TEST_Counters().flushes, 1u) << "the memtable was switched under the reads";
+}
+
+// A null value aborts, so these run in a child process.
+class DBPropertiesDeathTest : public DBPropertiesTest {};
+
+TEST_F(DBPropertiesDeathTest, ANullValueAbortsWhateverTheName) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(static_cast<void>(db_->GetProperty("shale.counters", nullptr)),
+               "somewhere to put the value");
+  EXPECT_DEATH(static_cast<void>(db_->GetProperty("shale.nope", nullptr)),
+               "somewhere to put the value");
 }
 
 }  // namespace

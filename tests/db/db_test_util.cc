@@ -3,11 +3,13 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -151,6 +153,17 @@ HookEnv* DBTestBase::NewHookEnv() {
   Close();
   hook_env_ = std::make_unique<HookEnv>(env_.get());
   return hook_env_.get();
+}
+
+bool PollUntil(const std::function<bool()>& done) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (!done()) {
+    if (std::chrono::steady_clock::now() >= deadline) {
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::microseconds(100));
+  }
+  return true;
 }
 
 Status ForgeEmptyDatabase(Env* env, const std::string& dbname, SequenceNumber last_sequence,

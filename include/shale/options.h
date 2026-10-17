@@ -31,12 +31,14 @@ struct Options {
   /// thread of its own, which is what a database used from several threads wants. A test passes a
   /// ManualScheduler to decide when background work runs. It must outlive the database.
   ///
-  /// A ManualScheduler is not thread-safe, and the database runs its tasks on the thread of a
-  /// caller that has to wait for them: a write that must wait for a flush or a compaction, a
-  /// Flush(), a CompactRange(), the close. Writes may come from several threads, since only the
-  /// first of the writers that are queued ever waits, but a database driven by a ManualScheduler
-  /// must not be pumped from two threads at once: no Flush(), CompactRange() or close may overlap
-  /// another call that may wait, or the scheduler is used by two threads together and aborts.
+  /// A ManualScheduler is not thread-safe, and the database uses it from any call that can write,
+  /// flush, compact or close: such a call can queue a task on it (the scheduler's own guard aborts
+  /// if two threads are inside it at once), and one that has to wait for a flush or a compaction
+  /// runs the queued tasks on its own thread. So a database driven by a ManualScheduler must not
+  /// have any of those calls overlap another on a second thread: not a write, not a Flush(), not a
+  /// CompactRange(), not the close, whether or not the one that overlaps it would have waited.
+  /// Reads, iterators and snapshots never touch the scheduler and may come from any thread.
+  /// A database that several threads write to is given the default, with a thread of its own.
   Scheduler* scheduler = nullptr;
 
   /// Whether DB::Open() creates the database if there is none at the path. If false, opening a
