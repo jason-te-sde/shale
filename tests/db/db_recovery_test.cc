@@ -107,6 +107,72 @@ class DBRecoveryTest : public DBTestBase {
   // Whether entry `i` of WriteTenBigEntriesAndClose() is there, compared without printing 20 KiB.
   bool HasBigEntry(int i) { return Get(UserKey(i)) == BigValue(i); }
 
+  // How the machine loses power between one open and the next.
+  enum class PowerLoss { kNone, kRandomPrefix, kDropUnsynced };
+
+  void LosePower(PowerLoss loss) {
+    switch (loss) {
+      case PowerLoss::kNone:
+        break;
+      case PowerLoss::kRandomPrefix:
+        env_->SimulatePowerLoss();
+        break;
+      case PowerLoss::kDropUnsynced:
+        env_->SimulatePowerLossDropUnsynced();
+        break;
+    }
+  }
+
+  // Every kind of call that Open makes through the Env, each of which a sweep makes fail in turn.
+  static std::vector<Op> OpenOps() {
+    return {Op::kNewWritable,   Op::kAppend,          Op::kFlush,   Op::kSync,
+            Op::kClose,         Op::kRename,          Op::kSyncDir, Op::kRead,
+            Op::kNewSequential, Op::kNewRandomAccess, Op::kRemove};
+  }
+
+  // Replaces the Env with a new one, empty, whose random choices are drawn from `seed`, and opens
+  // a database in it. The old database is closed first.
+  void StartOverWithSeed(uint64_t seed) {
+    Close();
+    env_ = std::make_unique<FaultInjectionEnv>(seed);
+    Reopen();
+  }
+
+  // Writes the log `fname` and makes it survive any power loss, as a log that a run made, synced
+  // and was told about by the directory would.
+  void WriteDurableLog(const std::string& fname, const std::vector<std::string>& records) {
+    ASSERT_OK(WriteLogFile(env_.get(), fname, records));
+    env_->SetFileContents(fname, env_->FileContents(fname));
+  }
+
+  // Makes every call of every kind that Open makes fail in turn, and between the failed open and
+  // the next puts `loss` on the machine. After each, the database must open, and hold every write
+  // that was acknowledged before. Adds to `*failures` the number of opens that failed.
+  void SweepOpenFailures(PowerLoss loss, int* failures) {
+    int next_key = 0;
+    for (const Op op : OpenOps()) {
+      for (int n = 0; n < 40; n++) {
+        ASSERT_OK(Put(UserKey(next_key), ValueOf(next_key)));
+        next_key++;
+        Close();
+        env_->FailOpAfter(op, n);
+        const uint64_t injected_before = env_->injected_errors();
+        const Status s = TryReopen(CurrentOptions());
+        const bool fired = env_->injected_errors() > injected_before;
+        if (fired && !s.ok()) {
+          ++*failures;
+        }
+        LosePower(loss);
+        env_->ClearFaults();
+        Reopen();
+        ExpectPresent(0, next_key);
+        if (!fired) {
+          break;  // Open makes fewer calls of this kind than n + 1: they have all been tried
+        }
+      }
+    }
+  }
+
   // Replaces the database with an empty one, ready for forged logs to be put in its directory. The
   // database is closed.
   void StartOver() {
@@ -256,28 +322,36 @@ TEST_F(DBRecoveryTest, ZeroFilledTailFailsParanoidOpen) {
 
 TEST_F(DBRecoveryTest, AReadErrorAnywhereInOpenIsAnIOErrorAndLosesNothing) {
   // A read error is not a defect in the contents of a file: the log may be intact, and a recovery
-  // that took the unreadable part for the end of it would give up writes that were acknowledged.
+  // that took the unreadable part for the end of it would give up writes that were acknowledged,
+  // and the next open would find the log gone. That holds whether or not paranoid_checks is on.
   // Each read that Open makes is made to fail in turn: CURRENT, the MANIFEST, and the log.
-  int failures = 0;
-  for (int n = 0; n < 30; n++) {
-    PutRange(n * 5, n * 5 + 5);
-    Close();
-    env_->FailOpAfter(Op::kRead, n);
-    const uint64_t injected_before = env_->injected_errors();
-    const Status s = TryReopen(CurrentOptions());
-    const bool fired = env_->injected_errors() > injected_before;
-    env_->ClearFaults();
-    if (fired) {
-      EXPECT_TRUE(s.IsIOError()) << "read number " << n << ": " << s.ToString();
-      failures++;
+  int next_key = 0;
+  for (const bool paranoid : {true, false}) {
+    SCOPED_TRACE(paranoid ? "paranoid" : "lenient");
+    Options options = CurrentOptions();
+    options.paranoid_checks = paranoid;
+    int failures = 0;
+    for (int n = 0; n < 30; n++) {
+      PutRange(next_key, next_key + 5);
+      next_key += 5;
+      Close();
+      env_->FailOpAfter(Op::kRead, n);
+      const uint64_t injected_before = env_->injected_errors();
+      const Status s = TryReopen(options);
+      const bool fired = env_->injected_errors() > injected_before;
+      env_->ClearFaults();
+      if (fired) {
+        EXPECT_TRUE(s.IsIOError()) << "read number " << n << ": " << s.ToString();
+        failures++;
+      }
+      Reopen(options);
+      ExpectPresent(0, next_key);
+      if (!fired) {
+        break;
+      }
     }
-    Reopen();
-    ExpectPresent(0, n * 5 + 5);
-    if (!fired) {
-      break;
-    }
+    EXPECT_GE(failures, 3) << "Open reads CURRENT, the MANIFEST and at least one log";
   }
-  EXPECT_GE(failures, 3) << "Open reads CURRENT, the MANIFEST and at least one log";
 }
 
 TEST_F(DBRecoveryTest, PowerLossKeepsSyncedWrites) {
@@ -577,32 +651,187 @@ TEST_F(DBRecoveryTest, AFailureAnywhereInOpenLosesNothing) {
   // open, the writes that were acknowledged before it are there at the next one: the replayed logs
   // are deleted only after everything that replaces them is durable, and nothing that a failed
   // MANIFEST switch may have named is deleted.
-  const std::vector<Op> ops = {Op::kNewWritable,   Op::kAppend,          Op::kFlush,   Op::kSync,
-                               Op::kClose,         Op::kRename,          Op::kSyncDir, Op::kRead,
-                               Op::kNewSequential, Op::kNewRandomAccess, Op::kRemove};
-  int next_key = 0;
   int failures = 0;
-  for (const Op op : ops) {
-    for (int n = 0; n < 40; n++) {
-      ASSERT_OK(Put(UserKey(next_key), ValueOf(next_key)));
-      next_key++;
-      Close();
-      env_->FailOpAfter(op, n);
-      const uint64_t injected_before = env_->injected_errors();
-      const Status s = TryReopen(CurrentOptions());
-      const bool fired = env_->injected_errors() > injected_before;
-      env_->ClearFaults();
-      if (fired && !s.ok()) {
-        failures++;
-      }
-      Reopen();
-      ExpectPresent(0, next_key);
-      if (!fired) {
-        break;  // Open makes fewer calls of this kind than n + 1: they have all been tried
+  SweepOpenFailures(PowerLoss::kNone, &failures);
+  EXPECT_GT(failures, 15) << "the sweep hardly made Open fail";
+}
+
+TEST_F(DBRecoveryTest, AFailureAnywhereInOpenLosesNothingAcrossAPowerLoss) {
+  // The same sweep with the power going out between the failed open and the next: the files and
+  // directory entries that a power loss takes are those that were not made durable, and an open
+  // that deleted a log before what replaces it was durable would lose writes here. The Env decides
+  // what an ordinary power loss keeps with a seeded stream, so a few seeds are tried.
+  int failures = 0;
+  for (const uint64_t seed : std::vector<uint64_t>{1, 2, 3, 4}) {
+    SCOPED_TRACE(seed);
+    StartOverWithSeed(seed);
+    SweepOpenFailures(PowerLoss::kRandomPrefix, &failures);
+  }
+  StartOverWithSeed(5);
+  SweepOpenFailures(PowerLoss::kDropUnsynced, &failures);
+  EXPECT_GT(failures, 60) << "the sweep hardly made Open fail";
+}
+
+TEST_F(DBRecoveryTest, TwoNonEmptyLogsReplayTogether) {
+  // A second log, as one that a memtable switch leaves beside the first, numbered above it. The
+  // writes of both are recovered, in order, and the numbers go on from the last of them.
+  PutRange(0, 5);  // sequence numbers 1 to 5, in the log that the database wrote
+  Close();
+  ASSERT_OK(
+      WriteLogFile(env_.get(), LogFileName(kDb, 9),
+                   {EncodedBatch(6, {{"x", "1"}, {"y", "2"}}), EncodedBatch(8, {{"z", "3"}})}));
+  Reopen();
+  ExpectPresent(0, 5);
+  EXPECT_EQ(Get("x"), "1");
+  EXPECT_EQ(Get("y"), "2");
+  EXPECT_EQ(Get("z"), "3");
+  EXPECT_EQ(dbfull()->TEST_LastSequence(), 8u);
+  EXPECT_EQ(CountFiles(FileType::kLogFile), 1) << "both logs were replayed and deleted";
+  ASSERT_OK(Put("next", "4"));
+  EXPECT_EQ(dbfull()->TEST_LastSequence(), 9u);
+  Reopen();
+  EXPECT_EQ(Get("z"), "3");
+  EXPECT_EQ(Get("next"), "4");
+}
+
+TEST_F(DBRecoveryTest, LenientOpenSetsAsideTheLogWithTheDefectAndEveryLaterLog) {
+  // Dropping what follows a defect is the lenient mode's choice, but the dropped writes are not the
+  // database's to destroy: the log with the defect and every log after it are kept under another
+  // name, which nothing ever reads or deletes, and the open says so.
+  StartOver();
+  const std::vector<std::string> logs = {LogFileName(kDb, 9), LogFileName(kDb, 10),
+                                         LogFileName(kDb, 11)};
+  WriteDurableLog(logs[0], {EncodedBatch(1, {{"a", "1"}}), EncodedBatch(2, {{"b", "2"}})});
+  WriteDurableLog(logs[1], {EncodedBatch(3, {{"c", "3"}})});
+  WriteDurableLog(logs[2], {EncodedBatch(4, {{"d", "4"}})});
+  const std::vector<uint64_t> offsets = LogRecordOffsets(env_.get(), logs[0]);
+  ASSERT_EQ(offsets.size(), 2u);
+  FlipByte(logs[0], offsets[1] + kLogHeaderSize + 14);  // a byte of the second record
+  std::vector<std::string> bytes;
+  for (const std::string& log : logs) {
+    bytes.push_back(env_->FileContents(log));
+  }
+
+  Options lenient = CurrentOptions();
+  lenient.paranoid_checks = false;
+  Reopen(lenient);
+  EXPECT_EQ(Get("a"), "1") << "the write before the defect is recovered";
+  EXPECT_EQ(Get("b"), "NOT_FOUND");
+  EXPECT_EQ(Get("c"), "NOT_FOUND") << "nothing after the defect is applied, in later logs too";
+  EXPECT_EQ(Get("d"), "NOT_FOUND");
+  EXPECT_EQ(dbfull()->TEST_LastSequence(), 1u);
+
+  const std::string info = env_->FileContents(InfoLogFileName(kDb));
+  const auto expect_set_aside = [&] {
+    for (size_t i = 0; i < logs.size(); i++) {
+      const std::string dropped = logs[i] + ".dropped";
+      const std::string bare = dropped.substr(strlen(kDb) + 1);
+      EXPECT_FALSE(env_->FileExists(logs[i])) << logs[i] << " was left under its own name";
+      EXPECT_TRUE(env_->FileExists(dropped)) << bare;
+      EXPECT_TRUE(env_->FileContents(dropped) == bytes[i]) << bare << " was changed";
+      uint64_t number = 0;
+      FileType type = FileType::kCurrentFile;
+      EXPECT_FALSE(ParseFileName(bare, &number, &type)) << bare << " is a name the database reads";
+    }
+  };
+  expect_set_aside();
+  for (const std::string& log : logs) {
+    EXPECT_TRUE(Contains(info, log.substr(strlen(kDb) + 1) + ".dropped"))
+        << "the LOG does not say that " << log << " was set aside:\n"
+        << info;
+  }
+
+  // The next open, strict, finds nothing wrong, keeps what was written since, and still leaves the
+  // set-aside files alone.
+  ASSERT_OK(Put("e", "5"));
+  Reopen();
+  EXPECT_EQ(Get("a"), "1");
+  EXPECT_EQ(Get("e"), "5");
+  EXPECT_EQ(Get("b"), "NOT_FOUND");
+  expect_set_aside();
+}
+
+TEST_F(DBRecoveryTest, AFailureAnywhereInALenientOpenLosesNeitherDataNorDroppedLogs) {
+  // The same sweep for the open that drops a log: every call it makes fails in turn, with and
+  // without a power loss after. Whatever it leaves, the next lenient open finds the write that
+  // precedes the defect, and the dropped logs end up set aside whole, never deleted. The write
+  // before the defect is in a table by the time the logs are renamed, and the MANIFEST that names
+  // the table does not move past the logs until they have been renamed.
+  struct Config {
+    PowerLoss loss;
+    uint64_t seed;
+  };
+  const std::vector<Config> configs = {{PowerLoss::kNone, 1},
+                                       {PowerLoss::kRandomPrefix, 1},
+                                       {PowerLoss::kRandomPrefix, 2},
+                                       {PowerLoss::kRandomPrefix, 3},
+                                       {PowerLoss::kDropUnsynced, 1}};
+  int failures = 0;
+  for (const Config& config : configs) {
+    for (const Op op : OpenOps()) {
+      for (int n = 0; n < 60; n++) {
+        StartOverWithSeed(config.seed);
+        Close();
+        const std::vector<std::string> logs = {LogFileName(kDb, 9), LogFileName(kDb, 10)};
+        WriteDurableLog(logs[0], {EncodedBatch(1, {{"a", "1"}}), EncodedBatch(2, {{"b", "2"}})});
+        WriteDurableLog(logs[1], {EncodedBatch(3, {{"c", "3"}})});
+        const std::vector<uint64_t> offsets = LogRecordOffsets(env_.get(), logs[0]);
+        ASSERT_EQ(offsets.size(), 2u);
+        FlipByte(logs[0], offsets[1] + kLogHeaderSize + 14);
+        std::vector<std::string> bytes;
+        for (const std::string& log : logs) {
+          bytes.push_back(env_->FileContents(log));
+        }
+
+        Options lenient = CurrentOptions();
+        lenient.paranoid_checks = false;
+        env_->FailOpAfter(op, n);
+        const uint64_t injected_before = env_->injected_errors();
+        const Status s = TryReopen(lenient);
+        const bool fired = env_->injected_errors() > injected_before;
+        if (fired && !s.ok()) {
+          failures++;
+        }
+        LosePower(config.loss);
+        env_->ClearFaults();
+        Reopen(lenient);
+
+        EXPECT_EQ(Get("a"), "1");
+        EXPECT_EQ(Get("b"), "NOT_FOUND");
+        EXPECT_EQ(Get("c"), "NOT_FOUND");
+        for (size_t i = 0; i < logs.size(); i++) {
+          EXPECT_TRUE(env_->FileContents(logs[i] + ".dropped") == bytes[i])
+              << logs[i] << " was lost, after the failure of call " << n;
+          EXPECT_FALSE(env_->FileExists(logs[i]));
+        }
+        if (!fired) {
+          break;
+        }
       }
     }
   }
-  EXPECT_GT(failures, 15) << "the sweep hardly made Open fail";
+  EXPECT_GT(failures, 100) << "the sweep hardly made Open fail";
+}
+
+TEST_F(DBRecoveryTest, StrayTableAtTheFileNumberCeilingIsLeftAlone) {
+  // Nothing the database makes is numbered like this, and VersionSet ignores the number, so
+  // recovery has to say what it did: the file is not touched and the LOG names it.
+  for (const uint64_t number : {kMaxFileNumber, std::numeric_limits<uint64_t>::max()}) {
+    const std::string stray = TableFileName(kDb, number);
+    Close();
+    env_->SetFileContents(stray, "not a table");
+    Reopen();
+    EXPECT_EQ(env_->FileContents(stray), "not a table") << stray;
+    EXPECT_TRUE(Contains(env_->FileContents(InfoLogFileName(kDb)), stray.substr(strlen(kDb) + 1)))
+        << "the LOG does not say that " << stray << " was left alone";
+    ASSERT_OK(Put("k", "v"));  // and the database goes on as if it were not there
+    Reopen();
+    EXPECT_EQ(Get("k"), "v");
+    EXPECT_EQ(env_->FileContents(stray), "not a table") << stray;
+    Close();
+    ASSERT_OK(env_->RemoveFile(stray));
+    Reopen();
+  }
 }
 
 }  // namespace

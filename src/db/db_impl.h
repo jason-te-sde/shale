@@ -115,17 +115,26 @@ class DBImpl final : public DB {
   Status FindLogsToReplay(std::vector<uint64_t>* logs) SHALE_REQUIRES(mutex_);
 
   // Replays log `number` into `mem_`. `*max_sequence` is the last sequence number applied so far
-  // and moves on with each batch; `*entries` counts the operations applied. Sets `*stop` when the
-  // log has a defect that is not an error because paranoid_checks is off: replay ends there, with
-  // nothing after it in this log or the later ones applied.
-  Status ReplayLog(uint64_t number, SequenceNumber* max_sequence, uint64_t* entries, bool* stop)
-      SHALE_REQUIRES(mutex_);
+  // and moves on with each batch; `*entries` counts the operations applied. Returns the IOError of
+  // a read that failed, whether or not paranoid_checks is on: the log may be whole. Sets
+  // `*stopped_for` to what was wrong when the log has a defect that is not an error because
+  // paranoid_checks is off: replay ends there, with nothing after it in this log or the later ones
+  // applied, and the caller sets those logs aside.
+  Status ReplayLog(uint64_t number, SequenceNumber* max_sequence, uint64_t* entries,
+                   std::string* stopped_for) SHALE_REQUIRES(mutex_);
 
   // Applies the batch that is `record` to `mem_`, whole or not at all: returns Corruption, with
   // nothing applied, for a batch that does not decode, whose sequence number does not come after
   // `*max_sequence`, or whose operations would be numbered above kMaxSequenceNumber.
   Status ApplyRecoveredBatch(std::string_view record, SequenceNumber* max_sequence,
                              uint64_t* entries) SHALE_REQUIRES(mutex_);
+
+  // Renames logs[first] and every log after it to "<name>.dropped", the last first, so that a
+  // failure part of the way never leaves a later log replayable behind one that is not, and says
+  // for each in the info log why. `why` is what was wrong with logs[first]. Syncs the directory.
+  // The renamed files have a name that nothing reads or deletes.
+  Status SetAsideLogs(const std::vector<uint64_t>& logs, size_t first, const std::string& why)
+      SHALE_REQUIRES(mutex_);
 
   // Writes `mem_`, the recovered writes, as a level 0 table and adds it to `*edit`.
   Status WriteRecoveredMemTable(VersionEdit* edit) SHALE_REQUIRES(mutex_);

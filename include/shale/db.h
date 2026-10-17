@@ -42,7 +42,7 @@ class DB {
   /// reads the MANIFEST that CURRENT names, replays the write-ahead logs that hold writes the
   /// tables do not, and starts a new log and a new MANIFEST. A write-ahead log that merely ends
   /// short, as a crash leaves it, is not an error. See Options::paranoid_checks for one that is
-  /// damaged.
+  /// damaged; a log that cannot be read fails the open with an IOError in either case.
   ///
   /// Returns InvalidArgument for options that ValidateOptions() refuses, for a path with no
   /// database when create_if_missing is false, and for a path with one when error_if_exists is
@@ -132,7 +132,9 @@ class DB {
 
 /// Deletes the database in the directory `name`: every file the database makes, and then the
 /// directory if nothing else is in it. A file that is not the database's is left alone, and so is
-/// the directory that holds it. It is a success if there is no such directory.
+/// the directory that holds it; so is a log that a lenient open set aside as "<name>.dropped",
+/// which is the one kind of file of the database's own that is not removed. It is a success if
+/// there is no such directory.
 ///
 /// It takes the database's lock first, so that it fails with an IOError that names the LOCK file
 /// for a database that is open, and removes nothing.

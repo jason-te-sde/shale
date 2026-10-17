@@ -41,9 +41,11 @@ struct Options {
 
   /// Whether the database treats damage as an error where it can. At open, it decides what is made
   /// of a write-ahead log with a defect other than an end cut short, which is what a crash leaves:
-  /// with this set, Open fails with Corruption (or the IOError of a failed read); without it, Open
-  /// recovers the writes that come before the first defect and drops all that follows it, and says
-  /// so in the info log.
+  /// with this set, Open fails with Corruption; without it, Open recovers the writes that come
+  /// before the first defect and applies nothing after it, in that log or in any later one. Those
+  /// logs are not deleted: each is renamed to its own name with ".dropped" added, which the
+  /// database never reads or deletes again, and the info log says which and why. A log that cannot
+  /// be read is not a damaged one: a read error fails Open with its IOError whatever this says.
   bool paranoid_checks = true;
 
   /// The size in bytes that a memtable may reach before it is written out as a table.

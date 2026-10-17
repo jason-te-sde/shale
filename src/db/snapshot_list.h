@@ -55,6 +55,20 @@ class SnapshotList {
     return &snapshots_.back();
   }
 
+  /// Returns the snapshot of this list that `snapshot` points to, or null if it points to none: to
+  /// one that has been deleted, or to one that another list made. The pointer is only compared with
+  /// the addresses of the snapshots in the list and is never read, so it may be one that was freed:
+  /// a snapshot given back twice is found out here, and not by reading the memory it was in.
+  /// @param snapshot the pointer a caller holds.
+  const SnapshotImpl* Find(const Snapshot* snapshot) const {
+    for (const SnapshotImpl& s : snapshots_) {
+      if (static_cast<const Snapshot*>(&s) == snapshot) {
+        return &s;
+      }
+    }
+    return nullptr;
+  }
+
   /// Removes `snapshot`, which must be in the list, and frees it.
   /// @param snapshot a pointer New() returned and that has not been deleted.
   void Delete(const SnapshotImpl* snapshot) {

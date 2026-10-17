@@ -60,6 +60,27 @@ TEST(SnapshotListTest, OtherSnapshotsKeepTheirAddressesAcrossDeletes) {
   list.Delete(c);
 }
 
+TEST(SnapshotListTest, FindReturnsTheSnapshotAPointerIsAndNullForAnyOther) {
+  SnapshotList list;
+  SnapshotList other;
+  int owner = 0;
+  const SnapshotImpl* a = list.New(1, &owner);
+  const SnapshotImpl* b = list.New(2, &owner);
+  const SnapshotImpl* stranger = other.New(1, &owner);
+  EXPECT_EQ(list.Find(a), a);
+  EXPECT_EQ(list.Find(b), b);
+  EXPECT_EQ(list.Find(stranger), nullptr);
+  EXPECT_EQ(list.Find(nullptr), nullptr);
+
+  // A pointer that was deleted is not found. It is compared with the addresses of the snapshots
+  // that are left, and never read, which is what lets a second release be reported.
+  list.Delete(a);
+  EXPECT_EQ(list.Find(a), nullptr);
+  EXPECT_EQ(list.Find(b), b);
+  list.Delete(b);
+  other.Delete(stranger);
+}
+
 TEST(SnapshotListDeathTest, SnapshotsAreTakenInAscendingOrder) {
   GTEST_FLAG_SET(death_test_style, "threadsafe");
   SnapshotList list;

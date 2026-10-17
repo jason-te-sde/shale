@@ -44,8 +44,9 @@ DB::~DB() = default;
 
 namespace {
 
-// Files the database keeps open besides its tables: the log, the MANIFEST, the info log and the
-// lock, and one more for a table or a MANIFEST that is being written.
+// Files the database keeps open besides its tables: the write-ahead log, the MANIFEST, the info
+// log, the lock, the temporary file that switches CURRENT, and a table or MANIFEST that is being
+// written, with a margin for what the other threads of a database open. Ten, as LevelDB reserves.
 constexpr int kReservedFiles = 10;
 
 // The seed of the first memtable. A memtable's seed only shapes its skip list, but every number
@@ -79,14 +80,23 @@ class FirstReport final : public log::Reader::Reporter {
       status_ = status;
       bytes_ = bytes;
     }
+    if (status.IsIOError() && io_error_.ok()) {
+      io_error_ = status;
+    }
   }
 
+  // The first defect reported, and how many bytes it made the reader drop.
   const Status& status() const { return status_; }
   size_t bytes() const { return bytes_; }
+
+  // The first read error reported, which may follow a defect: a failed read says nothing about the
+  // contents of the log, and is told apart so that nothing is decided from what could not be read.
+  const Status& io_error() const { return io_error_; }
 
  private:
   Status status_;
   size_t bytes_ = 0;
+  Status io_error_;
 };
 
 // Accepts every operation of a batch, to find out whether the batch decodes before any of it is
@@ -97,12 +107,17 @@ class DecodeCheck final : public WriteBatch::Handler {
   void Delete(std::string_view /*key*/) override {}
 };
 
-// The snapshot `snapshot` is, which must be one that the database at `owner` made.
-const SnapshotImpl* SnapshotOf(const Snapshot* snapshot, const void* owner, const char* what) {
+// The open snapshot of `list` that `snapshot` is, which must be one that the database at `owner`
+// made and has not had given back. Looked up by address in the list and not by reading the object,
+// so that a snapshot that was released, and whose memory is gone, is reported and not read.
+const SnapshotImpl* FindOpenSnapshot(const SnapshotList& list, const Snapshot* snapshot,
+                                     const void* owner, const char* what) {
   SHALE_CHECK(snapshot != nullptr, std::string(what) + ": the snapshot is null");
-  const auto* const impl = dynamic_cast<const SnapshotImpl*>(snapshot);
+  const SnapshotImpl* const impl = list.Find(snapshot);
   SHALE_CHECK(impl != nullptr && impl->owner() == owner,
-              std::string(what) + ": the snapshot is of a DB that did not create it");
+              std::string(what) +
+                  ": the snapshot is not open in this DB: it was released twice, or this DB did "
+                  "not create it");
   return impl;
 }
 
@@ -280,13 +295,15 @@ Status DBImpl::OpenLocked() {
   mem_ = NewMemTable();
   SequenceNumber max_sequence = 0;
   uint64_t entries = 0;
-  for (const uint64_t number : logs) {
-    bool stop = false;
-    s = ReplayLog(number, &max_sequence, &entries, &stop);
+  size_t first_dropped = logs.size();  // the index of the log that replay stopped in, if it did
+  std::string stopped_for;
+  for (size_t i = 0; i < logs.size(); i++) {
+    s = ReplayLog(logs[i], &max_sequence, &entries, &stopped_for);
     if (!s.ok()) {
       return s;
     }
-    if (stop) {
+    if (!stopped_for.empty()) {
+      first_dropped = i;
       break;
     }
   }
@@ -318,8 +335,13 @@ Status DBImpl::OpenLocked() {
   // The recovered writes go into a table before the logs they came from are deleted, which is
   // after the MANIFEST that names the table is durable. Without it, they would be in memory only,
   // and the next open would find nothing to replay.
+  const bool setting_aside = first_dropped < logs.size();
   VersionEdit edit;
-  edit.log_number = log_number;
+  // Until the logs that are to be set aside have been renamed, the MANIFEST goes on naming the
+  // first of them as the oldest that matters: a crash before the renames then replays them again
+  // and stops at the same place, and a crash after leaves the table that holds the writes before
+  // the defect, named by this MANIFEST, as the only thing to read.
+  edit.log_number = setting_aside ? logs[first_dropped] : log_number;
   if (entries > 0) {
     s = WriteRecoveredMemTable(&edit);
     if (!s.ok()) {
@@ -332,6 +354,21 @@ Status DBImpl::OpenLocked() {
   s = versions_.WriteNewManifest(std::move(edit));
   if (!s.ok()) {
     return s;
+  }
+  if (setting_aside) {
+    // What follows the defect is not applied, and is not the database's to delete either: the
+    // logs are renamed to a name that nothing reads or deletes, and only then does the MANIFEST
+    // move past them, which is what would make the next sweep delete them.
+    s = SetAsideLogs(logs, first_dropped, stopped_for);
+    if (!s.ok()) {
+      return s;
+    }
+    VersionEdit move_on;
+    move_on.log_number = log_number;
+    s = versions_.LogAndApply(std::move(move_on));
+    if (!s.ok()) {
+      return s;
+    }
   }
   if (entries > 0) {
     mem_ = NewMemTable();
@@ -367,6 +404,10 @@ Status DBImpl::FindLogsToReplay(std::vector<uint64_t>* logs) {
         logs->push_back(number);
       }
     } else if (type == FileType::kTableFile) {
+      if (number >= kMaxFileNumber) {
+        Log("leaving " + name + " alone: its number is beyond the largest there can be");
+        continue;
+      }
       // A table that no version names, a flush that did not finish: its number is not to be used
       // again.
       versions_.MarkFileNumberUsed(number);
@@ -377,7 +418,7 @@ Status DBImpl::FindLogsToReplay(std::vector<uint64_t>* logs) {
 }
 
 Status DBImpl::ReplayLog(uint64_t number, SequenceNumber* max_sequence, uint64_t* entries,
-                         bool* stop) {
+                         std::string* stopped_for) {
   const std::string fname = LogFileName(dbname_, number);
   std::unique_ptr<SequentialFile> file;
   Status s = env_->NewSequentialFile(fname, &file);
@@ -400,6 +441,13 @@ Status DBImpl::ReplayLog(uint64_t number, SequenceNumber* max_sequence, uint64_t
       break;
     }
   }
+  // A read that failed says nothing about the contents of the log, which may be whole. Taking what
+  // could not be read for what is not there would drop writes that were acknowledged, so it fails
+  // the open, whatever paranoid_checks says; the next open reads the log again. The Env names the
+  // file in an IOError.
+  if (!report.io_error().ok()) {
+    return report.io_error();
+  }
   if (defect.ok() && !report.status().ok()) {
     defect = report.status();
     dropped = report.bytes();
@@ -409,15 +457,37 @@ Status DBImpl::ReplayLog(uint64_t number, SequenceNumber* max_sequence, uint64_t
   }
 
   if (options_.paranoid_checks) {
-    if (defect.IsIOError()) {
-      return defect;  // the Env names the file
-    }
     return Status::Corruption("WAL corruption in " + fname, defect.ToString());
   }
   Log("WAL " + fname + ": dropped " + std::to_string(dropped) + " byte(s), " + defect.ToString() +
       "; nothing after this is replayed");
-  *stop = true;
+  *stopped_for = defect.ToString();
   return Status::OK();
+}
+
+Status DBImpl::SetAsideLogs(const std::vector<uint64_t>& logs, size_t first,
+                            const std::string& why) {
+  const std::string stopped_in = LogFileName(dbname_, logs[first]);
+  // The last first. A rename that fails part of the way leaves the later logs under a name that
+  // nothing replays and the earlier ones where they were, and a later log is never left to be
+  // replayed behind one that was set aside.
+  for (size_t i = logs.size(); i > first; i--) {
+    const std::string from = LogFileName(dbname_, logs[i - 1]);
+    const std::string to = from + ".dropped";
+    Status s = env_->RenameFile(from, to);
+    if (!s.ok()) {
+      return s;
+    }
+    std::string line = "WAL " + from;
+    line.append(" kept as ").append(to).append(", not replayed: ");
+    if (i - 1 == first) {
+      line.append(why);
+    } else {
+      line.append("it comes after ").append(stopped_in).append(", where replay stopped");
+    }
+    Log(line);
+  }
+  return SyncDirectory(env_, dbname_);
 }
 
 Status DBImpl::ApplyRecoveredBatch(std::string_view record, SequenceNumber* max_sequence,
@@ -512,8 +582,9 @@ Status DBImpl::Get(const ReadOptions& options, std::string_view key, std::string
   std::shared_ptr<const Version> version;
   {
     MutexLock lock(&mutex_);
-    sequence = options.snapshot != nullptr ? SnapshotOf(options.snapshot, this, "Get")->sequence()
-                                           : versions_.LastSequence();
+    sequence = options.snapshot != nullptr
+                   ? FindOpenSnapshot(snapshots_, options.snapshot, this, "Get")->sequence()
+                   : versions_.LastSequence();
     mem = mem_;
     version = versions_.current();
   }
@@ -534,9 +605,8 @@ const Snapshot* DBImpl::GetSnapshot() {
 }
 
 void DBImpl::ReleaseSnapshot(const Snapshot* snapshot) {
-  const SnapshotImpl* const impl = SnapshotOf(snapshot, this, "ReleaseSnapshot");
   MutexLock lock(&mutex_);
-  snapshots_.Delete(impl);
+  snapshots_.Delete(FindOpenSnapshot(snapshots_, snapshot, this, "ReleaseSnapshot"));
 }
 
 std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& /*options*/) {

@@ -361,12 +361,34 @@ TEST_F(DBBasicTest, ConcurrentWritersAndReadersDoNotInterfere) {
 }
 
 TEST_F(DBBasicTest, DestroyDBRemovesEverything) {
+  // A database with every kind of file there is: the data in a table, from the second open, two
+  // info logs, a log, a MANIFEST, CURRENT and LOCK, and a temporary file that a crash left.
   ASSERT_OK(Put("a", "1"));
+  Reopen();
+  env_->SetFileContents(TempFileName(dbname_, 77), "half a CURRENT");
   Close();
+  const std::vector<std::string> files = DbFiles();
+  const auto has_type = [&](FileType wanted) {
+    return std::any_of(files.begin(), files.end(), [wanted](const std::string& name) {
+      uint64_t number = 0;
+      FileType type = FileType::kCurrentFile;
+      return ParseFileName(name, &number, &type) && type == wanted;
+    });
+  };
+  ASSERT_TRUE(has_type(FileType::kTableFile));
+  ASSERT_TRUE(has_type(FileType::kTempFile));
+  ASSERT_TRUE(has_type(FileType::kLogFile));
+  ASSERT_TRUE(has_type(FileType::kDescriptorFile));
+  ASSERT_TRUE(env_->FileExists("/db/LOG.old"));
+
   ASSERT_OK(DestroyDB(dbname_, CurrentOptions()));
   std::vector<std::string> names;
   EXPECT_TRUE(!env_->GetChildren(dbname_, &names).ok() || names.empty());
   EXPECT_FALSE(env_->FileExists("/db/CURRENT"));
+  EXPECT_FALSE(env_->FileExists("/db/LOG.old"));
+  EXPECT_FALSE(env_->FileExists("/db/LOG"));
+  EXPECT_FALSE(env_->FileExists("/db/LOCK"));
+  EXPECT_FALSE(env_->FileExists(TempFileName(dbname_, 77)));
   EXPECT_FALSE(env_->FileExists("/db"));
 
   // Destroying what is not there is a success.
@@ -430,6 +452,37 @@ TEST_F(DBBasicTest, GetAtASnapshotSeesTheStateWhenItWasTaken) {
   EXPECT_EQ(Get("a", snapshot), "1");
   EXPECT_EQ(Get("a"), "NOT_FOUND");
   db_->ReleaseSnapshot(snapshot);
+}
+
+TEST(DBBasicDeathTest, ReleasingASnapshotTwiceAborts) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  FaultInjectionEnv env(3);
+  Options options;
+  options.env = &env;
+  options.create_if_missing = true;
+  std::unique_ptr<DB> db;
+  ASSERT_OK(DB::Open(options, "/db", &db));
+  const Snapshot* snapshot = db->GetSnapshot();
+  db->ReleaseSnapshot(snapshot);
+  // The pointer is to memory that has been freed: it is compared with the open snapshots and not
+  // read, so the second release is reported and not a read of freed memory.
+  EXPECT_DEATH(db->ReleaseSnapshot(snapshot), "released twice");
+}
+
+TEST(DBBasicDeathTest, ReadingAtAReleasedSnapshotAborts) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  FaultInjectionEnv env(3);
+  Options options;
+  options.env = &env;
+  options.create_if_missing = true;
+  std::unique_ptr<DB> db;
+  ASSERT_OK(DB::Open(options, "/db", &db));
+  const Snapshot* snapshot = db->GetSnapshot();
+  db->ReleaseSnapshot(snapshot);
+  ReadOptions read;
+  read.snapshot = snapshot;
+  std::string value;
+  EXPECT_DEATH(static_cast<void>(db->Get(read, "k", &value)), "released twice");
 }
 
 TEST(DBBasicDeathTest, ReleasingASnapshotOfAnotherDatabaseAborts) {
