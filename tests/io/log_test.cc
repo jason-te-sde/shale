@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -551,6 +552,7 @@ TEST_F(LogTest, ChecksumMismatchIsReportedAndBlockDropped) {
   const std::string r2 = BigString("x", kBlockSize);
   constexpr size_t kR2FirstPayload = kBlockSize - (kHeaderSize + 3) - kHeaderSize;
   constexpr size_t kR2LastPayload = kBlockSize - kR2FirstPayload;
+  constexpr size_t kR2LastPhysical = kHeaderSize + kR2LastPayload;
   Write("foo");
   Write(r2);
   Write("baz");
@@ -561,7 +563,8 @@ TEST_F(LogTest, ChecksumMismatchIsReportedAndBlockDropped) {
   // r2's first fragment with it. Its last fragment, in block 1, then has no start.
   EXPECT_EQ(reports_.messages,
             (Records{Report("checksum mismatch"), Report("missing start of fragmented record")}));
-  EXPECT_EQ(reports_.dropped, kBlockSize + kR2LastPayload);
+  // Bytes are bytes of the log, headers included, for every kind of report.
+  EXPECT_EQ(reports_.dropped, kBlockSize + kR2LastPhysical);
 }
 
 TEST_F(LogTest, ChecksumFieldDamageIsReported) {
@@ -643,7 +646,7 @@ TEST_F(LogTest, MiddleWithoutFirstIsReported) {
   Write("foo");
   EXPECT_EQ(ReadAll(), Records{"foo"});
   EXPECT_EQ(reports_.messages, Records{Report("missing start of fragmented record")});
-  EXPECT_EQ(reports_.dropped, 3u);
+  EXPECT_EQ(reports_.dropped, kHeaderSize + 3);
 }
 
 TEST_F(LogTest, LastWithoutFirstIsReported) {
@@ -651,7 +654,7 @@ TEST_F(LogTest, LastWithoutFirstIsReported) {
   Write("foo");
   EXPECT_EQ(ReadAll(), Records{"foo"});
   EXPECT_EQ(reports_.messages, Records{Report("missing start of fragmented record")});
-  EXPECT_EQ(reports_.dropped, 3u);
+  EXPECT_EQ(reports_.dropped, kHeaderSize + 3);
 }
 
 TEST_F(LogTest, FirstThenFullIsReported) {
@@ -659,7 +662,7 @@ TEST_F(LogTest, FirstThenFullIsReported) {
   WriteRaw(Fragment(kFullType, "bar"));
   EXPECT_EQ(ReadAll(), Records{"bar"});
   EXPECT_EQ(reports_.messages, Records{Report("partial record without end")});
-  EXPECT_EQ(reports_.dropped, 7u);
+  EXPECT_EQ(reports_.dropped, kHeaderSize + 7);
 }
 
 TEST_F(LogTest, FirstThenFirstIsReportedAndTheSecondIsKept) {
@@ -668,13 +671,14 @@ TEST_F(LogTest, FirstThenFirstIsReportedAndTheSecondIsKept) {
   WriteRaw(Fragment(kLastType, "three"));
   EXPECT_EQ(ReadAll(), Records{"twothree"});
   EXPECT_EQ(reports_.messages, Records{Report("partial record without end")});
-  EXPECT_EQ(reports_.dropped, 3u);
+  EXPECT_EQ(reports_.dropped, kHeaderSize + 3);
 }
 
 TEST_F(LogTest, DamageInsideAFragmentedRecordLosesTheWholeRecord) {
   // FIRST in block 0, MIDDLE in block 1, LAST in block 2, then "tail". Damage the MIDDLE: the
   // FIRST that was already read is gone with it, and the LAST that follows has no start. None of
   // the three may be glued to anything.
+  constexpr size_t kLastPayload = 3 * kBlockSize - 100 - 2 * (kBlockSize - kHeaderSize);
   Write(std::string(3 * kBlockSize - 100, 'x'));
   Write("tail");
   IncrementByte(kBlockSize + kHeaderSize, 1);
@@ -683,6 +687,70 @@ TEST_F(LogTest, DamageInsideAFragmentedRecordLosesTheWholeRecord) {
   EXPECT_EQ(reports_.messages,
             (Records{Report("checksum mismatch"), Report("partial record without end"),
                      Report("missing start of fragmented record")}));
+  // The MIDDLE's block, the whole block that the FIRST filled, and the LAST with its header.
+  EXPECT_EQ(reports_.dropped, kBlockSize + kBlockSize + (kHeaderSize + kLastPayload));
+}
+
+TEST_F(LogTest, ADefectSwallowsTheRestOfItsBlockIncludingIntactRecords) {
+  // After a defect the reader cannot trust a length, so it drops the rest of the block. Intact
+  // records that were acknowledged can be in it. Hence a report is never "the log ends here",
+  // wherever it falls, and a caller must not take a report with nothing valid after it for a torn
+  // tail: that would accept the loss of records that were fine.
+  Write("foo");
+  Write("bar");
+  Write("baz");
+  Write(BigString("x", kBlockSize - 3 * (kHeaderSize + 3) - kHeaderSize));  // fills block 0
+  Write("later");
+  ASSERT_EQ(FileSize(), kBlockSize + kHeaderSize + 5);
+  IncrementByte(kHeaderSize, 1);  // damage "foo" and nothing else
+
+  EXPECT_EQ(ReadAll(), Records{"later"}) << "bar, baz and the filler were intact";
+  EXPECT_EQ(reports_.messages, Records{Report("checksum mismatch")});
+  EXPECT_EQ(reports_.dropped, kBlockSize) << "one report, for the whole block";
+
+  // The same damage in the last block: no valid record follows the report, and two intact ones
+  // were lost with it.
+  std::string contents = WriteContents({"foo", "bar", "baz"});
+  contents[kHeaderSize] = static_cast<char>(contents[kHeaderSize] + 1);
+  ReportCollector reports;
+  EXPECT_EQ(ReadContents(contents, &reports), Records{});
+  EXPECT_EQ(reports.messages, Records{Report("checksum mismatch")});
+  EXPECT_EQ(reports.dropped, contents.size());
+}
+
+TEST_F(LogTest, AZeroFilledTailIsReportedAndNeverSilentlyAccepted) {
+  // A crash can leave a file that is longer than what was written, with zeros where the data
+  // never arrived. Zero is no record type, so every block of zeros is reported, and the records
+  // before them are all returned. Only a cut-off header, which is shorter than a header, is a
+  // torn tail.
+  const std::string valid = WriteContents({"foo", "bar"});
+  {
+    const size_t tail = 3 * kBlockSize - valid.size();  // zeros to the end of the third block
+    ReportCollector reports;
+    EXPECT_EQ(ReadContents(valid + std::string(tail, '\0'), &reports), (Records{"foo", "bar"}));
+    EXPECT_EQ(reports.messages, Records(3, Report("unknown record type")))
+        << "one report for each block that the zeros cover";
+    EXPECT_EQ(reports.dropped, tail);
+  }
+  {
+    ReportCollector reports;
+    EXPECT_EQ(ReadContents(valid + std::string(100, '\0'), &reports), (Records{"foo", "bar"}));
+    EXPECT_EQ(reports.messages, Records{Report("unknown record type")});
+    EXPECT_EQ(reports.dropped, 100u);
+  }
+  {  // A header's worth of zeros is a header, and its type is zero.
+    ReportCollector reports;
+    EXPECT_EQ(ReadContents(valid + std::string(kHeaderSize, '\0'), &reports),
+              (Records{"foo", "bar"}));
+    EXPECT_EQ(reports.messages, Records{Report("unknown record type")});
+    EXPECT_EQ(reports.dropped, kHeaderSize);
+  }
+  {  // One byte fewer cannot hold a header: it is the cut-off kind, and silent.
+    ReportCollector reports;
+    EXPECT_EQ(ReadContents(valid + std::string(kHeaderSize - 1, '\0'), &reports),
+              (Records{"foo", "bar"}));
+    EXPECT_EQ(reports.messages, Records{});
+  }
 }
 
 TEST_F(LogTest, ReadErrorIsReportedAndEndsTheLog) {
@@ -766,76 +834,113 @@ TEST_F(LogTest, ResumedWriterKeepsBlockAlignment) {
   ExpectNoReports();
 }
 
-TEST_F(LogTest, ResumedWriterHandlesEveryTailLength) {
-  // The file the second Writer finds ends `leftover` bytes before a block boundary. Seven or more
-  // is room for a header; fewer is padding; none is a fresh block.
-  for (const size_t leftover : std::vector<size_t>{0, 1, 3, 6, 7, 8, 100}) {
-    SCOPED_TRACE("leftover " + std::to_string(leftover));
-    SetUp();
-    const std::string first = BigString("a", kBlockSize - leftover - kHeaderSize);
-    Write(first);
-    ASSERT_EQ(FileSize(), kBlockSize - leftover);
-    Resume();
-    Write("b");
-    Write("c");
-    const std::string contents = Contents();
-    if (leftover > 0 && leftover < kHeaderSize) {
-      for (size_t i = kBlockSize - leftover; i < kBlockSize; i++) {
-        ASSERT_EQ(ByteAt(contents, i), 0) << "padding byte at offset " << i;
-      }
-    }
-    reader_.reset();
-    reports_.messages.clear();
-    reports_.dropped = 0;
-    EXPECT_EQ(ReadAll(), (Records{first, "b", "c"}));
-    ExpectNoReports();
-  }
+TEST_F(LogTest, ResumingAfterATornTailLosesTheNewRecordsToo) {
+  // The precondition of Writer(dest, dest_length): the file ends on a record boundary. Here it
+  // ends inside a record, whose header goes on claiming the first byte of what is appended, so the
+  // read reports a defect and drops the rest of the block, the new record with it.
+  Write("foo");
+  Write("0123456789");
+  Truncate(FileSize() - 1);
+  Resume();
+  Write("bar");
+  EXPECT_EQ(ReadAll(), Records{"foo"});
+  EXPECT_EQ(reports_.messages, Records{Report("checksum mismatch")});
 }
 
+// The file that the second Writer finds ends `GetParam()` bytes before a block boundary. Seven or
+// more is room for a header; fewer is padding; none is a fresh block.
+class ResumeTest : public LogTest, public testing::WithParamInterface<size_t> {};
+
+TEST_P(ResumeTest, ResumedWriterHandlesTheTailItFinds) {
+  const size_t leftover = GetParam();
+  const std::string first = BigString("a", kBlockSize - leftover - kHeaderSize);
+  Write(first);
+  ASSERT_EQ(FileSize(), kBlockSize - leftover);
+  Resume();
+  Write("b");
+  Write("c");
+  const std::string contents = Contents();
+  for (size_t i = kBlockSize - leftover; leftover < kHeaderSize && i < kBlockSize; i++) {
+    ASSERT_EQ(ByteAt(contents, i), 0) << "padding byte at offset " << i;
+  }
+  EXPECT_EQ(ReadAll(), (Records{first, "b", "c"}));
+  ExpectNoReports();
+}
+
+INSTANTIATE_TEST_SUITE_P(TailLengths, ResumeTest,
+                         testing::Values(size_t{0}, size_t{1}, size_t{3}, size_t{6}, size_t{7},
+                                         size_t{8}, size_t{100}),
+                         [](const testing::TestParamInfo<size_t>& param) {
+                           return "Leftover" + std::to_string(param.param);
+                         });
+
 TEST_F(LogTest, RandomCorruptionNeverYieldsUnwrittenRecords) {
-  // Flip a few bits anywhere in a log of random records. What comes back must be some of the
-  // records that were written, in the order they were written, and nothing else: no invented
-  // record, no two records fused, no record twice. Which of them are lost is up to the damage.
+  // Flip a few bits anywhere in a log of random records. Every payload starts with its sequence
+  // number, so no two are equal and a record that came back twice, or out of order, or fused from
+  // two others, cannot pass for a later one. What comes back must be some of the records that were
+  // written, in the order they were written, and nothing else.
+  //
+  // And the property recovery relies on: if nothing was reported, what was read is a prefix of
+  // what was written. It does not follow that nothing was lost. The one place that damage hides
+  // is documented: a length field in the last block that points past the end of the file but
+  // inside the block cannot be told from a torn tail. Those seeds are counted on their own, and
+  // each must have a flipped bit in the last block.
   size_t seeds_that_reported = 0;
   size_t seeds_that_lost_records = 0;
+  size_t silent_short_reads = 0;
   constexpr uint64_t kSeeds = 1000;
   for (uint64_t seed = 0; seed < kSeeds; seed++) {
     SCOPED_TRACE("seed " + std::to_string(seed));
     Random rnd(seed);
     Records written;
-    for (int i = 0; i < 50; i++) {
-      written.push_back(RandomBinaryString(&rnd, rnd.Skewed(15)));
+    std::map<std::string, size_t> position;
+    for (size_t i = 0; i < 50; i++) {
+      written.push_back(std::to_string(i) + ":" + RandomBinaryString(&rnd, rnd.Skewed(15)));
+      position[written.back()] = i;
     }
     std::string contents = WriteContents(written);
+    const size_t last_block = (contents.size() - 1) / kBlockSize;
+    bool flipped_in_last_block = false;
     const uint32_t flips = 1 + rnd.Uniform(5);
     for (uint32_t i = 0; i < flips; i++) {
       const uint32_t bit = rnd.Uniform(static_cast<uint32_t>(contents.size() * 8));
       contents[bit / 8] = static_cast<char>(ByteAt(contents, bit / 8) ^ (1u << (bit % 8)));
+      flipped_in_last_block = flipped_in_last_block || bit / 8 / kBlockSize == last_block;
     }
 
     ReportCollector reports;
     const Records got = ReadContents(contents, &reports);
 
-    size_t next = 0;
+    size_t next_allowed = 0;
     for (const std::string& record : got) {
-      while (next < written.size() && written[next] != record) {
-        next++;
-      }
-      ASSERT_LT(next, written.size())
-          << "a record of " << record.size() << " bytes was returned that is not one of the "
-          << "records written after the previous one returned";
-      next++;
+      const auto found = position.find(record);
+      ASSERT_NE(found, position.end()) << "a record of " << record.size() << " bytes was returned "
+                                       << "that was never written";
+      ASSERT_GE(found->second, next_allowed)
+          << "record " << found->second << " came back twice or out of order";
+      next_allowed = found->second + 1;
     }
+
     if (!reports.messages.empty()) {
       seeds_that_reported++;
+    } else {
+      ASSERT_LE(got.size(), written.size());
+      EXPECT_TRUE(std::equal(got.begin(), got.end(), written.begin()))
+          << "nothing was reported, yet what was read is not a prefix of what was written";
+      if (got.size() < written.size()) {
+        silent_short_reads++;
+        EXPECT_TRUE(flipped_in_last_block)
+            << "records were lost without a report and without damage in the last block";
+      }
     }
     if (got.size() < written.size()) {
       seeds_that_lost_records++;
     }
   }
-  // Damage that nothing noticed would make the check above vacuous.
-  EXPECT_GE(seeds_that_reported, kSeeds * 99 / 100);
+  // Damage that nothing noticed would make the checks above vacuous.
+  EXPECT_GE(seeds_that_reported, kSeeds * 95 / 100);
   EXPECT_GE(seeds_that_lost_records, kSeeds * 99 / 100);
+  EXPECT_LE(silent_short_reads, kSeeds * 5 / 100) << "silent loss is the rare, documented case";
 }
 
 TEST_F(LogTest, RandomCorruptionWithoutChecksumsStillTerminates) {

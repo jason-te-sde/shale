@@ -34,9 +34,17 @@ namespace shale::log {
 ///   after one the lengths in it cannot be trusted, and reading goes on at the next block. A
 ///   fragmented record that a defect interrupts is lost whole, never joined to another one.
 ///
-/// A cut that falls where a defect would have been, as a damaged length field that points
-/// beyond the end of a short file but inside its block, cannot be told from a torn tail, and is
-/// treated as one.
+/// **A report is never benign by position.** After a defect the reader drops the rest of its
+/// block, and that can include intact records that were acknowledged. A report is therefore not
+/// "the log ends here", wherever in the file it falls, and a caller must not take a report with
+/// nothing valid after it for a torn tail: that would accept the loss of good records. The only
+/// torn-tail signal is the end of the stream without a report. Even that does not prove that
+/// nothing was lost: a damaged length field in the last block that points beyond the end of the
+/// file but inside the block cannot be told from a torn tail, and is treated as one.
+///
+/// A read error reaches the Reporter as the status the file returned, an IOError, and then the
+/// stream ends, so without a Reporter it looks exactly like the end of the file. A caller that
+/// must not mistake an unreadable log for a short one passes a Reporter.
 ///
 /// A Reader is used by one thread at a time.
 class Reader {
@@ -48,16 +56,20 @@ class Reader {
     virtual ~Reporter();
 
     /// Called when the reader meets a defect.
-    /// @param bytes how many bytes of the log the defect made the reader drop; approximate for a
-    ///        failed read, where it is the size of the block that could not be read.
+    /// @param bytes how many bytes of the log the defect made the reader drop, headers included,
+    ///        so that the figures of a log add up to the bytes lost: for a header or checksum
+    ///        defect, the rest of the block from that header on; for a fragment with no start, its
+    ///        header and payload; for an abandoned record, the headers and payloads of the
+    ///        fragments read so far. The zero padding at the end of a block is not counted. For a
+    ///        failed read the number is the size of the block that could not be read.
     /// @param status what was wrong; always an error, a Corruption unless a read failed.
     virtual void Corruption(size_t bytes, const Status& status) = 0;
   };
 
   /// Creates a Reader that starts at the beginning of `file`.
   /// @param file the log to read; it must outlive the Reader and be positioned at its start.
-  /// @param reporter told of every defect; may be null, in which case defects are skipped
-  ///        unseen. It must outlive the Reader.
+  /// @param reporter told of every defect; may be null, in which case defects, a failed read
+  ///        among them, are skipped unseen. It must outlive the Reader.
   /// @param checksum whether to verify each record's checksum. Checksums off lets a damaged
   ///        payload through unnoticed; the structure of the log is checked either way.
   Reader(SequentialFile* file, Reporter* reporter, bool checksum);

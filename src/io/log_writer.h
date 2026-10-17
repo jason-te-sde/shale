@@ -22,8 +22,13 @@ class Writer {
   /// @param dest the file to append to; it must outlive the Writer.
   explicit Writer(WritableFile* dest);
 
-  /// Creates a Writer that continues a file that is already `dest_length` bytes long and was
-  /// written by a Writer: the next record is placed as the format says given that length.
+  /// Creates a Writer that continues a file that is already `dest_length` bytes long: the next
+  /// record is placed as the format says given that length.
+  ///
+  /// The file must end exactly on a record boundary written by a Writer. A file that ends in a
+  /// torn record is not one: the torn record's header goes on claiming bytes, now the first of
+  /// the new ones, so the next read reports a defect and drops the rest of that block, valid new
+  /// records included. A caller that finds a torn tail starts a new file instead of appending.
   /// @param dest the file to append to; it must outlive the Writer.
   /// @param dest_length how many bytes `dest` holds.
   Writer(WritableFile* dest, uint64_t dest_length);

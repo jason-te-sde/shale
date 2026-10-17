@@ -26,6 +26,9 @@ bool Reader::ReadRecord(std::string_view* record, std::string* scratch) {
   *record = std::string_view();
   bool in_fragmented_record = false;
   uint64_t prospective_record_offset = 0;  // where the record being assembled began
+  // How many bytes of the log, headers included, the fragments in `scratch` came from: what is
+  // lost if the record is abandoned.
+  size_t assembled_bytes = 0;
 
   for (;;) {
     RecordType type = kZeroType;
@@ -41,7 +44,7 @@ bool Reader::ReadRecord(std::string_view* record, std::string* scratch) {
           case kFullType:
             if (in_fragmented_record) {
               // Nothing writes this: after a FIRST comes a MIDDLE or a LAST.
-              Report(scratch->size(), Status::Corruption("partial record without end"));
+              Report(assembled_bytes, Status::Corruption("partial record without end"));
               scratch->clear();
             }
             *record = fragment;
@@ -50,18 +53,21 @@ bool Reader::ReadRecord(std::string_view* record, std::string* scratch) {
 
           case kFirstType:
             if (in_fragmented_record) {
-              Report(scratch->size(), Status::Corruption("partial record without end"));
+              Report(assembled_bytes, Status::Corruption("partial record without end"));
             }
             scratch->assign(fragment);
             in_fragmented_record = true;
             prospective_record_offset = physical_record_offset;
+            assembled_bytes = kHeaderSize + fragment.size();
             break;
 
           case kMiddleType:
             if (in_fragmented_record) {
               scratch->append(fragment);
+              assembled_bytes += kHeaderSize + fragment.size();
             } else {
-              Report(fragment.size(), Status::Corruption("missing start of fragmented record"));
+              Report(kHeaderSize + fragment.size(),
+                     Status::Corruption("missing start of fragmented record"));
             }
             break;
 
@@ -72,7 +78,8 @@ bool Reader::ReadRecord(std::string_view* record, std::string* scratch) {
               last_record_offset_ = prospective_record_offset;
               return true;
             }
-            Report(fragment.size(), Status::Corruption("missing start of fragmented record"));
+            Report(kHeaderSize + fragment.size(),
+                   Status::Corruption("missing start of fragmented record"));
             break;
 
           case kZeroType:
@@ -86,7 +93,7 @@ bool Reader::ReadRecord(std::string_view* record, std::string* scratch) {
         // The block is already dropped and reported. What was assembled before it cannot be
         // completed: the fragments that follow in the next block would not be its own.
         if (in_fragmented_record) {
-          Report(scratch->size(), Status::Corruption("partial record without end"));
+          Report(assembled_bytes, Status::Corruption("partial record without end"));
           in_fragmented_record = false;
           scratch->clear();
         }
