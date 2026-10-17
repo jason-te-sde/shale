@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Tests for scripts/check-hygiene.sh.
 #
-# The scripts under test search for Chinese characters and for AI attribution, and this repository
-# must itself pass them. So every needle is assembled at run time from pieces: neither the byte
+# The script under test searches for CJK characters and for AI attribution, and this repository
+# must itself pass it. So every needle is assembled at run time from pieces: neither the byte
 # sequences nor the attribution strings appear anywhere in this file.
 set -uo pipefail
 
@@ -18,6 +18,10 @@ trap 'rm -rf "$tmp"' EXIT
 
 # Fixture repositories must not pick up the developer's own git configuration or hooks.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
+
+# Nor may they land in the repository this test was started from. A git hook that runs the suite
+# has these set, and every `git -C <fixture>` would then act on that repository instead.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
 
 case_id=0
 
@@ -70,22 +74,52 @@ write_file notes.md '%s\n' 'The claude-3 and anthropic SDK names are fine on the
 commit 'docs: mention vendors' "$(printf '%s-%s-%s: %s <jane@example.com>' Co Authored By 'Jane Doe')"
 expect "vendor names and a human co-author trailer" 0 "hygiene: ok"
 
-# --- Chinese characters: the edges of U+4E00-U+9FFF. -------------------------------------------
+# --- CJK characters in a tracked file: both edges of every blocked range, and what lies outside. ---
 
-for case_spec in 'U+4E00 \xe4\xb8\x80' 'U+4E2D \xe4\xb8\xad' 'U+5E74 \xe5\xb9\xb4' \
-  'U+7684 \xe7\x9a\x84' 'U+9FFF \xe9\xbf\xbf'; do
+# Each entry is "<code point> <the UTF-8 bytes as printf escapes>".
+blocked_in_files=(
+  'U+3000 \xe3\x80\x80' 'U+3001 \xe3\x80\x81' 'U+303F \xe3\x80\xbf'
+  'U+3040 \xe3\x81\x80' 'U+3042 \xe3\x81\x82' 'U+30A2 \xe3\x82\xa2' 'U+30FF \xe3\x83\xbf'
+  'U+4E00 \xe4\xb8\x80' 'U+4E2D \xe4\xb8\xad' 'U+5E74 \xe5\xb9\xb4' 'U+7684 \xe7\x9a\x84'
+  'U+9FFF \xe9\xbf\xbf'
+  'U+AC00 \xea\xb0\x80' 'U+AFFF \xea\xbf\xbf' 'U+B000 \xeb\x80\x80' 'U+C73C \xec\x9d\xbc'
+  'U+D000 \xed\x80\x80' 'U+D77F \xed\x9d\xbf' 'U+D780 \xed\x9e\x80' 'U+D7AF \xed\x9e\xaf'
+  'U+FF00 \xef\xbc\x80' 'U+FF21 \xef\xbc\xa1' 'U+FF5E \xef\xbd\x9e' 'U+FF9F \xef\xbe\x9f'
+  'U+FFEF \xef\xbf\xaf'
+)
+for case_spec in "${blocked_in_files[@]}"; do
   new_repo
   write_file doc.md "%b\n" "${case_spec#* }"
   commit 'docs: add a file'
-  expect "a file containing ${case_spec%% *}" 1 "Chinese characters" "doc.md"
+  expect "a file containing ${case_spec%% *}" 1 "CJK characters" "tracked files" "doc.md"
 done
 
-for case_spec in 'U+4DFF \xe4\xb7\xbf' 'U+A000 \xea\x80\x80' 'U+00E9 \xc3\xa9' 'U+2014 \xe2\x80\x94'; do
+# Neighbours of those ranges that are not CJK, and the usual non-ASCII an English text carries.
+allowed_in_files=(
+  'U+00E9 \xc3\xa9' 'U+2014 \xe2\x80\x94' 'U+4DFF \xe4\xb7\xbf' 'U+A000 \xea\x80\x80'
+  'U+ABFF \xea\xaf\xbf' 'U+E000 \xee\x80\x80' 'U+FEFF \xef\xbb\xbf' 'U+FFF0 \xef\xbf\xb0'
+)
+for case_spec in "${allowed_in_files[@]}"; do
   new_repo
   write_file doc.md "caf%b\n" "${case_spec#* }"
   commit 'docs: add a file'
-  expect "a file containing ${case_spec%% *}, which is not a CJK ideograph" 0 "hygiene: ok"
+  expect "a file containing ${case_spec%% *}, which is not blocked" 0 "hygiene: ok"
 done
+
+# --- CJK characters in a commit message: one case per script. ------------------------------------
+
+for case_spec in 'U+4E2D \xe4\xb8\xad' 'U+3042 \xe3\x81\x82' 'U+30A2 \xe3\x82\xa2' \
+  'U+C73C \xec\x9d\xbc' 'U+FF21 \xef\xbc\xa1'; do
+  new_repo
+  write_file a.txt '%s\n' 'clean'
+  commit "feat: add a file $(printf '%b' "${case_spec#* }")"
+  expect "a commit message containing ${case_spec%% *}" 1 "CJK characters" "commit message"
+done
+
+new_repo
+write_file a.txt '%s\n' 'clean'
+commit "feat: add a file $(printf '\xe2\x80\x94') caf$(printf '\xc3\xa9')"
+expect "a commit message with an em dash and an accented letter" 0 "hygiene: ok"
 
 # --- AI attribution in a commit message, anywhere in the history. ------------------------------
 
@@ -154,6 +188,9 @@ expect "a repository with no tracked files" 2 "hygiene:"
 
 patterns="$scripts_dir/attribution-patterns.txt"
 
+# real_patterns: the patterns in the real file, without its comments and blank lines.
+real_patterns() { grep -vE '^[[:space:]]*(#|$)' "$patterns"; }
+
 # use_script_copy <name>: from now on check with a private copy of the script. The patterns file
 # is looked up next to the script, so the copy's can be damaged without touching the real one.
 use_script_copy() {
@@ -176,9 +213,66 @@ use_script_copy missing
 expect "a missing patterns file" 1 "cannot read"
 
 use_script_copy short
-head -n 4 "$patterns" >"$copy_dir/attribution-patterns.txt"
+real_patterns | head -n 4 >"$copy_dir/attribution-patterns.txt"
 expect "a patterns file with four patterns" 1 "at least 5"
 
+# Comment lines and blank lines are not patterns, so they do not count toward the floor...
+use_script_copy padded-short
+{
+  echo '# a comment'
+  real_patterns | head -n 4
+  echo
+  echo '   '
+  echo '# another comment'
+} >"$copy_dir/attribution-patterns.txt"
+expect "four patterns padded out with comments and blank lines" 1 "at least 5"
+
+# ...and they are not scanned for either: an empty pattern would match every line of every file.
+new_repo
+write_file a.txt '%s\n' 'clean'
+commit 'feat: add a file'
+use_script_copy padded
+{
+  echo '# one extended regular expression per line'
+  echo
+  cat "$patterns"
+  echo '   '
+  echo '# the end'
+} >"$copy_dir/attribution-patterns.txt"
+expect "the real patterns padded with comments and blank lines" 0 "hygiene: ok"
+
+# A pattern grep cannot compile must stop the check. grep reports it with status 2, the same as a
+# missing file, and a scan that read that as "no match" would print "ok" having looked for nothing.
+for bad_pattern in 'unbalanced (paren' 'unclosed [bracket' "dangling \\"; do
+  use_script_copy bad-regex
+  { cat "$patterns"; printf '%s\n' "$bad_pattern"; } >"$copy_dir/attribution-patterns.txt"
+  expect "the pattern '$bad_pattern' in the patterns file" 1 "not a valid regular expression"
+done
+use_script_copy bad-regex-only
+{ real_patterns | head -n 4; echo 'unbalanced (paren'; } >"$copy_dir/attribution-patterns.txt"
+expect "a bad pattern as the fifth and last one" 1 "not a valid regular expression"
+
+# An error while scanning a file is not "no match" either. (root can read anything, so there is
+# nothing to provoke.)
 use_real_script
+if [ "$(id -u)" -ne 0 ]; then
+  new_repo
+  write_file a.txt '%s\n' 'clean'
+  write_file secret.txt '%s\n' 'clean too'
+  commit 'feat: add files'
+  chmod 000 "$root/secret.txt"
+  expect "a tracked file the scan cannot read" 1 "secret.txt" "hygiene:"
+  chmod 600 "$root/secret.txt"
+else
+  echo "SKIP: a tracked file the scan cannot read (running as root)" >&2
+fi
+
+# A tracked file that is deleted in the working tree is a normal state, not a scan error.
+new_repo
+write_file a.txt '%s\n' 'clean'
+write_file gone.txt '%s\n' 'clean too'
+commit 'feat: add files'
+rm "$root/gone.txt"
+expect "a tracked file deleted from the working tree" 0 "hygiene: ok"
 
 finish hygiene_test
