@@ -70,6 +70,22 @@ Status NoFileNumberLeft() {
   return Status::Corruption("no file number is left below the largest there can be");
 }
 
+// What a lenient open adds to the name of a log that it sets aside: a name that nothing reads.
+constexpr std::string_view kDroppedSuffix = ".dropped";
+
+// Whether `name`, a bare file name, is that of a log that a lenient open set aside: the name of a
+// log, as LogFileName() makes it, and the suffix, and nothing else.
+bool IsDroppedLog(const std::string& name) {
+  if (name.size() <= kDroppedSuffix.size() || !name.ends_with(kDroppedSuffix)) {
+    return false;
+  }
+  uint64_t number = 0;
+  FileType type = FileType::kCurrentFile;
+  return ParseFileName(std::string_view(name).substr(0, name.size() - kDroppedSuffix.size()),
+                       &number, &type) &&
+         type == FileType::kLogFile;
+}
+
 // Keeps the first thing that the log reader reports. A report is a defect in the log, and none is
 // benign by where it falls: the reader drops the rest of a block after one, and that can include
 // records that were acknowledged.
@@ -184,8 +200,12 @@ Status DestroyDB(const std::string& name, const Options& options) {
     }
     uint64_t number = 0;
     FileType type = FileType::kCurrentFile;
-    if (!ParseFileName(child, &number, &type) || type == FileType::kLockFile) {
-      continue;  // not the database's, or the lock, which goes last
+    if (ParseFileName(child, &number, &type)) {
+      if (type == FileType::kLockFile) {
+        continue;  // the lock goes last
+      }
+    } else if (!IsDroppedLog(child)) {
+      continue;  // not the database's
     }
     std::string path = name;
     path.push_back('/');
@@ -473,7 +493,7 @@ Status DBImpl::SetAsideLogs(const std::vector<uint64_t>& logs, size_t first,
   // replayed behind one that was set aside.
   for (size_t i = logs.size(); i > first; i--) {
     const std::string from = LogFileName(dbname_, logs[i - 1]);
-    const std::string to = from + ".dropped";
+    const std::string to = from + std::string(kDroppedSuffix);
     Status s = env_->RenameFile(from, to);
     if (!s.ok()) {
       return s;

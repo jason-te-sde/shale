@@ -366,6 +366,9 @@ TEST_F(DBBasicTest, DestroyDBRemovesEverything) {
   ASSERT_OK(Put("a", "1"));
   Reopen();
   env_->SetFileContents(TempFileName(dbname_, 77), "half a CURRENT");
+  // A log that a lenient open set aside: DestroyDB is a request to delete the database, and it
+  // takes these with it.
+  env_->SetFileContents(LogFileName(dbname_, 9) + ".dropped", "writes that were dropped");
   Close();
   const std::vector<std::string> files = DbFiles();
   const auto has_type = [&](FileType wanted) {
@@ -389,6 +392,7 @@ TEST_F(DBBasicTest, DestroyDBRemovesEverything) {
   EXPECT_FALSE(env_->FileExists("/db/LOG"));
   EXPECT_FALSE(env_->FileExists("/db/LOCK"));
   EXPECT_FALSE(env_->FileExists(TempFileName(dbname_, 77)));
+  EXPECT_FALSE(env_->FileExists(LogFileName(dbname_, 9) + ".dropped"));
   EXPECT_FALSE(env_->FileExists("/db"));
 
   // Destroying what is not there is a success.
@@ -413,11 +417,22 @@ TEST_F(DBBasicTest, DestroyDBRefusesADatabaseThatIsOpen) {
 
 TEST_F(DBBasicTest, DestroyDBLeavesFilesItDoesNotKnow) {
   Close();
-  env_->SetFileContents("/db/notes.txt", "mine");
+  // Only a log's own name with ".dropped" after it is the database's: anything else that merely
+  // looks like it is somebody's file.
+  const std::vector<std::string> strangers = {
+      "notes.txt", "notes.log.dropped", TableFileName("", 9).substr(1) + ".dropped",
+      LogFileName("", 9).substr(1) + ".dropped.bak", ".dropped"};
+  for (const std::string& name : strangers) {
+    env_->SetFileContents(dbname_ + "/" + name, "mine");
+  }
   ASSERT_OK(DestroyDB(dbname_, CurrentOptions()));
-  EXPECT_EQ(env_->FileContents("/db/notes.txt"), "mine");
+  for (const std::string& name : strangers) {
+    EXPECT_EQ(env_->FileContents(dbname_ + "/" + name), "mine") << name;
+  }
   EXPECT_FALSE(env_->FileExists("/db/CURRENT"));
-  EXPECT_EQ(DbFiles(), (std::vector<std::string>{"notes.txt"}));
+  std::vector<std::string> expected = strangers;
+  std::sort(expected.begin(), expected.end());
+  EXPECT_EQ(DbFiles(), expected);
 }
 
 TEST_F(DBBasicTest, InfoLogIsWritten) { EXPECT_FALSE(env_->FileContents("/db/LOG").empty()); }
