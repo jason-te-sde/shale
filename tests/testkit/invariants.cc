@@ -53,6 +53,9 @@ std::string Show(std::string_view bytes) {
   return shown;
 }
 
+// How the message of a check that refuses its arguments starts, for Classify() to see.
+constexpr std::string_view kCallerBugPrefix = "caller bug: ";
+
 // The alarm of invariant `id`.
 Status Alarm(std::string_view id, const std::string& message) {
   return Status::Corruption(std::string(id) + ": " + message);
@@ -121,20 +124,24 @@ ModelDB::State AfterPrefix(const ModelDB::State& durable, const std::vector<Writ
 
 }  // namespace
 
-bool IsInvariantViolation(const Status& s) {
-  if (!s.IsCorruption()) {
-    return false;
+CheckOutcome Classify(const Status& s) {
+  if (s.ok()) {
+    return CheckOutcome::kOk;
   }
-  // "Corruption: I", digits, ": ".
   const std::string text = MessageOf(s);
-  if (text.size() < 4 || text[0] != 'I') {
-    return false;
+  if (s.IsInvalidArgument() && text.compare(0, kCallerBugPrefix.size(), kCallerBugPrefix) == 0) {
+    return CheckOutcome::kCallerBug;
   }
+  if (!s.IsCorruption() || text.empty() || text[0] != 'I') {
+    return CheckOutcome::kReadFailure;
+  }
+  // "I", digits, ": ".
   size_t i = 1;
   while (i < text.size() && text[i] >= '0' && text[i] <= '9') {
     i++;
   }
-  return i > 1 && text.compare(i, 2, ": ") == 0;
+  return i > 1 && text.compare(i, 2, ": ") == 0 ? CheckOutcome::kInvariantViolation
+                                                : CheckOutcome::kReadFailure;
 }
 
 Status CheckReadsMatch(DB* db, const ModelDB::State& model, const Snapshot* snapshot) {
@@ -268,7 +275,8 @@ Status CheckRecoveredPrefix(DB* db, const ModelDB::State& durable,
                             const std::vector<WriteBatch>& uncertain, size_t min_prefix,
                             ModelDB::State* matched) {
   if (min_prefix > uncertain.size()) {
-    return Status::InvalidArgument("CheckRecoveredPrefix: min_prefix " +
+    return Status::InvalidArgument(std::string(kCallerBugPrefix) +
+                                   "CheckRecoveredPrefix: min_prefix " +
                                    std::to_string(min_prefix) + " is above the " +
                                    std::to_string(uncertain.size()) + " uncertain write(s)");
   }

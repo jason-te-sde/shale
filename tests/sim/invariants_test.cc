@@ -29,8 +29,10 @@
 #include "shale/scheduler.h"
 #include "shale/status.h"
 #include "shale/write_batch.h"
+#include "testkit/fault_env.h"
 #include "testkit/model_db.h"
 #include "testkit/test_util.h"
+#include "util/check.h"
 #include "util/dbformat.h"
 #include "util/filename.h"
 #include "util/random.h"
@@ -39,6 +41,41 @@ namespace shale {
 namespace {
 
 constexpr const char* kDbName = "/db";
+
+// An iterator that serves its entries in the order it was given, whatever that is, and so can serve
+// them out of key order, which NewVectorIterator() may not: its entries must be sorted. Seek()
+// takes the first entry, in the order served, whose key is not less than the target.
+class UnorderedIterator final : public Iterator {
+ public:
+  explicit UnorderedIterator(Entries entries)
+      : entries_(std::move(entries)), position_(entries_.size()) {}
+
+  bool Valid() const override { return position_ < entries_.size(); }
+  void SeekToFirst() override { position_ = 0; }
+  void Seek(std::string_view target) override {
+    position_ = 0;
+    while (position_ < entries_.size() && std::string_view(entries_[position_].first) < target) {
+      position_++;
+    }
+  }
+  void Next() override {
+    SHALE_CHECK(Valid(), "UnorderedIterator::Next requires Valid");
+    position_++;
+  }
+  std::string_view key() const override {
+    SHALE_CHECK(Valid(), "UnorderedIterator::key requires Valid");
+    return entries_[position_].first;
+  }
+  std::string_view value() const override {
+    SHALE_CHECK(Valid(), "UnorderedIterator::value requires Valid");
+    return entries_[position_].second;
+  }
+  Status status() const override { return Status::OK(); }
+
+ private:
+  const Entries entries_;
+  size_t position_;
+};
 
 // A database that answers like the real one behind it, except where it has been told to lie. Every
 // lie is a single, named way for a database to be wrong, so that a test can say which wrong answer
@@ -124,6 +161,7 @@ class LyingDB final : public DB {
     }
     if (scan_reverses_) {
       std::reverse(entries.begin(), entries.end());
+      return std::make_unique<UnorderedIterator>(std::move(entries));
     }
     if (scan_fails_after_.has_value()) {
       entries.resize(std::min(entries.size(), *scan_fails_after_));
@@ -160,6 +198,10 @@ class LyingDB final : public DB {
 testing::AssertionResult IsAlarm(const Status& s, const std::string& id) {
   const std::string prefix = "Corruption: " + id + ": ";
   if (s.ToString().compare(0, prefix.size(), prefix) == 0) {
+    if (Classify(s) != CheckOutcome::kInvariantViolation) {
+      return testing::AssertionFailure()
+             << "an alarm that Classify() does not call a violation: " << s.ToString();
+    }
     return testing::AssertionSuccess();
   }
   return testing::AssertionFailure()
@@ -183,7 +225,7 @@ WriteBatch PutBatch(const std::string& key, const std::string& value) {
 class InvariantsTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    env_ = NewMemEnv();
+    env_ = std::make_unique<FaultInjectionEnv>(1);
     options_.env = env_.get();
     options_.scheduler = &scheduler_;
     options_.create_if_missing = true;
@@ -250,26 +292,46 @@ class InvariantsTest : public ::testing::Test {
   }
 
   Options options_;
-  std::unique_ptr<Env> env_;
+  std::unique_ptr<FaultInjectionEnv> env_;  // without a fault armed, a plain in-memory Env
   ManualScheduler scheduler_;
   std::unique_ptr<LyingDB> db_;  // before the scheduler and the Env go: it is closed first
   ModelDB model_;
 };
 
 // ---------------------------------------------------------------------------------------------
-// IsInvariantViolation
+// Classify
 
-TEST(InvariantViolationTest, RecognisesTheChecksOwnAlarmsAndNothingElse) {
-  EXPECT_TRUE(IsInvariantViolation(Status::Corruption("I1: key 'a' is missing")));
-  EXPECT_TRUE(IsInvariantViolation(Status::Corruption("I4: no prefix")));
-  EXPECT_FALSE(IsInvariantViolation(Status::OK()));
-  EXPECT_FALSE(IsInvariantViolation(Status::IOError("I1: looks like one")))
+TEST(ClassifyTest, OkIsOk) { EXPECT_EQ(Classify(Status::OK()), CheckOutcome::kOk); }
+
+TEST(ClassifyTest, ACorruptionWithAnInvariantIdIsAViolation) {
+  EXPECT_EQ(Classify(Status::Corruption("I1: key 'a' is missing")),
+            CheckOutcome::kInvariantViolation);
+  EXPECT_EQ(Classify(Status::Corruption("I4: no prefix")), CheckOutcome::kInvariantViolation);
+  EXPECT_EQ(Classify(Status::Corruption("I12: more than one digit")),
+            CheckOutcome::kInvariantViolation);
+}
+
+TEST(ClassifyTest, EverythingElseThatFailedIsAReadFailure) {
+  EXPECT_EQ(Classify(Status::IOError("injected", "read")), CheckOutcome::kReadFailure);
+  EXPECT_EQ(Classify(Status::NotFound("no such file")), CheckOutcome::kReadFailure);
+  EXPECT_EQ(Classify(Status::Corruption("block checksum mismatch", "000007.sst")),
+            CheckOutcome::kReadFailure)
+      << "the engine's own Corruption is a read that failed, not a wrong answer";
+  EXPECT_EQ(Classify(Status::IOError("I1: looks like one")), CheckOutcome::kReadFailure)
       << "an alarm is a Corruption";
-  EXPECT_FALSE(IsInvariantViolation(Status::Corruption("block checksum mismatch", "000007.sst")))
-      << "the engine's own Corruption is a read failure, not a wrong answer";
-  EXPECT_FALSE(IsInvariantViolation(Status::Corruption("I: no number")));
-  EXPECT_FALSE(IsInvariantViolation(Status::Corruption("I1 no colon")));
-  EXPECT_FALSE(IsInvariantViolation(Status::Corruption("not I1: in the middle")));
+  EXPECT_EQ(Classify(Status::Corruption("I: no number")), CheckOutcome::kReadFailure);
+  EXPECT_EQ(Classify(Status::Corruption("I1 no colon")), CheckOutcome::kReadFailure);
+  EXPECT_EQ(Classify(Status::Corruption("not I1: in the middle")), CheckOutcome::kReadFailure);
+  EXPECT_EQ(Classify(Status::InvalidArgument("key too large")), CheckOutcome::kReadFailure)
+      << "the database refusing a read is the database's answer, not the caller's mistake in "
+         "using a check";
+}
+
+TEST(ClassifyTest, OnlyACheckRefusingItsArgumentsIsACallerBug) {
+  EXPECT_EQ(Classify(Status::InvalidArgument("caller bug: min_prefix 3 is above 2")),
+            CheckOutcome::kCallerBug);
+  EXPECT_EQ(Classify(Status::Corruption("caller bug: not an InvalidArgument")),
+            CheckOutcome::kReadFailure);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -420,7 +482,7 @@ TEST_F(InvariantsTest, ReadsMatchReportsAReadErrorAsItIsNotAsAWrongAnswer) {
   db_->GetFailsWith(Status::IOError("injected", "read"));
   Status s = CheckReadsMatch(db_.get(), model_.state(), nullptr);
   EXPECT_TRUE(s.IsIOError()) << s.ToString();
-  EXPECT_FALSE(IsInvariantViolation(s));
+  EXPECT_EQ(Classify(s), CheckOutcome::kReadFailure);
 }
 
 TEST_F(InvariantsTest, ReadsMatchReportsAFailedScanAsItIsNotAsMissingKeys) {
@@ -428,9 +490,8 @@ TEST_F(InvariantsTest, ReadsMatchReportsAFailedScanAsItIsNotAsMissingKeys) {
   db_->ScanFailsAfter(2, Status::Corruption("block checksum mismatch", "000007.sst"));
   const Status s = CheckReadsMatch(db_.get(), model_.state(), nullptr);
   EXPECT_TRUE(s.IsCorruption());
-  EXPECT_FALSE(IsInvariantViolation(s)) << "the scan stopped because it failed, not because the "
-                                           "data ran out: "
-                                        << s.ToString();
+  EXPECT_EQ(Classify(s), CheckOutcome::kReadFailure)
+      << "the scan stopped because it failed, not because the data ran out: " << s.ToString();
   EXPECT_TRUE(Contains(s.ToString(), "block checksum mismatch"));
 }
 
@@ -595,10 +656,34 @@ TEST_F(InvariantsTest, OrphanCheckOnlyCountsTables) {
   EXPECT_OK(CheckNoOrphanTables(env_.get(), kDbName, live));
 }
 
+TEST_F(InvariantsTest, OrphanCheckAlarmsOnATableThatAFailedRemoveLeftUntilTheNextSweep) {
+  // I3 needs more than a database that is idle and has no error. The sweep that deletes the tables
+  // nothing names any more swallows a RemoveFile that fails: it logs it and tries again at its
+  // next run, without setting a background error. A correct database therefore has an orphan for as
+  // long as that failure stands, and the check must not be run then. This shows the orphan, and its
+  // going at the next sweep, so that the precondition in invariants.h is demonstrated.
+  BuildTwoLevels();
+  const uint64_t injected_before = env_->injected_errors();
+  env_->FailOpAfter(FaultInjectionEnv::Op::kRemove, 0);
+  ASSERT_OK(db_->CompactRange(std::nullopt, std::nullopt));
+  ASSERT_EQ(env_->injected_errors(), injected_before + 1) << "the failure of RemoveFile happened";
+
+  std::string background_error;
+  ASSERT_TRUE(db_->GetProperty("shale.background-error", &background_error));
+  EXPECT_EQ(background_error, "OK") << "nothing in the database says that a table was left";
+  const Status orphan = CheckNoOrphanTables(env_.get(), kDbName, impl()->TEST_LiveFiles());
+  EXPECT_TRUE(IsAlarm(orphan, "I3")) << orphan.ToString();
+
+  // The failure was injected once. The next sweep, which a flush ends with, finds the table again.
+  Put("after", "the failure");
+  ASSERT_OK(db_->Flush());
+  EXPECT_OK(CheckNoOrphanTables(env_.get(), kDbName, impl()->TEST_LiveFiles()));
+}
+
 TEST_F(InvariantsTest, OrphanCheckReportsAnUnreadableDirectoryAsItIs) {
   const Status s = CheckNoOrphanTables(env_.get(), "/no-such-dir", {});
   EXPECT_FALSE(s.ok());
-  EXPECT_FALSE(IsInvariantViolation(s))
+  EXPECT_EQ(Classify(s), CheckOutcome::kReadFailure)
       << "an unlistable directory is the Env's error: " << s.ToString();
 }
 
@@ -729,8 +814,10 @@ TEST_F(InvariantsTest, PrefixCheckAcceptsAnEmptyDatabase) {
 
 TEST_F(InvariantsTest, PrefixCheckRefusesAMinimumNoPrefixCanMeet) {
   const Status s = CheckRecoveredPrefix(db_.get(), {}, {PutBatch("a", "1")}, 2, nullptr);
-  EXPECT_TRUE(s.IsInvalidArgument())
-      << "a caller's mistake, not a defect of the database: " << s.ToString();
+  EXPECT_TRUE(s.IsInvalidArgument()) << s.ToString();
+  EXPECT_EQ(Classify(s), CheckOutcome::kCallerBug)
+      << "a caller's mistake, not a defect of the database and not a read that failed: "
+      << s.ToString();
 }
 
 TEST_F(InvariantsTest, PrefixCheckReportsAFailedScanAsItIsNotAsAMismatch) {
@@ -739,7 +826,7 @@ TEST_F(InvariantsTest, PrefixCheckReportsAFailedScanAsItIsNotAsAMismatch) {
   db_->ScanFailsAfter(1, Status::IOError("injected", "read"));
   const Status s = CheckRecoveredPrefix(db_.get(), {{"a", "1"}}, {PutBatch("b", "2")}, 0, nullptr);
   EXPECT_TRUE(s.IsIOError()) << s.ToString();
-  EXPECT_FALSE(IsInvariantViolation(s));
+  EXPECT_EQ(Classify(s), CheckOutcome::kReadFailure);
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -120,8 +120,9 @@ TEST(ModelDBTest, DigestSeesEveryEntryAndEveryByte) {
 }
 
 TEST(ModelDBTest, DigestFillsBothHalvesOfTheWord) {
-  // 32 bits of hash would be too few to tell a thousand states apart without a collision showing
-  // up in a long run; the digest is two independent 32-bit chains.
+  // The digest is two 32-bit hash chains from different seeds, one in each half of the word. A
+  // 32-bit hash widened to 64 bits would leave the high half empty and gain nothing, so both halves
+  // must carry a hash of the contents and the two must not be the same hash.
   const uint64_t digest = ModelDB::Digest({{"a", "1"}});
   EXPECT_NE(digest >> 32, uint64_t{0});
   EXPECT_NE(digest & 0xffffffffu, uint64_t{0});
