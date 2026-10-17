@@ -10,6 +10,8 @@ shale_add_library(shale_util
     util/check.cc
     util/coding.cc
     util/crc32c.cc
+    util/dbformat.cc
+    util/filename.cc
     util/hash.cc
     util/status.cc
   LIBS Threads::Threads)

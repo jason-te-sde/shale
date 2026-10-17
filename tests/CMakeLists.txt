@@ -30,6 +30,8 @@ shale_add_test(mutex SOURCES util/mutex_test.cc LIBS shale_util)
 shale_add_test(coding SOURCES util/coding_test.cc LIBS shale_util)
 shale_add_test(crc32c SOURCES util/crc32c_test.cc LIBS shale_util)
 shale_add_test(hash SOURCES util/hash_test.cc LIBS shale_util)
+shale_add_test(dbformat SOURCES util/dbformat_test.cc LIBS shale_util)
+shale_add_test(filename SOURCES util/filename_test.cc LIBS shale_util)
 
 # Clang's thread-safety analysis is what makes SHALE_GUARDED_BY more than a comment, and nothing
 # else would notice if it silently stopped working. So the build itself is tested: one translation
