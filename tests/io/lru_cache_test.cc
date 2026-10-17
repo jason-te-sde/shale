@@ -118,6 +118,27 @@ TEST(LRUCacheTest, ZeroCapacityRetainsNothing) {
   sharded.Insert(1, Boxed(5), 1);
   EXPECT_EQ(sharded.Lookup(1), nullptr);
   EXPECT_EQ(sharded.TotalCharge(), 0U);
+
+  cache.Insert(2, Boxed(6), 0);
+  EXPECT_EQ(cache.Lookup(2), nullptr) << "nor does an entry that says it costs nothing";
+  EXPECT_EQ(cache.TotalCharge(), 0U);
+}
+
+TEST(LRUCacheTest, ZeroChargeCountsAsOne) {
+  // A block of no bytes, from a damaged table, is still a block that takes an entry. If it cost
+  // nothing, entries like it would never be evicted by the charges adding up.
+  IntCache cache = SingleShard(2);
+  cache.Insert(1, Boxed(1), 0);
+  EXPECT_NE(cache.Lookup(1), nullptr) << "it is cached";
+  EXPECT_EQ(cache.TotalCharge(), 1U) << "and counted as 1";
+
+  cache.Insert(2, Boxed(2), 0);
+  EXPECT_EQ(cache.TotalCharge(), 2U);
+  cache.Insert(3, Boxed(3), 0);
+  EXPECT_EQ(cache.TotalCharge(), 2U) << "so the third pushes the least recently used one out";
+  EXPECT_EQ(cache.Lookup(1), nullptr);
+  EXPECT_NE(cache.Lookup(2), nullptr);
+  EXPECT_NE(cache.Lookup(3), nullptr);
 }
 
 TEST(LRUCacheTest, EvictedValueStaysAliveWhileHeld) {
@@ -188,13 +209,13 @@ TEST(LRUCacheTest, CapacityIsSplitEvenlyAcrossShards) {
   EXPECT_EQ(exact.TotalCharge(), 100U);
 }
 
-TEST(LRUCacheTest, ConsecutiveKeysSpreadAcrossShards) {
-  // The shard comes from a hash of the key. std::hash of an integer is the integer itself, so
-  // taking its low or high bits as they are would send consecutive keys to the same few shards,
-  // and the cache would hold far less than its capacity.
+TEST(LRUCacheTest, KeysThatAreMultiplesOfABlockSizeSpreadAcrossShards) {
+  // A block cache is keyed by file offsets, which are multiples of the block size. The standard
+  // hash of an integer is the integer itself, so with 16 shards a shard taken from its low bits
+  // would be 0 for all of them, and a cache of 160 would hold 10. The hash is mixed first.
   ShardedLRUCache<int, int> cache(160, 4);
   for (int i = 0; i < 160; ++i) {
-    cache.Insert(i, Boxed(i), 1);
+    cache.Insert(i * 4096, Boxed(i), 1);
   }
   EXPECT_GE(cache.TotalCharge(), 110U) << "16 shards of 10, 160 keys";
 }
@@ -212,7 +233,6 @@ TEST(LRUCacheTest, StringKeys) {
 TEST(LRUCacheDeathTest, MisuseAborts) {
   IntCache cache = SingleShard(10);
   EXPECT_DEATH(cache.Insert(1, nullptr, 1), "value");
-  EXPECT_DEATH(cache.Insert(1, Boxed(1), 0), "charge");
   EXPECT_DEATH(IntCache(10, -1), "num_shard_bits");
   EXPECT_DEATH(IntCache(10, 17), "num_shard_bits");
 }

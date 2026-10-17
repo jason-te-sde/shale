@@ -1,6 +1,7 @@
 #ifndef SHALE_IO_LRU_CACHE_H_
 #define SHALE_IO_LRU_CACHE_H_
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -77,14 +78,16 @@ class ShardedLRUCache {
   /// but an entry for the key is still replaced, by nothing, so that a later Lookup() cannot return
   /// the value this one superseded.
   ///
-  /// Aborts if `value` is null, because a lookup could not tell it from a miss, or if `charge` is
-  /// 0, because an entry that costs nothing is never evicted by the charges adding up.
+  /// A charge of 0 counts as 1: an entry that costs nothing would never be evicted by the charges
+  /// adding up, and a cache full of them, a block of no bytes from a damaged table among them,
+  /// would grow without bound. Aborts if `value` is null, because a lookup could not tell it from
+  /// a miss.
   /// @param key the key to cache under.
   /// @param value the object to cache.
-  /// @param charge what the entry costs to keep, in the units `capacity` is in; at least 1.
+  /// @param charge what the entry costs to keep, in the units `capacity` is in.
   std::shared_ptr<Value> Insert(const Key& key, std::shared_ptr<Value> value, size_t charge) {
     SHALE_CHECK(value != nullptr, "ShardedLRUCache::Insert needs a value");
-    SHALE_CHECK(charge > 0, "ShardedLRUCache::Insert needs a charge of at least 1");
+    charge = std::max<size_t>(charge, 1);
     // Declared before the shard's lock is taken, so that it is destroyed after the lock is
     // released: what the cache drops may be the last share of a value that uses the cache.
     std::vector<std::shared_ptr<Value>> dropped;
@@ -190,8 +193,9 @@ class ShardedLRUCache {
   Shard& ShardFor(const Key& key) const { return *shards_[Mix(hasher_(key)) & shard_mask_]; }
 
   // The 64-bit finalizer of MurmurHash3: every input bit changes about half the output bits. The
-  // standard hash of an integer is the integer, which would put consecutive keys in consecutive
-  // shards, or, for a shard picked by the high bits, every small key in the first.
+  // standard hash of an integer is the integer, and the keys of a block cache are offsets that are
+  // multiples of the block size, whose low bits are all zero; used as they are, they would pick
+  // the same shard every time.
   static size_t Mix(size_t h) {
     uint64_t x = h;
     x ^= x >> 33;
