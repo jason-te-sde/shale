@@ -154,8 +154,9 @@ class DBImpl final : public DB {
   /// @param options how to read; `options.snapshot` is checked as in Get().
   std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) override SHALE_EXCLUDES(mutex_);
 
-  /// Returns false for every property: there are none yet.
-  bool GetProperty(std::string_view property, std::string* value) override;
+  /// Reads a property as DB::GetProperty() says. The figures of one property are read together,
+  /// under the mutex: a property is a look at the database at one moment.
+  bool GetProperty(std::string_view property, std::string* value) override SHALE_EXCLUDES(mutex_);
 
   /// Returns a snapshot at the newest write that is done.
   const Snapshot* GetSnapshot() override SHALE_EXCLUDES(mutex_);

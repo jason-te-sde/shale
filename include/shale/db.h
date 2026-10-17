@@ -146,9 +146,27 @@ class DB {
   virtual Status CompactRange(std::optional<std::string_view> begin,
                               std::optional<std::string_view> end) = 0;
 
-  /// Reads a property of the database by name, such as "shale.num-files-at-level0".
+  /// Reads a property of the database by name. The properties are:
+  ///
+  /// - "shale.num-files-at-level<N>", with N from 0 to 6 in decimal and nothing else, as in
+  ///   "shale.num-files-at-level0": the number of table files at level N.
+  /// - "shale.total-sst-bytes": the size in bytes of all the table files.
+  /// - "shale.counters": what the database has counted, as `name=value` pairs separated by single
+  ///   spaces, in this order: flushes, compactions, trivial_moves, tombstones_dropped,
+  ///   shadowed_dropped, user_bytes_written, wal_bytes_written, flush_bytes_written,
+  ///   compaction_bytes_read, compaction_bytes_written, write_groups, wal_syncs, write_slowdowns,
+  ///   write_stops, bg_errors.
+  /// - "shale.write-amplification": the bytes written to the log, by flushes and by compactions,
+  ///   over the key and value bytes the callers wrote, with two decimals; "0.00" before any write.
+  /// - "shale.stats": the same, as text for a person: a header line, a line `Level <n>: <files>
+  ///   files, <bytes> bytes` for each level, and the counters.
+  /// - "shale.approximate-memory-usage": the bytes the memtables and the cache of table blocks
+  ///   hold, in decimal.
+  /// - "shale.background-error": "OK", or the error that stops writes.
+  ///
+  /// The figures of one property are taken together, at one moment.
   /// @param property the name of the property.
-  /// @param value receives the property's value as text.
+  /// @param value receives the property's value as text; left alone if there is no such property.
   /// @return false if there is no property of that name.
   virtual bool GetProperty(std::string_view property, std::string* value) = 0;
 };

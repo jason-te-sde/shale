@@ -706,7 +706,178 @@ std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& options) {
                             [this] { live_iterators_.fetch_sub(1, std::memory_order_acq_rel); });
 }
 
-bool DBImpl::GetProperty(std::string_view /*property*/, std::string* /*value*/) { return false; }
+namespace {
+
+// The prefix of every property.
+constexpr std::string_view kPropertyPrefix = "shale.";
+
+// The properties that are not a family: the name after the prefix.
+constexpr std::string_view kNumFilesAtLevel = "num-files-at-level";
+constexpr std::string_view kTotalSstBytes = "total-sst-bytes";
+constexpr std::string_view kCounters = "counters";
+constexpr std::string_view kWriteAmplification = "write-amplification";
+constexpr std::string_view kStats = "stats";
+constexpr std::string_view kApproximateMemoryUsage = "approximate-memory-usage";
+constexpr std::string_view kBackgroundError = "background-error";
+
+// A counter of DBCounters and the name that the counters property gives it. The list is in the
+// order of the struct, which is the order the property prints.
+struct CounterField {
+  const char* name;
+  uint64_t DBCounters::* member;
+};
+constexpr CounterField kCounterFields[] = {
+    {"flushes", &DBCounters::flushes},
+    {"compactions", &DBCounters::compactions},
+    {"trivial_moves", &DBCounters::trivial_moves},
+    {"tombstones_dropped", &DBCounters::tombstones_dropped},
+    {"shadowed_dropped", &DBCounters::shadowed_dropped},
+    {"user_bytes_written", &DBCounters::user_bytes_written},
+    {"wal_bytes_written", &DBCounters::wal_bytes_written},
+    {"flush_bytes_written", &DBCounters::flush_bytes_written},
+    {"compaction_bytes_read", &DBCounters::compaction_bytes_read},
+    {"compaction_bytes_written", &DBCounters::compaction_bytes_written},
+    {"write_groups", &DBCounters::write_groups},
+    {"wal_syncs", &DBCounters::wal_syncs},
+    {"write_slowdowns", &DBCounters::write_slowdowns},
+    {"write_stops", &DBCounters::write_stops},
+    {"bg_errors", &DBCounters::bg_errors},
+};
+// A field added to DBCounters and left out of the list would be a counter that no property shows.
+static_assert(sizeof(kCounterFields) / sizeof(kCounterFields[0]) * sizeof(uint64_t) ==
+                  sizeof(DBCounters),
+              "every field of DBCounters is in kCounterFields");
+
+// The counters as "name=value" pairs separated by single spaces.
+std::string CountersText(const DBCounters& counters) {
+  std::string text;
+  for (const CounterField& field : kCounterFields) {
+    if (!text.empty()) {
+      text.push_back(' ');
+    }
+    text.append(field.name);
+    text.push_back('=');
+    text.append(std::to_string(counters.*field.member));
+  }
+  return text;
+}
+
+// The level that `digits` names: a decimal number, with no sign, no space and no zero in front of
+// it, below kNumLevels. Anything else is not a level: it is not a property.
+std::optional<int> ParseLevel(std::string_view digits) {
+  if (digits.empty() || digits.size() > 2 || (digits.size() > 1 && digits[0] == '0')) {
+    return std::nullopt;
+  }
+  int level = 0;
+  for (const char c : digits) {
+    if (c < '0' || c > '9') {
+      return std::nullopt;
+    }
+    level = level * 10 + (c - '0');
+  }
+  if (level >= kNumLevels) {
+    return std::nullopt;
+  }
+  return level;
+}
+
+// `numerator` over `denominator` as a decimal with two places, rounded half up, and "0.00" when
+// there is no denominator. Whole numbers all the way: a figure that is printed must not change
+// with the locale of the program or the C library that formats it.
+std::string FormatRatio(uint64_t numerator, uint64_t denominator) {
+  if (denominator == 0) {
+    return "0.00";
+  }
+  uint64_t whole = numerator / denominator;
+  uint64_t remainder = numerator % denominator;
+  // The remainder is multiplied by 100 below. A denominator that large is a hundred petabytes of
+  // writes, where a loss of one part in 2^56 is not a figure that anyone reads.
+  while (denominator > (uint64_t{1} << 56)) {
+    denominator >>= 1;
+    remainder >>= 1;
+  }
+  uint64_t hundredths = (remainder * 100 + denominator / 2) / denominator;
+  if (hundredths >= 100) {
+    whole++;
+    hundredths -= 100;
+  }
+  std::string text = std::to_string(whole);
+  text.push_back('.');
+  if (hundredths < 10) {
+    text.push_back('0');
+  }
+  text.append(std::to_string(hundredths));
+  return text;
+}
+
+}  // namespace
+
+bool DBImpl::GetProperty(std::string_view property, std::string* value) {
+  SHALE_CHECK(value != nullptr, "GetProperty needs somewhere to put the value");
+  if (!property.starts_with(kPropertyPrefix)) {
+    return false;
+  }
+  const std::string_view name = property.substr(kPropertyPrefix.size());
+
+  std::optional<int> level;
+  if (name.starts_with(kNumFilesAtLevel)) {
+    level = ParseLevel(name.substr(kNumFilesAtLevel.size()));
+    if (!level.has_value()) {
+      return false;
+    }
+  } else if (name != kTotalSstBytes && name != kCounters && name != kWriteAmplification &&
+             name != kStats && name != kApproximateMemoryUsage && name != kBackgroundError) {
+    return false;
+  }
+
+  // One look at all of it, under the mutex: the figures of one property agree with each other.
+  MutexLock lock(&mutex_);
+  const VersionState& state = versions_.current()->state();
+  if (level.has_value()) {
+    *value = std::to_string(state.files[static_cast<size_t>(*level)].size());
+  } else if (name == kTotalSstBytes) {
+    uint64_t bytes = 0;
+    for (const std::vector<FileMetaData>& files : state.files) {
+      for (const FileMetaData& file : files) {
+        bytes += file.file_size;
+      }
+    }
+    *value = std::to_string(bytes);
+  } else if (name == kCounters) {
+    *value = CountersText(counters_);
+  } else if (name == kWriteAmplification) {
+    *value = FormatRatio(counters_.wal_bytes_written + counters_.flush_bytes_written +
+                             counters_.compaction_bytes_written,
+                         counters_.user_bytes_written);
+  } else if (name == kStats) {
+    std::string text = "shale stats\n";
+    for (int i = 0; i < kNumLevels; i++) {
+      const std::vector<FileMetaData>& files = state.files[static_cast<size_t>(i)];
+      uint64_t bytes = 0;
+      for (const FileMetaData& file : files) {
+        bytes += file.file_size;
+      }
+      text.append("Level ")
+          .append(std::to_string(i))
+          .append(": ")
+          .append(std::to_string(files.size()))
+          .append(" files, ")
+          .append(std::to_string(bytes))
+          .append(" bytes\n");
+    }
+    text.append("Counters: ").append(CountersText(counters_)).append("\n");
+    *value = std::move(text);
+  } else if (name == kApproximateMemoryUsage) {
+    size_t bytes = mem_->ApproximateMemoryUsage() + block_cache_.TotalCharge();
+    if (imm_ != nullptr) {
+      bytes += imm_->ApproximateMemoryUsage();
+    }
+    *value = std::to_string(bytes);
+  } else {
+    *value = bg_error_.ToString();
+  }
+  return true;
+}
 
 VersionState DBImpl::TEST_VersionState() {
   MutexLock lock(&mutex_);
