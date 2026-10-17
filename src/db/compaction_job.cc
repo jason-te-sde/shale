@@ -367,6 +367,10 @@ Status CompactionJob::RunImpl() {
 }
 
 VersionEdit CompactionJob::MakeEdit() const {
+  // A job that was told to stop made nothing, and its edit would delete every input and add
+  // nothing: the data they hold would be gone.
+  SHALE_CHECK(!stopped_,
+              "CompactionJob::MakeEdit: the job was stopped and made nothing to install");
   VersionEdit edit;
   for (size_t i = 0; i < plan_.inputs.size(); i++) {
     const int level = plan_.level + static_cast<int>(i);

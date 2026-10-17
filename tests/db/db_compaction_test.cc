@@ -76,6 +76,11 @@ class DBCompactionTest : public DBTestBase {
   int FillTheMemtable(const std::string& prefix) {
     int written = 0;
     while (CountFiles(FileType::kLogFile) < 2) {
+      // A buffer of 256 KiB is full after some 260 entries of a kilobyte.
+      EXPECT_LT(written, 1000) << "the memtable never switched";
+      if (written >= 1000) {
+        break;
+      }
       EXPECT_OK(Put(prefix + UserKey(written), KiB(written), /*sync=*/false));
       written++;
     }
@@ -784,8 +789,13 @@ TEST_F(DBCompactionTest, ClosingDoesNotWaitForTheWholeCompaction) {
 
   EXPECT_EQ(CountFiles(FileType::kTableFile), 4)
       << "the compaction finished, or left its outputs: only its four inputs belong";
+  // The counters are gone with the database, so what says that the compaction stopped without an
+  // error is its log, which the next open renames out of the way.
+  const std::string log = env_->FileContents("/db/LOG");
+  EXPECT_NE(log.find("stopped a compaction"), std::string::npos) << "the job did not stop: " << log;
+  EXPECT_EQ(log.find("write path stopped"), std::string::npos)
+      << "closing recorded a background error: " << log;
   Reopen(options);
-  EXPECT_EQ(dbfull()->TEST_Counters().bg_errors, 0u);
   for (int i = 0; i < 160; i++) {
     EXPECT_EQ(Get(UserKey(i)), KiB(i)) << "entry " << i;
   }

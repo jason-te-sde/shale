@@ -515,7 +515,6 @@ TEST_F(CompactionJobTest, AJobThatIsToldToStopRemovesItsOutputsAndSaysSo) {
   EXPECT_EQ(between_outputs_calls_, 2) << "the job made two outputs before it was told";
   EXPECT_TRUE(job.outputs().empty());
   EXPECT_EQ(TableFiles(), (std::set<std::string>{"000002.sst"})) << "an output was left behind";
-  EXPECT_TRUE(job.MakeEdit().new_files.empty());
 }
 
 TEST_F(CompactionJobTest, AJobThatIsToldToStopAtOnceMakesNoFile) {
@@ -745,6 +744,20 @@ TEST_F(CompactionJobDeathTest, RunningAJobTwiceAborts) {
   const std::unique_ptr<CompactionJob> job = NewJob(scenario, 1 << 20);
   ASSERT_OK(job->Run());
   EXPECT_DEATH(static_cast<void>(job->Run()), "called once");
+}
+
+TEST_F(CompactionJobDeathTest, MakingTheEditOfAStoppedJobAborts) {
+  // The edit of a job that made nothing deletes every input and adds nothing: a database that
+  // installed it would lose what the inputs hold. Nothing may produce it.
+  Scenario scenario;
+  ASSERT_NO_FATAL_FAILURE(MakeScenario({{{2, {{IKey("a", 1), "x"}}}}}, 0, &scenario));
+  CompactionJobContext ctx = Context(1 << 20);
+  ctx.should_stop = [] { return true; };
+  CompactionJob job(std::move(ctx), scenario.plan,
+                    std::make_shared<const Version>(scenario.state, &job_cache_), {});
+  ASSERT_OK(job.Run());
+  ASSERT_TRUE(job.stopped());
+  EXPECT_DEATH(static_cast<void>(job.MakeEdit()), "stopped");
 }
 
 }  // namespace

@@ -112,7 +112,8 @@ class CompactionJob {
 
   /// Returns the edit that installs the result: it deletes every input file from its level, adds
   /// the outputs at `plan.level + 1`, and moves the compact pointer of `plan.level` to
-  /// `plan.next_compact_pointer`. Meant for after a Run() that returned OK.
+  /// `plan.next_compact_pointer`. Meant for after a Run() that returned OK. Aborts if the job was
+  /// stopped: it made nothing, so the edit would delete the inputs and add nothing.
   VersionEdit MakeEdit() const;
 
   /// Removes the files of the outputs that are finished, and forgets them. Run() does it when it
