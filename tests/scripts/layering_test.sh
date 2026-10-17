@@ -79,6 +79,25 @@ put src/util/a.cc '#include "util/coding.h"' '#include "shale/options.h"' '#incl
   '#include <thread>' '#include <stdint.h>' '#include <string.h>'
 expect "util including util, shale and standard headers" 0
 
+# The CRC32C code needs the compiler's ARM intrinsics header. It is neither a standard header nor a
+# POSIX one, so it is allowed in util by name; the layers that must stay free of the platform are
+# not given it.
+new_tree
+put src/util/a.cc '#include <arm_acle.h>'
+expect "util including the compiler's ARM intrinsics header" 0
+
+new_tree
+put src/core/a.cc '#include <arm_acle.h>'
+expect "core including the compiler's ARM intrinsics header" 1 "src/core/a.cc:1:"
+
+new_tree
+put include/shale/a.h '#include <arm_acle.h>'
+expect "public header including the compiler's ARM intrinsics header" 1 "include/shale/a.h:1:"
+
+new_tree
+put src/util/a.cc '#include <arm_neon.h>'
+expect "util including a compiler header that is not on the list" 1 "src/util/a.cc:1:"
+
 # --- src/io: util/*, io/*, shale/*, standard and POSIX headers. --------------------------------
 
 new_tree

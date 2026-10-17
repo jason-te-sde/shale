@@ -8,5 +8,8 @@ shale_add_library(shale_util
   SOURCES
     util/arena.cc
     util/check.cc
+    util/coding.cc
+    util/crc32c.cc
+    util/hash.cc
     util/status.cc
   LIBS Threads::Threads)

@@ -5,7 +5,7 @@
 # library code never writes to stdout or stderr. `root` defaults to the repository root.
 #
 #   include/shale/*  shale/*, standard headers
-#   src/util/*       util/*, shale/*, standard headers
+#   src/util/*       util/*, shale/*, standard headers, <arm_acle.h>
 #   src/io/*         util/*, io/*, shale/*, standard and POSIX headers
 #   src/core/*       util/*, core/*, shale/status.h, standard headers, and none of the headers
 #                    that bring in threads, clocks, files, streams or randomness
@@ -14,7 +14,10 @@
 #                    rule, so the check would silently skip it
 #
 # "Standard" means a C++ library header (no extension) or a C library header such as <stdint.h>.
-# Any other angle-bracket header, <unistd.h> and <sys/stat.h> among them, is a POSIX header.
+# Any other angle-bracket header, <unistd.h> and <sys/stat.h> among them, is a POSIX header. The one
+# exception is <arm_acle.h>, the compiler's ARM intrinsics header, which src/util/crc32c.cc uses
+# for the hardware CRC32C instructions; src/util may include it by name and no other layer is
+# given it (src/io and src/db may include anything anyway).
 #
 # The output rule bans std::cout, std::cerr, printf(, fprintf( and puts( under include/ and src/,
 # except in src/util/check.cc, which prints its message right before aborting. snprintf( is fine,
@@ -94,6 +97,16 @@ is_standard_header() {
   esac
 }
 
+# A compiler header that gives access to CPU instructions. It is not part of any operating system's
+# interface, so it does not count as POSIX, but it is no standard header either: the list is the
+# complete set src/util is allowed.
+is_intrinsics_header() {
+  case "$1" in
+    arm_acle.h) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # stdio.h sits on the list as the C spelling of <cstdio>.
 core_banned_header() {
   case "$1" in
@@ -133,6 +146,9 @@ check_includes() {
       continue
     fi
     if [ "$kind" = '<' ] && [ "$layer" = io ]; then
+      continue
+    fi
+    if [ "$kind" = '<' ] && [ "$layer" = util ] && is_intrinsics_header "$spec"; then
       continue
     fi
     report "$file" "$lineno" "$(layer_rule "$layer"): found $shown"
