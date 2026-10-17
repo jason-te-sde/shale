@@ -40,8 +40,16 @@ class Arena {
     return AllocateFallback(bytes);
   }
 
-  /// Like Allocate(), but the result is aligned to `alignof(std::max_align_t)`, so that any
-  /// ordinary object can be constructed in it. `bytes` must be greater than zero.
+  /// The alignment of what AllocateAligned() returns, in bytes, on every platform: 16 is at least
+  /// `alignof(std::max_align_t)` wherever that is smaller, and a constant, so that how much of a
+  /// block a run of requests uses, and so when a memtable is full, is the same on every compiler
+  /// and library and a seeded run can be replayed anywhere.
+  static constexpr size_t kAlignment = 16;
+
+  /// Like Allocate(), but the result is aligned to kAlignment, so that any ordinary object can be
+  /// constructed in it. The padding is counted from where the request is in its block, not from
+  /// the address the block was given, and a block starts at an address that operator new aligns to
+  /// at least kAlignment. `bytes` must be greater than zero.
   char* AllocateAligned(size_t bytes);
 
   /// Returns the bytes the arena holds from the system: whole blocks plus the bookkeeping for
