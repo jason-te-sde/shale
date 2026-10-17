@@ -7,8 +7,12 @@
 #include <gtest/gtest.h>
 
 #include <cstddef>
+#include <memory>
 #include <string>
+#include <utility>
+#include <vector>
 
+#include "shale/iterator.h"
 #include "shale/status.h"
 
 namespace shale {
@@ -32,6 +36,20 @@ std::string RandomString(Random* rnd, size_t len);
 /// tests that round-trip data check that nothing treats a zero byte, a newline or a byte above
 /// 0x7f as special.
 std::string RandomBinaryString(Random* rnd, size_t len);
+
+/// Returns an iterator over `sorted`, a list of key-value pairs in ascending bytewise order of key
+/// (BytewiseCompare()), for tests of what is built on iterators: the two-level iterator, the
+/// merging iterator. Seek() finds the first entry whose key is not less than the target. It
+/// behaves as the Iterator contract says, and aborts where the contract is broken, on Next() or
+/// key() when it is not valid.
+///
+/// Its status() is `status` at every moment, and the entries are served whatever it is, so a test
+/// can give a child an error that shows while the child is still valid. An iterator that is
+/// invalid because of an error is NewErrorIterator().
+/// @param sorted the entries, sorted by key; keys may repeat, which Seek() does not mind.
+/// @param status what status() returns.
+std::unique_ptr<Iterator> NewVectorIterator(std::vector<std::pair<std::string, std::string>> sorted,
+                                            Status status = {});
 
 /// Creates a new, empty directory named `prefix` followed by random characters under
 /// `testing::TempDir()` and returns its path, without a trailing slash. Aborts if the directory
