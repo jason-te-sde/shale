@@ -74,9 +74,10 @@ Block::Block(std::string contents) : data_(std::move(contents)) {
 // that says all is well.
 class Block::Iter final : public Iterator {
  public:
-  Iter(std::shared_ptr<const Block> block, KeyCompareFn cmp)
+  Iter(std::shared_ptr<const Block> block, KeyCompareFn cmp, size_t min_key_size)
       : block_(std::move(block)),
         cmp_(cmp),
+        min_key_size_(min_key_size),
         data_(block_->data_.data()),
         entries_end_(block_->restart_offset_),
         num_restarts_(block_->num_restarts_),
@@ -162,8 +163,8 @@ class Block::Iter final : public Iterator {
   }
 
   // Reads the key stored whole at restart point `index` into `*key`, a view into the block.
-  // Returns false, with the iterator failed, if the offset is outside the entries or the entry
-  // there is damaged or shares bytes with a key before it.
+  // Returns false, with the iterator failed, if the offset is outside the entries, or the entry
+  // there is damaged or shares bytes with a key before it, or its key is too short to be compared.
   bool ReadRestartKey(uint32_t index, std::string_view* key) {
     const size_t offset = RestartOffset(index);
     uint32_t shared = 0;
@@ -173,7 +174,9 @@ class Block::Iter final : public Iterator {
     if (offset < entries_end_) {
       p = DecodeEntry(data_ + offset, data_ + entries_end_, &shared, &non_shared, &value_len);
     }
-    if (p == nullptr || shared != 0) {
+    // The key is stored whole here, so `non_shared` is its length. It is checked before the caller
+    // can compare it with anything.
+    if (p == nullptr || shared != 0 || non_shared < min_key_size_) {
       Fail();
       return false;
     }
@@ -204,6 +207,10 @@ class Block::Iter final : public Iterator {
     }
     key_.resize(shared);
     key_.append(p, non_shared);
+    if (key_.size() < min_key_size_) {
+      Fail();
+      return false;
+    }
     value_ = std::string_view(p + non_shared, value_len);
     next_ = static_cast<size_t>(value_.data() + value_.size() - data_);
     return true;
@@ -219,6 +226,7 @@ class Block::Iter final : public Iterator {
 
   const std::shared_ptr<const Block> block_;
   const KeyCompareFn cmp_;
+  const size_t min_key_size_;
   const char* const data_;
   const size_t entries_end_;
   const uint32_t num_restarts_;
@@ -229,10 +237,11 @@ class Block::Iter final : public Iterator {
   Status status_;
 };
 
-std::unique_ptr<Iterator> NewBlockIterator(std::shared_ptr<const Block> block, KeyCompareFn cmp) {
+std::unique_ptr<Iterator> NewBlockIterator(std::shared_ptr<const Block> block, KeyCompareFn cmp,
+                                           size_t min_key_size) {
   SHALE_CHECK(block != nullptr, "NewBlockIterator needs a block");
   SHALE_CHECK(cmp != nullptr, "NewBlockIterator needs a comparison function");
-  return std::make_unique<Block::Iter>(std::move(block), cmp);
+  return std::make_unique<Block::Iter>(std::move(block), cmp, min_key_size);
 }
 
 }  // namespace shale

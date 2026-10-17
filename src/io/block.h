@@ -38,7 +38,7 @@ class Block {
 
  private:
   friend std::unique_ptr<Iterator> NewBlockIterator(std::shared_ptr<const Block> block,
-                                                    KeyCompareFn cmp);
+                                                    KeyCompareFn cmp, size_t min_key_size);
   class Iter;
 
   const std::string data_;
@@ -52,8 +52,12 @@ class Block {
 /// Returns an iterator over the entries of `block`, in the order they were added. The iterator
 /// shares ownership of the block, so it stays valid after every other owner is gone. Seek() finds
 /// the first entry whose key `cmp` does not order before the target, which assumes `cmp` orders
-/// the keys the way the block was built; `cmp` is called with keys as they are stored, whatever
-/// bytes they hold.
+/// the keys the way the block was built.
+///
+/// `cmp` is called with keys as they are stored, and what is stored is whatever the file held, so
+/// a comparison that cannot take every byte string, CompareInternalKey() among them, needs
+/// `min_key_size`: an entry whose whole key is shorter ends the iteration with Corruption before
+/// the key reaches `cmp`, whether it is met walking the entries or probing a restart point.
 ///
 /// A block damaged in a way the decoder can see ends the iteration with a Corruption status:
 /// the entries before the damage are returned, and the iterator then stays invalid, so that a
@@ -61,7 +65,10 @@ class Block {
 /// data.
 /// @param block the block to read.
 /// @param cmp the order of the block's keys.
-std::unique_ptr<Iterator> NewBlockIterator(std::shared_ptr<const Block> block, KeyCompareFn cmp);
+/// @param min_key_size the length in bytes below which a key is damage; 0 accepts any key. A
+///   reader of internal keys passes 8, the size of the tag that ends one.
+std::unique_ptr<Iterator> NewBlockIterator(std::shared_ptr<const Block> block, KeyCompareFn cmp,
+                                           size_t min_key_size = 0);
 
 }  // namespace shale
 
