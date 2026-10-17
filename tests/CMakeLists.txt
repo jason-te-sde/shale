@@ -24,13 +24,17 @@ endforeach()
 
 # Helpers every layer's tests share. A later test-support file is added to SOURCES. The library
 # exports the tests/ directory so a test can include "testkit/test_util.h". It links shale_io, which
-# the fault-injecting Env implements, and passes it on: a test that links shale_testkit does not
-# name shale_io too, or the linker reports the library twice.
+# the fault-injecting Env implements, and shale_core, whose version rules the invariant checkers
+# apply, and passes both on: a test that links shale_testkit does not name them too, or the linker
+# reports the library twice. It does not link shale_db: the checkers see a database only through the
+# DB interface, so a test that needs the engine itself names shale_db, as the simulator's do.
 shale_add_library(shale_testkit
   SOURCES
     testkit/fault_env.cc
+    testkit/invariants.cc
+    testkit/model_db.cc
     testkit/test_util.cc
-  LIBS shale_io shale_util GTest::gtest)
+  LIBS shale_core shale_io shale_util GTest::gtest)
 target_include_directories(shale_testkit PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
 shale_add_test(status SOURCES util/status_test.cc LIBS shale_util)
@@ -95,6 +99,11 @@ shale_add_test(db_iter SOURCES db/db_iter_test.cc LIBS shale_dbtest)
 shale_add_test(db_snapshot SOURCES db/db_snapshot_test.cc LIBS shale_dbtest)
 shale_add_test(db_write SOURCES db/db_write_test.cc LIBS shale_dbtest)
 shale_add_test(db_properties SOURCES db/db_properties_test.cc LIBS shale_dbtest)
+
+# The deterministic simulator's reference model and the checkers of its invariants. Each checker is
+# tested against a database that lies, so that it is seen to alarm as well as to stay quiet.
+shale_add_test(model_db SOURCES sim/model_db_test.cc LIBS shale_testkit)
+shale_add_test(invariants SOURCES sim/invariants_test.cc LIBS shale_db shale_testkit)
 
 # Clang's thread-safety analysis is what makes SHALE_GUARDED_BY more than a comment, and nothing
 # else would notice if it silently stopped working. So the build itself is tested: one translation
