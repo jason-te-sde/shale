@@ -21,8 +21,11 @@ shale_add_library(shale_io
     io/env.cc
     io/env_posix.cc
     io/env_util.cc
+    io/iterator.cc
     io/log_reader.cc
     io/log_writer.cc
     io/mem_env.cc
+    io/memtable.cc
     io/scheduler.cc
+    io/write_batch.cc
   LIBS shale_util Threads::Threads)

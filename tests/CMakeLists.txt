@@ -52,6 +52,8 @@ shale_add_test(fault_env SOURCES io/fault_env_test.cc LIBS shale_testkit)
 shale_add_test(scheduler SOURCES io/scheduler_test.cc LIBS shale_io)
 shale_add_test(log SOURCES io/log_test.cc LIBS shale_testkit)
 shale_add_test(skiplist SOURCES io/skiplist_test.cc LIBS shale_testkit)
+shale_add_test(write_batch SOURCES io/write_batch_test.cc LIBS shale_testkit)
+shale_add_test(memtable SOURCES io/memtable_test.cc LIBS shale_testkit)
 
 # Clang's thread-safety analysis is what makes SHALE_GUARDED_BY more than a comment, and nothing
 # else would notice if it silently stopped working. So the build itself is tested: one translation

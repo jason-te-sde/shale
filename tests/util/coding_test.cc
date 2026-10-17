@@ -2,7 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <string>
@@ -155,6 +157,43 @@ TEST(CodingTest, VarintRoundTripAndLength) {
   EXPECT_EQ(VarintLength(0), 1);
   EXPECT_EQ(VarintLength(127), 1);
   EXPECT_EQ(VarintLength(128), 2);
+}
+
+TEST(CodingTest, EncodeVarint32WritesWhatPutVarint32Appends) {
+  // The raw-pointer form exists for the memtable, which writes an entry straight into the arena. It
+  // must produce the same bytes as the string form, and return where the next field starts.
+  std::vector<uint32_t> values = {0,
+                                  1,
+                                  127,
+                                  128,
+                                  16383,
+                                  16384,
+                                  2097151,
+                                  2097152,
+                                  268435455,
+                                  268435456,
+                                  std::numeric_limits<uint32_t>::max()};
+  Random rnd(307);
+  for (int i = 0; i < 500; i++) {
+    values.push_back(static_cast<uint32_t>(rnd.Next()) >> rnd.Uniform(32));
+  }
+  for (const uint32_t v : values) {
+    std::string expected;
+    PutVarint32(&expected, v);
+
+    // Fill the buffer with a pattern first, so that a byte written past the end shows up.
+    char buf[8];
+    std::fill(std::begin(buf), std::end(buf), static_cast<char>(0x5a));
+    char* const end = EncodeVarint32(buf, v);
+    ASSERT_EQ(static_cast<size_t>(end - buf), expected.size()) << v;
+    ASSERT_EQ(std::string(buf, expected.size()), expected) << v;
+    for (size_t i = expected.size(); i < sizeof(buf); i++) {
+      ASSERT_EQ(buf[i], static_cast<char>(0x5a)) << "wrote past the end for " << v;
+    }
+    uint32_t decoded = 0;
+    ASSERT_EQ(GetVarint32Ptr(buf, end, &decoded), end) << v;
+    ASSERT_EQ(decoded, v);
+  }
 }
 
 TEST(CodingTest, VarintsConcatenate) {
