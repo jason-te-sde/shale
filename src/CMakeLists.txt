@@ -20,6 +20,7 @@ shale_add_library(shale_io
   SOURCES
     io/block.cc
     io/block_builder.cc
+    io/bloom.cc
     io/env.cc
     io/env_posix.cc
     io/env_util.cc
