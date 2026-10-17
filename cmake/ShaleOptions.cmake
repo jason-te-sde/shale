@@ -21,7 +21,9 @@ set(SHALE_FLAW_NAMES
   ignore_snapshots_in_compaction
   skip_manifest_sync
   delete_live_files)
-set(SHALE_FLAW "" CACHE STRING "Compile in one deliberate flaw: empty or one of ${SHALE_FLAW_NAMES}")
+list(JOIN SHALE_FLAW_NAMES ", " SHALE_FLAW_NAMES_TEXT)
+set(SHALE_FLAW "" CACHE STRING
+  "Compile in one deliberate flaw: empty or one of ${SHALE_FLAW_NAMES_TEXT}")
 set_property(CACHE SHALE_FLAW PROPERTY STRINGS "" ${SHALE_FLAW_NAMES})
 
 # Compiler floors: GCC 13, Clang 17, AppleClang 15.
@@ -69,7 +71,7 @@ endif()
 
 if(NOT SHALE_FLAW STREQUAL "")
   if(NOT SHALE_FLAW IN_LIST SHALE_FLAW_NAMES)
-    message(FATAL_ERROR "SHALE_FLAW='${SHALE_FLAW}' is not one of: ${SHALE_FLAW_NAMES}")
+    message(FATAL_ERROR "SHALE_FLAW='${SHALE_FLAW}' is not one of: ${SHALE_FLAW_NAMES_TEXT}")
   endif()
   string(TOUPPER "${SHALE_FLAW}" _shale_flaw_upper)
   set(SHALE_FLAW_DEFINITION "SHALE_FLAW_${_shale_flaw_upper}=1")

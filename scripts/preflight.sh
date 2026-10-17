@@ -25,13 +25,19 @@ stage() {
   printf '\n==> %s\n' "$*"
 }
 
-# require_tool <tool> <version>: the tool must be on PATH and report exactly that version.
+# require_tool <tool> [<version>]: the tool must be on PATH and, when a version is given, report
+# exactly that version.
 require_tool() {
-  local tool=$1 version=$2 actual
+  local tool=$1 version=${2:-} actual
   if ! command -v "$tool" >/dev/null 2>&1; then
-    echo "preflight: $tool is not installed; run: uv tool install $tool==$version" >&2
+    if [ -n "$version" ]; then
+      echo "preflight: $tool is not installed; run: uv tool install $tool==$version" >&2
+    else
+      echo "preflight: $tool is not installed; install it with your package manager" >&2
+    fi
     exit 1
   fi
+  [ -n "$version" ] || return 0
   # The output goes through a variable, not a pipe into grep -q: grep exits at the first match
   # and the tool then dies of SIGPIPE, which `pipefail` would report as a failure.
   actual="$("$tool" --version 2>&1)"
@@ -67,6 +73,7 @@ build_and_test() {
 
 require_tool clang-format "$CLANG_FORMAT_VERSION"
 require_tool clang-tidy "$CLANG_TIDY_VERSION"
+require_tool doxygen
 require_compiler gcc-16 g++-16
 
 stage "clang-format"

@@ -17,6 +17,7 @@ endif()
 
 include(ShaleOptions)
 include(ShaleWarnings)
+include(ShaleTargets)
 
 if(SHALE_BUILD_TESTS)
   enable_testing()

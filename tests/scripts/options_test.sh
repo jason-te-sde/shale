@@ -3,11 +3,18 @@
 # that an accepted value reaches the compile commands. Every case configures with the tests turned
 # off, so nothing is fetched and nothing is compiled.
 #
-# Usage: options_test.sh <cmake> <generator>
+# Usage: options_test.sh <cmake> <generator> <c++ compiler>
+#
+# The compiler is the one the build under test was configured with. SHALE_FUZZ accepts or rejects a
+# compiler, so the cases must run with that one and not with whatever CXX the environment holds.
+# Only the C++ compiler is passed: the project enables no other language, and CMake warns about a
+# C compiler it never uses.
 set -uo pipefail
 
-cmake_cmd="${1:?usage: options_test.sh <cmake> <generator>}"
-generator="${2:?usage: options_test.sh <cmake> <generator>}"
+usage="usage: options_test.sh <cmake> <generator> <c++ compiler>"
+cmake_cmd="${1:?$usage}"
+generator="${2:?$usage}"
+cxx_compiler="${3:?$usage}"
 here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=tests/scripts/lib.sh
 . "$here/lib.sh"
@@ -23,7 +30,7 @@ build="$tmp/build"
 # in $status.
 configure() {
   output="$("$cmake_cmd" -S "$source_dir" -B "$build" -G "$generator" \
-    -DSHALE_BUILD_TESTS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+    "-DCMAKE_CXX_COMPILER=$cxx_compiler" -DSHALE_BUILD_TESTS=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     "-DSHALE_FLAW=$1" "-DSHALE_SANITIZE=$2" "-DSHALE_COVERAGE=$3" "-DSHALE_FUZZ=$4" 2>&1)"
   status=$?
 }
@@ -46,6 +53,10 @@ accepts() {
   done
 }
 
+# flatten: CMake wraps long messages at 80 columns, so a phrase can span two lines. This joins the
+# lines and collapses the runs of spaces that the indentation leaves.
+flatten() { tr '\n' ' ' | tr -s ' '; }
+
 # rejects <description> <flaw> <sanitize> <coverage> <fuzz> <fragment of the error message>
 rejects() {
   local description=$1 want=$6
@@ -54,7 +65,7 @@ rejects() {
   configure "$1" "$2" "$3" "$4"
   if [ "$status" -eq 0 ]; then
     fail "$description: configure succeeded" "$output"
-  elif [[ $output != *"$want"* ]]; then
+  elif [[ $(flatten <<<"$output") != *"$want"* ]]; then
     fail "$description: error does not mention '$want'" "$output"
   fi
 }
@@ -68,6 +79,19 @@ leaves_out() {
 }
 
 accepts "the defaults" "" "" OFF OFF "-Wold-style-cast" "-Werror"
+
+# The configure above must have used the compiler it was told to use.
+cases=$((cases + 1))
+used="$(sed -n 's/^CMAKE_CXX_COMPILER:[A-Z]*=//p' "$build/CMakeCache.txt")"
+if [ "$used" != "$cxx_compiler" ]; then
+  fail "the compiler under test: the configure used '$used', not '$cxx_compiler'"
+fi
+cases=$((cases + 1))
+help_text="$(sed -n '/^\/\/Compile in one deliberate flaw/,/^SHALE_FLAW:/p' "$build/CMakeCache.txt" |
+  sed 's#^//##' | flatten)"
+if [[ $help_text != *"empty or one of skip_wal_sync, skip_dir_sync, drop_tombstones_early"* ]]; then
+  fail "the SHALE_FLAW help text lists the valid names with commas" "$help_text"
+fi
 leaves_out "the defaults add no flaw" "SHALE_FLAW_"
 leaves_out "the defaults add no sanitizer" "-fsanitize"
 leaves_out "the defaults add no coverage" "--coverage"
@@ -79,6 +103,8 @@ for flaw in skip_wal_sync skip_dir_sync drop_tombstones_early ignore_snapshots_i
 done
 
 rejects "an unknown flaw" "no_such_flaw" "" OFF OFF "SHALE_FLAW"
+rejects "an unknown flaw lists the valid names with commas" "no_such_flaw" "" OFF OFF \
+  "skip_wal_sync, skip_dir_sync, drop_tombstones_early"
 rejects "a flaw spelled in upper case" "SKIP_WAL_SYNC" "" OFF OFF "SHALE_FLAW"
 
 accepts "address,undefined sanitizers" "" "address,undefined" OFF OFF \
