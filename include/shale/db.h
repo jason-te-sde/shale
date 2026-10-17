@@ -119,10 +119,20 @@ class DB {
   ///   the next open recovers it.
   virtual Status Flush() = 0;
 
-  /// Compacts the keys from `begin` to `end` through every level, so that the space the superseded
-  /// and removed entries take is given back. Returns when that is done.
-  /// @param begin the first key of the range; unbounded if empty.
-  /// @param end the last key of the range; unbounded if empty.
+  /// Compacts the files that hold keys from `begin` to `end`, so that the space that superseded and
+  /// removed entries take is given back in the files that are rewritten. Returns when that is done.
+  ///
+  /// The memtable is written out first. Then the range is compacted one level at a time, from
+  /// level 0 down to the level just above the deepest level that holds a file overlapping the
+  /// range, and always level 0: the files of each of those levels that overlap the range are
+  /// merged, with the files of the next level that they overlap, into that next level, and are
+  /// rewritten whether or not they could have moved down as they were. The range ends up in the
+  /// deepest level that had any of it, or in level 1 if that is deeper. The deepest populated level
+  /// is rewritten only when a shallower level overlaps the range and is merged into it: entries
+  /// that are only there, with nothing above to merge with, stay as they are, and what they take is
+  /// not given back.
+  /// @param begin the first key of the range; unbounded if nullopt.
+  /// @param end the last key of the range; unbounded if nullopt.
   virtual Status CompactRange(std::optional<std::string_view> begin,
                               std::optional<std::string_view> end) = 0;
 

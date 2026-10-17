@@ -52,6 +52,12 @@ struct CompactionJobContext {
   /// the next is begun: the database writes out the memtable that is waiting here, so that a write
   /// that is stalled for it does not wait for the whole compaction. May be empty.
   std::function<void()> between_outputs;
+  /// Asked on the job's thread before each output is begun, the first included. When it returns
+  /// true the job gives up: it removes its outputs and ends with CompactionJob::stopped() set. The
+  /// database says yes once it is closing, so that closing does not wait for the whole compaction.
+  /// Not asked in the middle of an output, so a job with one huge output is not interrupted. May be
+  /// empty, which is never.
+  std::function<bool()> should_stop;
 };
 
 /// What a job did, for the counters and the log.
@@ -94,8 +100,15 @@ class CompactionJob {
   /// Writes the outputs. Returns OK when every entry has been read and the outputs are durable,
   /// or the first error: the I/O error of a file, or the Corruption of an input that cannot be
   /// read, which names the table. An error removes the outputs that were finished and the one that
-  /// was being written, and outputs() is then empty. Aborts if called twice.
+  /// was being written, and outputs() is then empty. Returns OK too, with stopped() true and no
+  /// outputs, when `should_stop` said so: that is no error, and there is nothing to install.
+  /// Aborts if called twice.
   Status Run();
+
+  /// Returns true if Run() gave up because `should_stop` returned true: it returned OK, removed
+  /// whatever it had written and made nothing that an edit could name. The edit is then not to be
+  /// installed, since it would delete the inputs and add nothing.
+  bool stopped() const { return stopped_; }
 
   /// Returns the edit that installs the result: it deletes every input file from its level, adds
   /// the outputs at `plan.level + 1`, and moves the compact pointer of `plan.level` to
@@ -125,6 +138,7 @@ class CompactionJob {
   std::vector<FileMetaData> outputs_;
   CompactionJobStats stats_;
   bool started_ = false;
+  bool stopped_ = false;
 };
 
 }  // namespace shale

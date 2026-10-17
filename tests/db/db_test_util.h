@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "db/db_impl.h"
+#include "db/hook_env.h"
 #include "shale/db.h"
 #include "shale/options.h"
 #include "shale/scheduler.h"
@@ -21,6 +22,7 @@
 #include "testkit/fault_env.h"
 #include "testkit/test_util.h"
 #include "util/dbformat.h"
+#include "util/filename.h"
 
 namespace shale {
 
@@ -74,10 +76,37 @@ class DBTestBase : public ::testing::Test {
   /// Returns the open database as the class under test.
   DBImpl* dbfull();
 
+  /// Returns CurrentOptions() with the smallest write buffer there is, so that a few kilobytes of
+  /// writes fill it.
+  Options SmallBuffer();
+
+  /// Returns the value that PutUntilSwitched() and the tests that fill a buffer write for key `i`:
+  /// a kilobyte and ValueOf(i).
+  static std::string KiB(int i);
+
+  /// Returns the bare names of the files of `type` in the database directory, sorted.
+  std::vector<std::string> FilesOfType(FileType type);
+
+  /// Returns how many files of `type` the database directory holds.
+  int CountFiles(FileType type);
+
+  /// Writes entries UserKey(0), UserKey(1), ... of KiB(i) without sync until the memtable has been
+  /// switched, which is when a second log appears, and returns how many were written. The
+  /// scheduler is not run, so the switched memtable is still waiting to be flushed.
+  int PutUntilSwitched();
+
+  /// Closes the database and returns a HookEnv over the Env that `env_` is now, which the caller
+  /// puts in the options of a reopen. A new call replaces the earlier one, so call it again after
+  /// `env_` is replaced; the database is closed before it is destroyed, with the fixture.
+  HookEnv* NewHookEnv();
+
   std::unique_ptr<FaultInjectionEnv> env_;  ///< The Env everything runs on.
   ManualScheduler scheduler_;               ///< The scheduler the database is given.
   std::string dbname_;                      ///< The database directory.
   std::unique_ptr<DB> db_;                  ///< The open database, or null after Close().
+
+ private:
+  std::unique_ptr<HookEnv> hook_env_;  // declared last: destroyed before the Env it wraps
 };
 
 /// Creates the database `dbname` in `env` as an empty one whose MANIFEST records `last_sequence`

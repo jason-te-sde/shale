@@ -42,31 +42,6 @@ using Op = FaultInjectionEnv::Op;
 
 class DBFlushTest : public DBTestBase {
  protected:
-  // The database goes before the Env that wraps the one it was opened over.
-  ~DBFlushTest() override { Close(); }
-
-  // The smallest write buffer there is, so that a few kilobytes of writes fill it.
-  Options SmallBuffer() {
-    Options options = CurrentOptions();
-    options.write_buffer_size = 16384;
-    return options;
-  }
-
-  // The bare names of the files of `type` in the directory.
-  std::vector<std::string> FilesOfType(FileType type) {
-    std::vector<std::string> names;
-    for (const std::string& name : DbFiles()) {
-      uint64_t number = 0;
-      FileType found = FileType::kCurrentFile;
-      if (ParseFileName(name, &number, &found) && found == type) {
-        names.push_back(name);
-      }
-    }
-    return names;
-  }
-
-  int CountFiles(FileType type) { return static_cast<int>(FilesOfType(type).size()); }
-
   // The numbers of the tables that the current version names.
   std::set<uint64_t> VersionTables() {
     std::set<uint64_t> numbers;
@@ -77,25 +52,6 @@ class DBFlushTest : public DBTestBase {
       }
     }
     return numbers;
-  }
-
-  // The value that PutUntilSwitched() and the tests that fill the buffer write for key `i`.
-  static std::string KiB(int i) { return std::string(1024, 'v') + ValueOf(i); }
-
-  // Writes entries 0, 1, ... without sync, 1 KiB each, until the memtable has been switched, which
-  // is when a second log appears, and returns how many were written. The scheduler is not run, so
-  // the switched memtable is still waiting to be flushed.
-  int PutUntilSwitched() {
-    int written = 0;
-    while (CountFiles(FileType::kLogFile) < 2) {
-      EXPECT_LT(written, 100) << "the memtable never switched";
-      if (written >= 100) {
-        break;
-      }
-      EXPECT_OK(Put(UserKey(written), KiB(written), /*sync=*/false));
-      written++;
-    }
-    return written;
   }
 
   void ExpectPresent(int begin, int end) {
@@ -110,8 +66,6 @@ class DBFlushTest : public DBTestBase {
     env_ = std::make_unique<FaultInjectionEnv>(seed);
     Reopen();
   }
-
-  HookEnv hook_env_{env_.get()};
 };
 
 TEST_F(DBFlushTest, FlushCreatesLevel0File) {
@@ -562,10 +516,11 @@ TEST_F(DBFlushTest, ASwitchDoesNotSyncALogThatIsAlreadySynced) {
   // switched, and a sync of it is a flush of the disk's cache that is paid under the mutex for
   // nothing.
   Options options = CurrentOptions();
-  options.env = &hook_env_;
+  HookEnv* const hook_env = NewHookEnv();
+  options.env = hook_env;
   Reopen(options);
   int log_syncs = 0;
-  hook_env_.SetHook([&](std::string_view call, const std::string& path) {
+  hook_env->SetHook([&](std::string_view call, const std::string& path) {
     if (call == "sync" && path.ends_with(".log")) {
       log_syncs++;
     }
@@ -587,7 +542,7 @@ TEST_F(DBFlushTest, ASwitchDoesNotSyncALogThatIsAlreadySynced) {
 
   ASSERT_OK(db_->Flush());  // nothing in the memtable: no switch
   EXPECT_EQ(log_syncs, 3);
-  hook_env_.SetHook(nullptr);
+  hook_env->SetHook(nullptr);
   // And what was written is where a power loss leaves it.
   env_->SimulatePowerLossDropUnsynced();
   Reopen(options);
@@ -599,14 +554,15 @@ TEST_F(DBFlushTest, ASwitchDoesNotSyncALogThatIsAlreadySynced) {
 
 TEST_F(DBFlushTest, AFailureToListTheDirectoryIsLoggedAndTriedAgainLater) {
   Options options = CurrentOptions();
-  options.env = &hook_env_;
+  HookEnv* const hook_env = NewHookEnv();
+  options.env = hook_env;
   Reopen(options);
-  hook_env_.SetHook([](std::string_view call, const std::string& /*path*/) {
+  hook_env->SetHook([](std::string_view call, const std::string& /*path*/) {
     return call == "get_children" ? Status::IOError("injected listing failure") : Status::OK();
   });
   ASSERT_OK(Put("a", "1"));
   ASSERT_OK(db_->Flush());
-  hook_env_.SetHook(nullptr);
+  hook_env->SetHook(nullptr);
   EXPECT_EQ(dbfull()->TEST_Counters().bg_errors, 0u) << "an obsolete file is not an error";
   EXPECT_NE(env_->FileContents("/db/LOG").find("could not list"), std::string::npos)
       << "the failed listing was not logged";
@@ -623,7 +579,8 @@ TEST_F(DBFlushTest, AStalledWriterIsWokenBeforeTheSweepListsTheDirectory) {
   // `imm_` and then sweeps, listing and deleting files with the disk to wait for, and the write
   // must not wait for that. The sweep here does not list until the write is through.
   Options options = SmallBuffer();
-  options.env = &hook_env_;
+  HookEnv* const hook_env = NewHookEnv();
+  options.env = hook_env;
   options.scheduler = nullptr;  // the database runs its own: this needs a thread
   Reopen(options);
   std::mutex mu;
@@ -634,7 +591,7 @@ TEST_F(DBFlushTest, AStalledWriterIsWokenBeforeTheSweepListsTheDirectory) {
   int puts_when_released = 0;       // guarded by mu
   bool sweep_timed_out = false;     // guarded by mu
   const auto patience = std::chrono::seconds(10);
-  hook_env_.SetHook([&](std::string_view call, const std::string& path) {
+  hook_env->SetHook([&](std::string_view call, const std::string& path) {
     std::unique_lock<std::mutex> lock(mu);
     if (call == "new_writable" && path.ends_with(".sst")) {
       cv.wait_for(lock, patience, [&] { return table_may_be_built; });
@@ -674,7 +631,7 @@ TEST_F(DBFlushTest, AStalledWriterIsWokenBeforeTheSweepListsTheDirectory) {
   }
   cv.notify_all();
   writer.join();
-  hook_env_.SetHook(nullptr);
+  hook_env->SetHook(nullptr);
   {
     const std::lock_guard<std::mutex> lock(mu);
     EXPECT_LT(puts_when_released, kPuts) << "the writer was never stalled";

@@ -278,12 +278,16 @@ Status DBImpl::CompactFiles(const CompactionPlan& plan, std::shared_ptr<const Ve
   ctx.target_file_size = options_.target_file_size;
   ctx.allocate_file_number = [this, &allocated] {
     MutexLock lock(&mutex_);
-    const uint64_t number = versions_.NewFileNumber();
+    uint64_t number = 0;
+    // The job refuses a number at the ceiling, so the status is the job's to find out.
+    static_cast<void>(AllocateTableNumber(&number));
     pending_outputs_.insert(number);
     allocated.push_back(number);
     return number;
   };
   ctx.between_outputs = [this] { FlushBetweenOutputs(); };
+  // Asked before each output: closing does not wait for the rest of a compaction.
+  ctx.should_stop = [this] { return shutting_down_.load(std::memory_order_acquire); };
 
   // The job is the one thing that holds the version it reads, so that the files it reads are not
   // deleted under it, and it is gone before the files it replaces are swept.
@@ -295,13 +299,14 @@ Status DBImpl::CompactFiles(const CompactionPlan& plan, std::shared_ptr<const Ve
   mutex_.Lock();
   compaction_running_ = false;
 
-  if (s.ok() && !bg_error_.ok()) {
+  const bool stopped = s.ok() && job->stopped();
+  if (s.ok() && !stopped && !bg_error_.ok()) {
     // A flush between two outputs failed, or a write did: the database has stopped. Nothing names
     // the outputs, so they are no use to anyone, and nothing more is installed.
     job->RemoveOutputs();
     s = bg_error_;
   }
-  if (s.ok()) {
+  if (s.ok() && !stopped) {
     // If this fails, the MANIFEST may hold the edit all the same, and the outputs are then tables
     // that the next open finds in the version: they stay, and nothing is deleted.
     s = versions_.LogAndApply(job->MakeEdit());
@@ -311,6 +316,13 @@ Status DBImpl::CompactFiles(const CompactionPlan& plan, std::shared_ptr<const Ve
   }
   if (!s.ok()) {
     return s;
+  }
+  if (stopped) {
+    // The database is closing. The job removed what it made, no edit names it, and the inputs are
+    // where they were: the next open finds the same version, and compacts again if it is due.
+    Log("stopped a compaction of level " + std::to_string(plan.level) +
+        ": the database is closing");
+    return Status::OK();
   }
 
   const CompactionJobStats& stats = job->stats();
@@ -410,7 +422,7 @@ Status DBImpl::FlushImmutable() {
   // memtable from here to the end, and no write goes into it.
   const std::shared_ptr<MemTable> imm = imm_;
   FileMetaData meta;
-  Status s = AllocateFileNumber(&meta.number);
+  Status s = AllocateTableNumber(&meta.number);
   if (!s.ok()) {
     return s;
   }
@@ -461,9 +473,9 @@ void DBImpl::DeleteObsoleteFiles() {
     return;
   }
   // What decides which files are obsolete is read here, with the mutex held.
-  const std::set<uint64_t> pending = pending_outputs_;
   std::set<uint64_t> needed = versions_.LiveFiles();
-  needed.insert(pending.begin(), pending.end());
+  needed.insert(pending_outputs_.begin(), pending_outputs_.end());
+  const uint64_t makers = table_makers_;
   const uint64_t log_number = versions_.LogNumber();
   const uint64_t current_log = logfile_number_;
   const uint64_t manifest_number = versions_.ManifestFileNumber();
@@ -518,10 +530,11 @@ void DBImpl::DeleteObsoleteFiles() {
     }
   }
   mutex_.Lock();
-  // A table made while the files were being listed is one that `needed` does not have, and that
-  // the loop above would have taken. Only the task that runs this makes them, and it was here.
-  SHALE_CHECK(pending_outputs_ == pending,
-              "a file was being made while the obsolete files were swept");
+  // A table begun while the files were being listed is one that `needed` does not have, and that
+  // the loop above would have taken, and it is no use that it is done by now: the count shows it
+  // where the set of numbers in progress would not. Only the task that runs this makes tables, and
+  // it was here.
+  SHALE_CHECK(table_makers_ == makers, "a table was begun while the obsolete files were swept");
 }
 
 }  // namespace shale

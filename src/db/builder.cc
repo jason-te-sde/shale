@@ -43,25 +43,54 @@ class AbandonUnlessDisarmed {
 
 }  // namespace
 
+Status SealTableFile(const std::string& dbname, Env* env, TableCache* table_cache, uint64_t number,
+                     uint64_t file_size, Status built, std::unique_ptr<WritableFile> file) {
+  const std::string fname = TableFileName(dbname, number);
+  Status s = std::move(built);
+  if (s.ok()) {
+    s = file->Sync();
+  }
+  // Closed in every case: a handle is only released by Close(), and it is no use after an error.
+  const Status close_status = file->Close();
+  if (s.ok()) {
+    s = close_status;
+  }
+  file.reset();
+  if (s.ok()) {
+    // Open what was written, and so read its footer, index and filter, before anything refers to
+    // it. A table that cannot be opened is found out here, with the data it was made from still at
+    // hand, and not by a read that has nothing to fall back on.
+    std::shared_ptr<Table> table;
+    s = table_cache->FindTable(number, file_size, &table);
+  }
+  if (s.ok()) {
+    // The file is durable, but the directory entry that names it is not until now.
+    s = SyncDirectory(env, dbname);
+  }
+  if (!s.ok()) {
+    // The first failure is the one to report; one while cleaning up after it must not replace it.
+    table_cache->Evict(number);
+    static_cast<void>(env->RemoveFile(fname));
+  }
+  return s;
+}
+
 Status BuildTable(const std::string& dbname, Env* env, const TableBuilderOptions& options,
                   TableCache* table_cache, Iterator* iter, FileMetaData* meta) {
   meta->file_size = 0;
   meta->smallest.clear();
   meta->largest.clear();
-
   iter->SeekToFirst();
   if (!iter->Valid()) {
     // No entry is either an empty input or a failed one, and the status says which.
     return iter->status();
   }
-
   const std::string fname = TableFileName(dbname, meta->number);
   std::unique_ptr<WritableFile> file;
   Status s = env->NewWritableFile(fname, &file);
   if (!s.ok()) {
     return s;  // Nothing was created.
   }
-
   std::string smallest(iter->key());
   std::string largest;
   uint64_t file_size = 0;
@@ -82,33 +111,9 @@ Status BuildTable(const std::string& dbname, Env* env, const TableBuilderOptions
       file_size = builder.FileSize();
     }
   }
-
-  if (s.ok()) {
-    s = file->Sync();
-  }
-  // Closed in every case: a handle is only released by Close(), and it is no use after an error.
-  const Status close_status = file->Close();
-  if (s.ok()) {
-    s = close_status;
-  }
-  file.reset();
-
-  if (s.ok()) {
-    // Open what was written, and so read its footer, index and filter, before anything refers to
-    // it. A table that cannot be opened is found out here, with the data it was made from still at
-    // hand, and not by a read that has nothing to fall back on.
-    std::shared_ptr<Table> table;
-    s = table_cache->FindTable(meta->number, file_size, &table);
-  }
-  if (s.ok()) {
-    // The file is durable, but the directory entry that names it is not until now.
-    s = SyncDirectory(env, dbname);
-  }
-
+  s = SealTableFile(dbname, env, table_cache, meta->number, file_size, std::move(s),
+                    std::move(file));
   if (!s.ok()) {
-    // The first failure is the one to report; one while cleaning up after it must not replace it.
-    table_cache->Evict(meta->number);
-    static_cast<void>(env->RemoveFile(fname));
     return s;
   }
   meta->file_size = file_size;

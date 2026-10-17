@@ -323,6 +323,16 @@ TEST(CompactionPickerTest, TrivialMove) {
   EXPECT_FALSE(heavy_plan.IsTrivialMove(options));
 }
 
+TEST(CompactionPickerTest, GrandparentOverlapBoundIsTenTargetsAndSaturates) {
+  // The one bound that the trivial move and the compaction job share.
+  EXPECT_EQ(kMaxGrandparentOverlapTargets, 10u);
+  EXPECT_EQ(MaxGrandparentOverlapBytes(16384), 163840u);
+  EXPECT_EQ(MaxGrandparentOverlapBytes(0), 0u);
+  EXPECT_EQ(MaxGrandparentOverlapBytes(UINT64_MAX / 10), UINT64_MAX / 10 * 10);
+  EXPECT_EQ(MaxGrandparentOverlapBytes(UINT64_MAX / 10 + 1), UINT64_MAX);
+  EXPECT_EQ(MaxGrandparentOverlapBytes(UINT64_MAX), UINT64_MAX);
+}
+
 TEST(CompactionPickerTest, TrivialMoveGrandparentLimitIsTenTargetFiles) {
   CompactionOptions options;
   options.target_file_size = 2 * kMiB;

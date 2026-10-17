@@ -68,19 +68,6 @@ class DBRecoveryTest : public DBTestBase {
     }
   }
 
-  // How many files of `type` the directory holds.
-  int CountFiles(FileType type) {
-    int count = 0;
-    for (const std::string& name : DbFiles()) {
-      uint64_t number = 0;
-      FileType found = FileType::kCurrentFile;
-      if (ParseFileName(name, &number, &found) && found == type) {
-        count++;
-      }
-    }
-    return count;
-  }
-
   // Changes one bit of the byte at `offset` of `fname`.
   void FlipByte(const std::string& fname, uint64_t offset) {
     std::string contents = env_->FileContents(fname);

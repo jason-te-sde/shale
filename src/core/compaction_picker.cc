@@ -19,11 +19,6 @@ namespace shale {
 
 namespace {
 
-// A file moved down a level whole may overlap this many target-sized files of the level below that,
-// no more. It is the bound LevelDB uses, and it is the cost of the compaction that will one day
-// have to merge the moved file with them.
-constexpr uint64_t kTrivialMoveGrandparentFiles = 10;
-
 size_t Index(int level) {
   SHALE_CHECK(level >= 0 && level < kNumLevels, "level is out of range");
   return static_cast<size_t>(level);
@@ -109,12 +104,15 @@ const FileMetaData& NextFileAfterPointer(const std::vector<FileMetaData>& files,
 
 }  // namespace
 
+uint64_t MaxGrandparentOverlapBytes(uint64_t target_file_size) {
+  return SaturatingMultiply(kMaxGrandparentOverlapTargets, target_file_size);
+}
+
 bool CompactionPlan::IsTrivialMove(const CompactionOptions& options) const {
   // A manual compaction is asked for to rewrite files, to drop what they hold that is dead, and a
   // move down a level rewrites nothing.
   return !manual && inputs[0].size() == 1 && inputs[1].empty() &&
-         TotalFileSize(grandparents) <=
-             SaturatingMultiply(kTrivialMoveGrandparentFiles, options.target_file_size);
+         TotalFileSize(grandparents) <= MaxGrandparentOverlapBytes(options.target_file_size);
 }
 
 uint64_t MaxBytesForLevel(int level, const CompactionOptions& options) {

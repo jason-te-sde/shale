@@ -4,6 +4,8 @@
 // Turning a sorted run of entries into a table file: what a flush does with a memtable and a
 // compaction with its merged input.
 
+#include <cstdint>
+#include <memory>
 #include <string>
 
 #include "core/version_edit.h"
@@ -14,6 +16,29 @@
 #include "shale/status.h"
 
 namespace shale {
+
+/// Makes a table file that has been written whole, durable and named, in the one order that makes
+/// it safe: `file` is synced and closed, then opened through `table_cache` to see that it is a
+/// table that can be read, and only then is the directory synced, so that when this returns OK an
+/// edit that adds the file to the MANIFEST can be made durable without a crash being able to leave
+/// the MANIFEST naming a file that is not there. BuildTable() and the compaction job both end their
+/// tables with it, so that the order is in one place.
+///
+/// `built` is how writing the table went: a builder's Finish() status, or the error that made the
+/// caller give the table up. A table that was not built is not synced, but `file` is closed and the
+/// file is removed all the same. Whenever the call returns an error, the first one, the file is
+/// removed and dropped from `table_cache`; a failure of the removal itself is not reported, and
+/// leaves a file that no version names, for the next sweep.
+/// @param dbname the database directory.
+/// @param env the Env the file was written through.
+/// @param table_cache the cache the verifying open goes through, and so where the table is left
+///   open for the reads that follow.
+/// @param number the file number of the table.
+/// @param file_size the size of the table in bytes, as the builder reports it once finished.
+/// @param built the status of the writing; OK if the table is complete.
+/// @param file the open file; closed by this call whatever happens.
+Status SealTableFile(const std::string& dbname, Env* env, TableCache* table_cache, uint64_t number,
+                     uint64_t file_size, Status built, std::unique_ptr<WritableFile> file);
 
 /// Writes the entries of `iter`, from its first to its last, to table file `meta->number` in
 /// `dbname`, and fills in `meta`.

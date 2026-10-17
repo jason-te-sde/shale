@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "db/handle_check_env.h"
+#include "db/hook_env.h"
 #include "db/table_cache.h"
 #include "io/iterator_util.h"
 #include "io/memtable.h"
@@ -187,6 +188,28 @@ TEST_F(BuilderTest, StaleMetadataIsClearedWhenNothingIsBuilt) {
   EXPECT_EQ(meta.file_size, 0u);
   EXPECT_TRUE(meta.smallest.empty());
   EXPECT_TRUE(meta.largest.empty());
+}
+
+TEST_F(BuilderTest, TheTableIsSyncedThenOpenedThenItsDirectoryIsSynced) {
+  // The order that makes a table safe to name in the MANIFEST: its bytes are durable, it is seen to
+  // be a table, and only then is the entry that names it. A sequence of calls, which a failing
+  // call cannot show: each of them fails and leaves no file whichever comes first.
+  HookEnv hook_env(&env_);
+  TableCache cache(kDb, &hook_env, &block_cache_, 100);  // opens the table through the hook too
+  std::vector<std::string> calls;
+  hook_env.SetHook([&calls](std::string_view call, const std::string& path) {
+    if (call == "sync" || call == "new_random_access" || call == "sync_dir") {
+      calls.push_back(std::string(call) + " " + path);
+    }
+    return Status::OK();
+  });
+  const auto mem = NumberedMemTable(10);
+  FileMetaData meta;
+  meta.number = 7;
+  const std::unique_ptr<Iterator> iter = mem->NewIterator();
+  ASSERT_OK(BuildTable(kDb, &hook_env, TableBuilderOptions{}, &cache, iter.get(), &meta));
+  EXPECT_EQ(calls, (std::vector<std::string>{"sync /db/000007.sst",
+                                             "new_random_access /db/000007.sst", "sync_dir /db"}));
 }
 
 TEST_F(BuilderTest, FailedSyncRemovesPartialFile) {

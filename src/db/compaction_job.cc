@@ -13,7 +13,7 @@
 #include "core/compaction_picker.h"
 #include "core/version_edit.h"
 #include "core/version_state.h"
-#include "db/filename_io.h"
+#include "db/builder.h"
 #include "db/named_status.h"
 #include "db/table_cache.h"
 #include "db/version_set.h"
@@ -31,39 +31,49 @@ namespace shale {
 
 namespace {
 
-// How many target-sized files of the level below the output an output may overlap before it is
-// closed: the bound of the picker's trivial move, and of LevelDB's compaction. A file that
-// overlapped more would hand the next compaction of its level too much to merge at once.
-constexpr uint64_t kMaxGrandparentOverlapFiles = 10;
-
 uint64_t SaturatingAdd(uint64_t a, uint64_t b) {
   return b > std::numeric_limits<uint64_t>::max() - a ? std::numeric_limits<uint64_t>::max()
                                                       : a + b;
 }
 
-uint64_t SaturatingMultiply(uint64_t a, uint64_t b) {
-  if (a != 0 && b > std::numeric_limits<uint64_t>::max() / a) {
-    return std::numeric_limits<uint64_t>::max();
-  }
-  return a * b;
-}
-
-// An iterator over one table that says which table it is over. A corruption found in a block names
-// no file, and by the time it has come up through the merge, the compaction and the background
-// task, the person reading it has nothing else to tell which of the inputs it was.
+// An iterator over one table that says which table it is over, and that does not pass on an entry
+// that is no internal key. A corruption found in a block names no file, and by the time it has come
+// up through the merge, the compaction and the background task, the person reading it has nothing
+// else to tell which of the inputs it was. An entry whose key is too short to hold its tag or names
+// a type there is not would abort the merging iterator's comparison, or the filter: here it ends
+// the iteration, as damage in the table, and the iterator stays ended until it is positioned again.
 class NamedTableIterator final : public Iterator {
  public:
   NamedTableIterator(std::unique_ptr<Iterator> inner, std::string fname)
       : inner_(std::move(inner)), fname_(std::move(fname)) {}
 
-  bool Valid() const override { return inner_->Valid(); }
-  void SeekToFirst() override { inner_->SeekToFirst(); }
-  void Seek(std::string_view target) override { inner_->Seek(target); }
-  void Next() override { inner_->Next(); }
+  bool Valid() const override { return !malformed_ && inner_->Valid(); }
+
+  void SeekToFirst() override {
+    malformed_ = false;
+    inner_->SeekToFirst();
+    Check();
+  }
+
+  void Seek(std::string_view target) override {
+    malformed_ = false;
+    inner_->Seek(target);
+    Check();
+  }
+
+  void Next() override {
+    SHALE_CHECK(Valid(), "NamedTableIterator::Next requires Valid");
+    inner_->Next();
+    Check();
+  }
+
   std::string_view key() const override { return inner_->key(); }
   std::string_view value() const override { return inner_->value(); }
 
   Status status() const override {
+    if (malformed_) {
+      return Status::Corruption("an entry whose key is not an internal key", fname_);
+    }
     Status s = inner_->status();
     if (s.ok()) {
       return s;
@@ -76,8 +86,15 @@ class NamedTableIterator final : public Iterator {
   }
 
  private:
+  // Looks at the entry the iterator has just been moved to.
+  void Check() {
+    ParsedInternalKey parsed;
+    malformed_ = inner_->Valid() && !ParseInternalKey(inner_->key(), &parsed);
+  }
+
   const std::unique_ptr<Iterator> inner_;
   const std::string fname_;
+  bool malformed_ = false;
 };
 
 // One output table while it is being written: the file, the builder over it, and what the file is
@@ -125,34 +142,18 @@ class OutputFile {
   // block that is still being filled and what follows the last block.
   uint64_t Size() const { return builder_->FileSize(); }
 
-  // Finishes the table and makes it whole, durable and named, in the order BuildTable does: the
-  // file is synced and closed, then opened through the table cache to see that it is a table that
-  // can be read, and only then is the directory synced. On any failure the file is removed.
+  // Finishes the table and makes it whole, durable and named, as SealTableFile() does for every
+  // table: the file is synced and closed, then opened through the table cache to see that it is a
+  // table that can be read, and only then is the directory synced. On any failure the file is
+  // removed.
   Status Finish(FileMetaData* meta) {
     SHALE_CHECK(!ended_, "OutputFile::Finish: the output has already ended");
     ended_ = true;
-    Status s = builder_->Finish();  // ends the builder, with an error too
+    Status built = builder_->Finish();  // ends the builder, with an error too
     const uint64_t size = builder_->FileSize();
-    if (s.ok()) {
-      s = file_->Sync();
-    }
-    // Closed in every case: a handle is only released by Close(), and it is no use after an error.
-    const Status closed = file_->Close();
-    if (s.ok()) {
-      s = closed;
-    }
-    file_.reset();
-    if (s.ok()) {
-      std::shared_ptr<Table> table;
-      s = ctx_->table_cache->FindTable(number_, size, &table);
-    }
-    if (s.ok()) {
-      s = SyncDirectory(ctx_->env, ctx_->dbname);
-    }
+    Status s = SealTableFile(ctx_->dbname, ctx_->env, ctx_->table_cache, number_, size,
+                             std::move(built), std::move(file_));
     if (!s.ok()) {
-      // The first failure is the one to report; one while cleaning up after it must not replace it.
-      ctx_->table_cache->Evict(number_);
-      static_cast<void>(ctx_->env->RemoveFile(fname_));
       return s;
     }
     meta->number = number_;
@@ -204,7 +205,7 @@ Status CompactionJob::Run() {
   SHALE_CHECK(!started_, "CompactionJob::Run is called once");
   started_ = true;
   const Status s = RunImpl();
-  if (!s.ok()) {
+  if (!s.ok() || stopped_) {
     RemoveOutputs();
   }
   return s;
@@ -249,8 +250,7 @@ Status CompactionJob::RunImpl() {
   const VersionState& state = input_version_->state();
   const int output_level = plan_.level + 1;
   const std::vector<FileMetaData>& grandparents = plan_.grandparents;
-  const uint64_t max_grandparent_overlap =
-      SaturatingMultiply(kMaxGrandparentOverlapFiles, ctx_.target_file_size);
+  const uint64_t max_grandparent_overlap = MaxGrandparentOverlapBytes(ctx_.target_file_size);
 
   std::unique_ptr<OutputFile> output;
   std::string last_user_key;
@@ -285,9 +285,16 @@ Status CompactionJob::RunImpl() {
     }
     ParsedInternalKey parsed;
     if (!ParseInternalKey(input->key(), &parsed)) {
+      // The iterators over the tables end the iteration at such an entry, naming the table, so
+      // this is not reached; it is a Corruption and not an abort for the sake of whoever changes
+      // that.
       return Status::Corruption("a compaction input has an entry whose key is not an internal key");
     }
-    const bool is_base_level = IsBaseLevelForKey(state, output_level, parsed.user_key);
+    // The filter asks the question of a deletion only: it drops one that nothing below can need,
+    // and keeps every other entry that a reader can see. A search of the levels for an entry it
+    // would not look at is the cost of a lookup in each level for every value of the input.
+    const bool is_base_level = parsed.type == ValueType::kDeletion &&
+                               IsBaseLevelForKey(state, output_level, parsed.user_key);
     if (filter.Next(parsed, is_base_level) == CompactionFilter::Decision::kDrop) {
       continue;
     }
@@ -318,6 +325,10 @@ Status CompactionJob::RunImpl() {
       overlapped_bytes = 0;
     }
     if (output == nullptr) {
+      if (ctx_.should_stop && ctx_.should_stop()) {
+        stopped_ = true;
+        return Status::OK();  // Run() removes what was made
+      }
       const uint64_t number = ctx_.allocate_file_number();
       if (number >= kMaxFileNumber) {
         return Status::Corruption("no file number is left below the largest there can be");

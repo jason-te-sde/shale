@@ -4,9 +4,12 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
@@ -48,43 +51,32 @@ struct InternalEntry {
 
 class DBCompactionTest : public DBTestBase {
  protected:
-  // The database goes before the Env that wraps the one it was opened over.
-  ~DBCompactionTest() override { Close(); }
-
-  // The smallest write buffer there is, so that a few kilobytes of writes fill it.
-  Options SmallBuffer() {
+  // The options of the tests that want a compaction of many outputs: a buffer that a few hundred
+  // kilobytes do not fill, so that a table is made only when the test flushes, and outputs of the
+  // smallest size there is.
+  Options ManyOutputsOptions() {
     Options options = CurrentOptions();
-    options.write_buffer_size = 16384;
+    options.write_buffer_size = 262144;
+    options.target_file_size = 16384;
     return options;
   }
 
-  static std::string KiB(int i) { return std::string(1024, 'v') + ValueOf(i); }
-
-  std::vector<std::string> FilesOfType(FileType type) {
-    std::vector<std::string> names;
-    for (const std::string& name : DbFiles()) {
-      uint64_t number = 0;
-      FileType found = FileType::kCurrentFile;
-      if (ParseFileName(name, &number, &found) && found == type) {
-        names.push_back(name);
-      }
+  // Writes keys `round`, `round + 4`, ... below 160, a kilobyte each, and flushes them. The four
+  // tables of rounds 0 to 3 span the same keys, 40 of the 160 in each, so all four are the inputs
+  // of one compaction, and their 160 KiB make it ten outputs.
+  void WriteSpanningTable(int round) {
+    for (int i = round; i < 160; i += 4) {
+      ASSERT_OK(Put(UserKey(i), KiB(i), /*sync=*/false));
     }
-    return names;
+    ASSERT_OK(db_->Flush());
   }
 
-  int CountFiles(FileType type) { return static_cast<int>(FilesOfType(type).size()); }
-
-  // Writes entries 0, 1, ... without sync, 1 KiB each, until the memtable has been switched, which
-  // is when a second log appears, and returns how many were written. The scheduler is not run, so
-  // the switched memtable is still waiting to be flushed.
-  int PutUntilSwitched() {
+  // Writes "w" keys until the memtable switches, so that one is waiting to be flushed, and returns
+  // how many. For a hook that runs while a compaction does, which cannot wait for the flush.
+  int FillTheMemtable(const std::string& prefix) {
     int written = 0;
     while (CountFiles(FileType::kLogFile) < 2) {
-      EXPECT_LT(written, 100) << "the memtable never switched";
-      if (written >= 100) {
-        break;
-      }
-      EXPECT_OK(Put(UserKey(written), KiB(written), /*sync=*/false));
+      EXPECT_OK(Put(prefix + UserKey(written), KiB(written), /*sync=*/false));
       written++;
     }
     return written;
@@ -171,8 +163,6 @@ class DBCompactionTest : public DBTestBase {
       EXPECT_TRUE(env_->FileExists(TableFileName(kDb, number))) << "table " << number << " is gone";
     }
   }
-
-  HookEnv hook_env_{env_.get()};
 };
 
 TEST_F(DBCompactionTest, Level0CompactionRunsAtTrigger) {
@@ -275,15 +265,18 @@ TEST_F(DBCompactionTest, CompactRangeAllPushesDataDown) {
     expected[static_cast<size_t>(key)] = "v" + std::to_string(i) + std::string(100, 'x');
     ASSERT_OK(Put(UserKey(key), expected[static_cast<size_t>(key)], /*sync=*/false));
   }
+  // NOT YET A CHECK: Contents() needs NewIterator, which returns NotSupported until iterators are
+  // written, so the comparison below is of one error text with itself. It is here for when they
+  // are, and the reads of every key with Get() are what checks the data today.
   const std::string contents_before = Contents();
   ASSERT_OK(db_->CompactRange(std::nullopt, std::nullopt));
   EXPECT_EQ(NumTableFilesAtLevel(0), 0);
   EXPECT_GE(DeepestLevel(), 1);
-  EXPECT_EQ(Contents(), contents_before) << "a compaction must not change what a scan returns";
+  EXPECT_EQ(Contents(), contents_before)  // NOT YET A CHECK: see above
+      << "a compaction must not change what a scan returns";
   for (int key = 0; key < 1000; key++) {
-    const std::string got = Get(UserKey(key));
-    // Not every key was written: 3000 writes of i * 7 mod 1000 reach each of the 1000 keys.
-    EXPECT_EQ(got, expected[static_cast<size_t>(key)]) << "key " << key;
+    // Every key was written: i * 7 mod 1000 reaches each of the 1000 keys, three times over.
+    EXPECT_EQ(Get(UserKey(key)), expected[static_cast<size_t>(key)]) << "key " << key;
   }
   EXPECT_OK(CheckInvariants(dbfull()->TEST_VersionState()));
   ExpectNoStrayTables();
@@ -413,8 +406,9 @@ TEST_F(DBCompactionTest, CompactionKeepsTheVersionsASnapshotCanSee) {
   EXPECT_EQ(EntriesFor("gone"), 2) << "the deletion, and the value beneath it, must stay";
   EXPECT_EQ(dbfull()->TEST_Counters().tombstones_dropped, 0u);
 
-  // Once the snapshot is gone nothing needs them. A new write over the same range makes the next
-  // compaction reach the level 1 file that holds them.
+  // Once the snapshot is gone nothing needs them. The range is now in level 1 alone, and
+  // CompactRange() rewrites the deepest populated level only by merging a shallower one into it
+  // (see DB::CompactRange()), so a new write over the same range gives it one to merge.
   db_->ReleaseSnapshot(snapshot);
   EXPECT_OK(Put("a", "3"));
   EXPECT_OK(db_->CompactRange(std::nullopt, std::nullopt));
@@ -608,21 +602,12 @@ TEST_F(DBCompactionTest, ACallersCompactionComesBeforeOneThatIsDueByItself) {
 }
 
 TEST_F(DBCompactionTest, TheMemtableThatIsWaitingIsFlushedBetweenOutputs) {
-  Options options = CurrentOptions();
-  options.env = &hook_env_;
-  options.write_buffer_size = 262144;
-  options.target_file_size = 16384;
+  Options options = ManyOutputsOptions();
+  HookEnv* const hook_env = NewHookEnv();
+  options.env = hook_env;
   Reopen(options);
-  // Four tables that span the same keys, 40 of the 160 in each, so that all four are one
-  // compaction's inputs and their 160 KiB make it ten outputs.
-  const auto write_table = [this](int round) {
-    for (int i = round; i < 160; i += 4) {
-      ASSERT_OK(Put(UserKey(i), KiB(i), /*sync=*/false));
-    }
-    ASSERT_OK(db_->Flush());
-  };
   for (int round = 0; round < 3; round++) {
-    ASSERT_NO_FATAL_FAILURE(write_table(round));
+    ASSERT_NO_FATAL_FAILURE(WriteSpanningTable(round));
   }
 
   // The fourth flush makes the compaction due. While it writes its second output, the test fills
@@ -634,7 +619,7 @@ TEST_F(DBCompactionTest, TheMemtableThatIsWaitingIsFlushedBetweenOutputs) {
   uint64_t flushes_when_third_output_began = 0;
   uint64_t compactions_when_third_output_began = 0;
   int written = 0;
-  hook_env_.SetHook([&](std::string_view call, const std::string& path) {
+  hook_env->SetHook([&](std::string_view call, const std::string& path) {
     if (call != "new_writable" || !path.ends_with(".sst") || inside) {
       return Status::OK();
     }
@@ -642,10 +627,7 @@ TEST_F(DBCompactionTest, TheMemtableThatIsWaitingIsFlushedBetweenOutputs) {
     // 1 is the flush of the fourth memtable, 2 and 3 the first two outputs of the compaction.
     if (tables_created == 3) {
       inside = true;
-      while (CountFiles(FileType::kLogFile) < 2) {
-        EXPECT_OK(Put("w" + UserKey(written), KiB(written), /*sync=*/false));
-        written++;
-      }
+      written = FillTheMemtable("w");
       inside = false;
     }
     // 4 is the flush of that memtable, and 5 the third output of the compaction.
@@ -656,8 +638,8 @@ TEST_F(DBCompactionTest, TheMemtableThatIsWaitingIsFlushedBetweenOutputs) {
     }
     return Status::OK();
   });
-  ASSERT_NO_FATAL_FAILURE(write_table(3));
-  hook_env_.SetHook(nullptr);
+  ASSERT_NO_FATAL_FAILURE(WriteSpanningTable(3));
+  hook_env->SetHook(nullptr);
 
   ASSERT_GT(written, 0);
   EXPECT_GE(tables_created, 6) << "the compaction should have had several outputs";
@@ -677,72 +659,279 @@ TEST_F(DBCompactionTest, TheMemtableThatIsWaitingIsFlushedBetweenOutputs) {
   ExpectNoStrayTables();
 }
 
+TEST_F(DBCompactionTest, AFailedFlushBetweenOutputsDiscardsTheCompaction) {
+  // The compaction is not told that the flush it makes between two outputs failed: it goes on, and
+  // the database finds the background error when it is done. Nothing is installed then, and the
+  // outputs, which no edit names, are removed.
+  Options options = ManyOutputsOptions();
+  options.l0_compaction_trigger = 100;  // only the request below compacts
+  HookEnv* const hook_env = NewHookEnv();
+  options.env = hook_env;
+  Reopen(options);
+  for (int round = 0; round < 4; round++) {
+    ASSERT_NO_FATAL_FAILURE(WriteSpanningTable(round));
+  }
+  const std::set<uint64_t> inputs = TableNumbers();
+  ASSERT_EQ(inputs.size(), 4u);
+
+  // 1 and 2 are the first two outputs. After the second, the memtable that the test filled is
+  // written out between outputs, as table number 3, and that is the one that fails. 4 and on are
+  // the outputs that the compaction goes on to make.
+  int tables_created = 0;
+  bool inside = false;
+  int written = 0;
+  hook_env->SetHook([&](std::string_view call, const std::string& path) {
+    if (call != "new_writable" || !path.ends_with(".sst") || inside) {
+      return Status::OK();
+    }
+    tables_created++;
+    if (tables_created == 2) {
+      inside = true;
+      written = FillTheMemtable("w");
+      inside = false;
+    }
+    if (tables_created == 3) {
+      return Status::IOError("injected: no table for the waiting memtable");
+    }
+    return Status::OK();
+  });
+  const Status s = db_->CompactRange(std::nullopt, std::nullopt);
+  hook_env->SetHook(nullptr);
+
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+  EXPECT_GE(tables_created, 5) << "the compaction should have gone on after the failed flush";
+  const DBCounters counters = dbfull()->TEST_Counters();
+  EXPECT_EQ(counters.bg_errors, 1u);
+  EXPECT_EQ(counters.compactions, 0u) << "a compaction was installed after the error";
+  EXPECT_EQ(counters.flushes, 4u);
+  EXPECT_EQ(TableNumbers(), inputs) << "the version changed";
+  EXPECT_EQ(CountFiles(FileType::kTableFile), 4) << "outputs of the discarded compaction remain";
+  ExpectNoStrayTables();
+  EXPECT_EQ(scheduler_.pending(), 0u);
+  const Status put = Put("more", "x");
+  EXPECT_TRUE(put.IsIOError()) << "writes must have stopped: " << put.ToString();
+  EXPECT_EQ(put.ToString(), s.ToString());
+  EXPECT_EQ(Get(UserKey(7)), KiB(7));
+  EXPECT_EQ(Get("w" + UserKey(written - 1)), KiB(written - 1));
+
+  // The memtable that did not become a table is in its log, and nothing else was touched.
+  Reopen(options);
+  for (int i = 0; i < 160; i++) {
+    EXPECT_EQ(Get(UserKey(i)), KiB(i)) << "entry " << i;
+  }
+  for (int i = 0; i < written; i++) {
+    EXPECT_EQ(Get("w" + UserKey(i)), KiB(i)) << "written during the compaction: " << i;
+  }
+  ExpectNoStrayTables();
+}
+
+TEST_F(DBCompactionTest, ClosingDoesNotWaitForTheWholeCompaction) {
+  // A compaction of ten outputs is held up at its second. Closing begins, and then the compaction
+  // goes on: it stops before its third output, removes what it made, and closing returns without
+  // an error having been recorded and without anything installed.
+  Options options = ManyOutputsOptions();
+  options.scheduler = nullptr;  // a thread, since closing waits on another one
+  HookEnv* const hook_env = NewHookEnv();
+  options.env = hook_env;
+  Reopen(options);
+  for (int round = 0; round < 3; round++) {
+    ASSERT_NO_FATAL_FAILURE(WriteSpanningTable(round));
+  }
+
+  std::mutex mu;
+  std::condition_variable cv;
+  bool held = false;       // guarded by mu: the compaction is waiting in the hook
+  bool released = false;   // guarded by mu
+  int tables_created = 0;  // guarded by mu
+  hook_env->SetHook([&](std::string_view call, const std::string& path) {
+    if (call != "new_writable" || !path.ends_with(".sst")) {
+      return Status::OK();
+    }
+    std::unique_lock<std::mutex> lock(mu);
+    // 1 is the flush of the fourth memtable, 2 and 3 are the first outputs of the compaction.
+    if (++tables_created == 3) {
+      held = true;
+      cv.notify_all();
+      cv.wait_for(lock, std::chrono::seconds(30), [&] { return released; });
+    }
+    return Status::OK();
+  });
+  ASSERT_NO_FATAL_FAILURE(WriteSpanningTable(3));
+  const std::set<uint64_t> inputs = TableNumbers();
+  ASSERT_EQ(inputs.size(), 4u);
+  {
+    std::unique_lock<std::mutex> lock(mu);
+    ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(30), [&] { return held; }));
+  }
+
+  std::thread closer([this] { Close(); });
+  // Closing says so in the info log once it has begun, which is after it can be seen by the job.
+  bool closing = false;
+  for (int i = 0; i < 2000 && !closing; i++) {
+    closing = env_->FileContents("/db/LOG").find("closing") != std::string::npos;
+    if (!closing) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+  }
+  EXPECT_TRUE(closing) << "close never began";
+  {
+    const std::lock_guard<std::mutex> lock(mu);
+    released = true;
+  }
+  cv.notify_all();
+  closer.join();
+  hook_env->SetHook(nullptr);
+
+  EXPECT_EQ(CountFiles(FileType::kTableFile), 4)
+      << "the compaction finished, or left its outputs: only its four inputs belong";
+  Reopen(options);
+  EXPECT_EQ(dbfull()->TEST_Counters().bg_errors, 0u);
+  for (int i = 0; i < 160; i++) {
+    EXPECT_EQ(Get(UserKey(i)), KiB(i)) << "entry " << i;
+  }
+  ASSERT_OK(Put("after", "1"));
+  EXPECT_EQ(Get("after"), "1");
+}
+
+TEST_F(DBCompactionTest, ASnapshotTakenWhileACompactionRunsReadsItsOwnState) {
+  // The job knows the snapshots there were when it began. One that is taken after sees what is
+  // there then, which the job can only have kept, since every entry it reads is older.
+  Options options = ManyOutputsOptions();
+  HookEnv* const hook_env = NewHookEnv();
+  options.env = hook_env;
+  Reopen(options);
+  for (int round = 0; round < 3; round++) {
+    ASSERT_NO_FATAL_FAILURE(WriteSpanningTable(round));
+  }
+  // The fourth table has the keys that the others lack, and newer versions of the keys of the
+  // first, so that the compaction drops the old ones.
+  for (int i = 0; i < 160; i++) {
+    if (i % 4 == 3) {
+      ASSERT_OK(Put(UserKey(i), KiB(i), /*sync=*/false));
+    } else if (i % 4 == 0) {
+      ASSERT_OK(Put(UserKey(i), "new" + KiB(i), /*sync=*/false));
+    }
+  }
+  const Snapshot* snapshot = nullptr;
+  int tables_created = 0;
+  hook_env->SetHook([&](std::string_view call, const std::string& path) {
+    if (call != "new_writable" || !path.ends_with(".sst")) {
+      return Status::OK();
+    }
+    // 1 is the flush of the fourth memtable, 2 and 3 the first two outputs of the compaction.
+    if (++tables_created == 3) {
+      EXPECT_OK(Put("w", "first"));
+      snapshot = db_->GetSnapshot();
+      EXPECT_OK(Put("w", "second"));
+      EXPECT_OK(Put(UserKey(0), "newer"));
+    }
+    return Status::OK();
+  });
+  ASSERT_OK(db_->Flush());
+  hook_env->SetHook(nullptr);
+  ASSERT_NE(snapshot, nullptr) << "the compaction never reached its third output";
+  EXPECT_EQ(dbfull()->TEST_Counters().compactions, 1u);
+
+  const auto expect_snapshot_reads = [&](const char* when) {
+    SCOPED_TRACE(when);
+    EXPECT_EQ(Get("w", snapshot), "first");
+    EXPECT_EQ(Get(UserKey(0), snapshot), "new" + KiB(0));
+    for (int i = 1; i < 160; i++) {
+      EXPECT_EQ(Get(UserKey(i), snapshot), i % 4 == 0 ? "new" + KiB(i) : KiB(i)) << "entry " << i;
+    }
+  };
+  EXPECT_EQ(Get("w"), "second");
+  EXPECT_EQ(Get(UserKey(0)), "newer");
+  expect_snapshot_reads("after the compaction");
+  // And a later compaction, which does know of it, keeps what it sees.
+  EXPECT_OK(db_->CompactRange(std::nullopt, std::nullopt));
+  expect_snapshot_reads("after a compaction that knows the snapshot");
+  EXPECT_EQ(Get("w"), "second");
+  db_->ReleaseSnapshot(snapshot);
+}
+
 TEST_F(DBCompactionTest, AFailureAnywhereInACompactionLosesNothing) {
   // Every call that a manual compaction makes through the Env fails in turn, and the process or
   // the machine then dies. The compaction that failed may have left outputs, and the MANIFEST may
   // or may not hold the edit that names them: whichever version the next open finds, every write
   // that was acknowledged is in it.
-  const std::vector<Op> ops = {Op::kNewWritable,     Op::kAppend,  Op::kFlush,  Op::kSync,
-                               Op::kClose,           Op::kSyncDir, Op::kRename, Op::kRemove,
-                               Op::kNewRandomAccess, Op::kRead};
+  //
+  // In the second round the first remove fails too. A remove is made only to clean up, after a
+  // failure or when files are obsolete, so it is the cleanup that fails: a table stays in the
+  // directory that the compaction meant to delete, and the next open's sweep has to find that no
+  // version names it, or that it is still needed, and act on that.
+  const std::vector<Op> ops = {Op::kNewWritable, Op::kAppend,          Op::kFlush,
+                               Op::kSync,        Op::kClose,           Op::kSyncDir,
+                               Op::kRename,      Op::kNewRandomAccess, Op::kRead};
   enum class Crash { kProcess, kPowerRandom, kPowerDropUnsynced };
   int failed = 0;
+  int failed_with_a_failed_remove = 0;
   for (const Crash crash : {Crash::kProcess, Crash::kPowerRandom, Crash::kPowerDropUnsynced}) {
-    for (const Op op : ops) {
-      for (int n = 0; n < 16; n++) {
-        Close();
-        env_ = std::make_unique<FaultInjectionEnv>(static_cast<uint64_t>(n) + 1);
-        Options options = SmallBuffer();
-        options.target_file_size = 16384;
-        Reopen(options);
-        std::vector<std::string> expected(60);
-        for (int round = 0; round < 3; round++) {
-          for (int i = 0; i < 60; i++) {
-            expected[static_cast<size_t>(i)] = "r" + std::to_string(round) + KiB(i);
-            ASSERT_OK(Put(UserKey(i), expected[static_cast<size_t>(i)], /*sync=*/false));
+    for (const bool remove_fails_too : {false, true}) {
+      for (const Op op : ops) {
+        for (int n = 0; n < 16; n++) {
+          Close();
+          env_ = std::make_unique<FaultInjectionEnv>(static_cast<uint64_t>(n) + 1);
+          Options options = SmallBuffer();
+          options.target_file_size = 16384;
+          Reopen(options);
+          std::vector<std::string> expected(60);
+          for (int round = 0; round < 3; round++) {
+            for (int i = 0; i < 60; i++) {
+              expected[static_cast<size_t>(i)] = "r" + std::to_string(round) + KiB(i);
+              ASSERT_OK(Put(UserKey(i), expected[static_cast<size_t>(i)], /*sync=*/false));
+            }
+            ASSERT_OK(db_->Flush());
           }
-          ASSERT_OK(db_->Flush());
-        }
-        scheduler_.RunPending();
-        env_->FailOpAfter(op, n);
-        const uint64_t before = env_->injected_errors();
-        const Status s = db_->CompactRange(std::nullopt, std::nullopt);
-        const bool fired = env_->injected_errors() > before;
-        env_->ClearFaults();
-        if (fired && !s.ok()) {
-          failed++;
-          EXPECT_EQ(dbfull()->TEST_Counters().bg_errors, 1u);
-          EXPECT_FALSE(Put("more", "x").ok());
-        }
-        for (int i = 0; i < 60; i++) {
-          EXPECT_EQ(Get(UserKey(i)), expected[static_cast<size_t>(i)]);
-        }
-        switch (crash) {
-          case Crash::kProcess:
-            env_->SimulateProcessCrash();
+          scheduler_.RunPending();
+          env_->FailOpAfter(op, n);
+          if (remove_fails_too) {
+            env_->FailOpAfter(Op::kRemove, 0);
+          }
+          const uint64_t before = env_->injected_errors();
+          const Status s = db_->CompactRange(std::nullopt, std::nullopt);
+          const uint64_t injected = env_->injected_errors() - before;
+          const bool fired = injected > 0;
+          env_->ClearFaults();
+          if (fired && !s.ok()) {
+            failed++;
+            if (injected > 1) {
+              failed_with_a_failed_remove++;
+            }
+            EXPECT_EQ(dbfull()->TEST_Counters().bg_errors, 1u);
+            EXPECT_FALSE(Put("more", "x").ok());
+          }
+          for (int i = 0; i < 60; i++) {
+            EXPECT_EQ(Get(UserKey(i)), expected[static_cast<size_t>(i)]);
+          }
+          switch (crash) {
+            case Crash::kProcess:
+              env_->SimulateProcessCrash();
+              break;
+            case Crash::kPowerRandom:
+              env_->SimulatePowerLoss();
+              break;
+            case Crash::kPowerDropUnsynced:
+              env_->SimulatePowerLossDropUnsynced();
+              break;
+          }
+          Reopen(options);
+          for (int i = 0; i < 60; i++) {
+            EXPECT_EQ(Get(UserKey(i)), expected[static_cast<size_t>(i)])
+                << "entry " << i << " after the failure of call " << n << " of op "
+                << static_cast<int>(op);
+          }
+          ExpectNoStrayTables();
+          EXPECT_OK(CheckInvariants(dbfull()->TEST_VersionState()));
+          if (!fired) {
             break;
-          case Crash::kPowerRandom:
-            env_->SimulatePowerLoss();
-            break;
-          case Crash::kPowerDropUnsynced:
-            env_->SimulatePowerLossDropUnsynced();
-            break;
-        }
-        Reopen(options);
-        for (int i = 0; i < 60; i++) {
-          EXPECT_EQ(Get(UserKey(i)), expected[static_cast<size_t>(i)])
-              << "entry " << i << " after the failure of call " << n << " of op "
-              << static_cast<int>(op);
-        }
-        ExpectNoStrayTables();
-        EXPECT_OK(CheckInvariants(dbfull()->TEST_VersionState()));
-        if (!fired) {
-          break;
+          }
         }
       }
     }
   }
-  EXPECT_GT(failed, 30) << "the sweep hardly made a compaction fail";
+  EXPECT_GT(failed, 60) << "the sweep hardly made a compaction fail";
+  EXPECT_GT(failed_with_a_failed_remove, 20) << "the sweep hardly made a cleanup fail";
 }
 
 TEST_F(DBCompactionTest, CompactionRunsOnAThreadScheduler) {

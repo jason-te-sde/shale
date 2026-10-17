@@ -179,6 +179,10 @@ class DBImpl final : public DB {
   // would be taken for a stray file by the next open and never replayed.
   Status AllocateFileNumber(uint64_t* number) SHALE_REQUIRES(mutex_);
 
+  // Takes a number for a table that is about to be made, as AllocateFileNumber() does, and counts
+  // it in `table_makers_`. The number is set whether or not the status is OK.
+  Status AllocateTableNumber(uint64_t* number) SHALE_REQUIRES(mutex_);
+
   // Writes `mem_`, the recovered writes, as a level 0 table and adds it to `*edit`.
   Status WriteRecoveredMemTable(VersionEdit* edit) SHALE_REQUIRES(mutex_);
 
@@ -238,7 +242,8 @@ class DBImpl final : public DB {
   // leaves them, since the MANIFEST may hold the edit all the same and name them: they are left for
   // the next open to find, with the inputs that the edit may or may not have deleted. After a
   // background error the outputs of a job that succeeded are removed without being installed, for
-  // the work of the database is over.
+  // the work of the database is over. A job that stopped because the database is closing has
+  // removed what it made, and nothing is installed or recorded: it is not an error.
   Status CompactFiles(const CompactionPlan& plan, std::shared_ptr<const Version> base)
       SHALE_REQUIRES(mutex_);
 
@@ -266,9 +271,9 @@ class DBImpl final : public DB {
   // that a failed edit would have installed is the one that a restart finds is not known. Gives up
   // the mutex while it lists and deletes: what it decides is obsolete never becomes needed, since a
   // file number is not used twice, and the one task at a time that makes files is the caller, a
-  // compaction that flushes between its outputs included. A table being made while the files are
-  // listed would be taken for one that nothing needs, so the sweep aborts if `pending_outputs_`
-  // changed while it was away.
+  // compaction that flushes between its outputs included. A table begun while the files are listed
+  // would be taken for one that nothing needs, so the sweep aborts if `table_makers_` moved while
+  // it was away, which it does even for a table that was begun and finished in that time.
   void DeleteObsoleteFiles() SHALE_REQUIRES(mutex_);
 
   // Waits for the background work to make progress, and returns so that the caller can look at
@@ -336,6 +341,10 @@ class DBImpl final : public DB {
   // of obsolete files must not take: the table of a flush, and the outputs of a compaction from the
   // moment each is numbered until the edit that names them has been tried.
   std::set<uint64_t> pending_outputs_ SHALE_GUARDED_BY(mutex_);
+  // How many tables have been begun, by a flush, a compaction or the recovery of the log: a number
+  // taken for each. Only the sweep of obsolete files looks at it, to find that a table was begun
+  // while it was away, which `pending_outputs_` alone does not show if the table is done by then.
+  uint64_t table_makers_ SHALE_GUARDED_BY(mutex_) = 0;
   // The request of a CompactRange() that the background task has not yet finished with, or null.
   // One at a time: a second caller waits for the first.
   ManualCompaction* manual_ SHALE_GUARDED_BY(mutex_) = nullptr;

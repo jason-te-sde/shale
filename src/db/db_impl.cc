@@ -152,6 +152,10 @@ DBImpl::DBImpl(const Options& options, std::string dbname)
   }
 }
 
+// The checker follows the line that says the database is closing into the info log's string
+// building and sees a possible bad_alloc. A destructor that cannot allocate a line of text has no
+// better answer than the end of the process, which is what an exception leaving it is.
+// NOLINTNEXTLINE(bugprone-exception-escape)
 DBImpl::~DBImpl() {
   MutexLock lock(&mutex_);
   if (snapshots_.size() != 0) {
@@ -165,6 +169,7 @@ DBImpl::~DBImpl() {
   // database that is closing. One that is running finishes what it is doing. Closing does not
   // flush: what `mem_` and `imm_` hold is in the logs, which the next open replays.
   shutting_down_.store(true, std::memory_order_release);
+  Log("closing");
   while (bg_scheduled_) {
     WaitForBackgroundWork();
   }
@@ -570,9 +575,14 @@ Status DBImpl::AllocateFileNumber(uint64_t* number) {
   return Status::OK();
 }
 
+Status DBImpl::AllocateTableNumber(uint64_t* number) {
+  table_makers_++;
+  return AllocateFileNumber(number);
+}
+
 Status DBImpl::WriteRecoveredMemTable(VersionEdit* edit) {
   FileMetaData meta;
-  Status s = AllocateFileNumber(&meta.number);
+  Status s = AllocateTableNumber(&meta.number);
   if (!s.ok()) {
     return s;
   }

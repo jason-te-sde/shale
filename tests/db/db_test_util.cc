@@ -111,6 +111,48 @@ std::vector<std::string> DBTestBase::DbFiles() {
 
 DBImpl* DBTestBase::dbfull() { return static_cast<DBImpl*>(db_.get()); }
 
+Options DBTestBase::SmallBuffer() {
+  Options options = CurrentOptions();
+  options.write_buffer_size = 16384;
+  return options;
+}
+
+std::string DBTestBase::KiB(int i) { return std::string(1024, 'v') + ValueOf(i); }
+
+std::vector<std::string> DBTestBase::FilesOfType(FileType type) {
+  std::vector<std::string> names;
+  for (const std::string& name : DbFiles()) {
+    uint64_t number = 0;
+    FileType found = FileType::kCurrentFile;
+    if (ParseFileName(name, &number, &found) && found == type) {
+      names.push_back(name);
+    }
+  }
+  return names;
+}
+
+int DBTestBase::CountFiles(FileType type) { return static_cast<int>(FilesOfType(type).size()); }
+
+int DBTestBase::PutUntilSwitched() {
+  int written = 0;
+  while (CountFiles(FileType::kLogFile) < 2) {
+    EXPECT_LT(written, 100) << "the memtable never switched";
+    if (written >= 100) {
+      break;
+    }
+    EXPECT_OK(Put(UserKey(written), KiB(written), /*sync=*/false));
+    written++;
+  }
+  return written;
+}
+
+HookEnv* DBTestBase::NewHookEnv() {
+  // The database may be running on the one that is replaced.
+  Close();
+  hook_env_ = std::make_unique<HookEnv>(env_.get());
+  return hook_env_.get();
+}
+
 Status ForgeEmptyDatabase(Env* env, const std::string& dbname, SequenceNumber last_sequence,
                           uint64_t next_file_number) {
   Status s = env->CreateDir(dbname);

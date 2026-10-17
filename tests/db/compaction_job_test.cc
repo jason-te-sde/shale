@@ -27,6 +27,7 @@
 #include "shale/status.h"
 #include "testkit/fault_env.h"
 #include "testkit/test_util.h"
+#include "util/coding.h"
 #include "util/dbformat.h"
 #include "util/filename.h"
 
@@ -389,6 +390,44 @@ TEST_F(CompactionJobTest, EqualInternalKeysInTwoLevel0TablesAreWrittenOnce) {
   }
 }
 
+TEST_F(CompactionJobTest, EqualDeletionsInTwoLevel0TablesAreWrittenOnce) {
+  // The same, for a deletion: the copies have the key and the sequence number of each other, and
+  // whichever the filter keeps, a snapshot or a table below keeping the deletion, only one is
+  // written, and every entry is accounted for as kept or dropped.
+  const std::vector<std::vector<SequenceNumber>> snapshot_sets = {{}, {3}, {5}, {5, 5}, {1, 5, 9}};
+  const Entries entries = {
+      {IKey("a", 5, ValueType::kDeletion), ""}, {IKey("a", 2), "w"}, {IKey("b", 6), "y"}};
+  uint64_t input_number = 2;
+  for (const bool value_below : {false, true}) {
+    for (const std::vector<SequenceNumber>& snapshots : snapshot_sets) {
+      SCOPED_TRACE(snapshots.size());
+      // With a table below that holds "a", no deletion of it is dropped: the kept copy is one.
+      std::vector<std::vector<Input>> levels = {
+          {{input_number, entries}, {input_number + 1, entries}}};
+      if (value_below) {
+        levels.push_back({});
+        levels.push_back({{input_number + 2, {{IKey("a", 1), "older"}}}});
+      }
+      Scenario scenario;
+      ASSERT_NO_FATAL_FAILURE(MakeScenario(levels, 0, &scenario));
+      input_number += 3;
+      const std::unique_ptr<CompactionJob> job = NewJob(scenario, 1 << 20, snapshots);
+      ASSERT_OK(job->Run());
+      std::set<std::string> keys;
+      for (const auto& [key, value] : ReadOutputs(*job)) {
+        EXPECT_TRUE(keys.insert(key).second) << "an internal key was written twice";
+      }
+      const CompactionJobStats& stats = job->stats();
+      EXPECT_EQ(stats.entries_kept + stats.shadowed_dropped + stats.tombstones_dropped, 6u);
+      EXPECT_GE(stats.shadowed_dropped, 3u);
+      if (value_below) {
+        EXPECT_EQ(stats.tombstones_dropped, 0u) << "a deletion over a value below was dropped";
+        EXPECT_EQ(keys.count(IKey("a", 5, ValueType::kDeletion)), 1u);
+      }
+    }
+  }
+}
+
 TEST_F(CompactionJobTest, ReadingAnInputThatIsCorruptFailsAndNamesTheTable) {
   Input input;
   input.number = 2;
@@ -437,6 +476,83 @@ TEST_F(CompactionJobTest, AnInputThatCannotBeOpenedIsNamedOnce) {
   EXPECT_EQ(text.find(path, first + 1), std::string::npos) << "the table is named twice: " << text;
 }
 
+TEST_F(CompactionJobTest, AnEntryWhoseKeyIsNotAnInternalKeyFailsAndNamesTheTable) {
+  // A tag that names a type there is not. The table builder only orders keys, and the table opens,
+  // so the damage is found when the entry is read, by the iterator over the table, which names it.
+  std::string bad_key = "b";
+  PutFixed64(&bad_key, (SequenceNumber{2} << 8) | 7);
+  Input input;
+  input.number = 2;
+  input.entries = {{IKey("a", 3), "x"}, {bad_key, "y"}, {IKey("c", 1), "z"}};
+  Scenario scenario;
+  ASSERT_NO_FATAL_FAILURE(MakeScenario({{input}}, 0, &scenario));
+  const std::unique_ptr<CompactionJob> job = NewJob(scenario, 1 << 20);
+  const Status s = job->Run();
+  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+  EXPECT_NE(s.ToString().find(TableFileName(kDb, 2)), std::string::npos)
+      << "the error should name the table: " << s.ToString();
+  EXPECT_TRUE(job->outputs().empty());
+  EXPECT_EQ(TableFiles(), (std::set<std::string>{"000002.sst"}));
+}
+
+TEST_F(CompactionJobTest, AJobThatIsToldToStopRemovesItsOutputsAndSaysSo) {
+  Input input;
+  input.number = 2;
+  for (int i = 0; i < 1000; i++) {
+    input.entries.emplace_back(IKey(UserKey(i), static_cast<SequenceNumber>(i) + 1), Value(200));
+  }
+  Scenario scenario;
+  ASSERT_NO_FATAL_FAILURE(MakeScenario({{input}}, 0, &scenario));
+  // Asked before each output: yes at the third, after two have been made and named.
+  CompactionJobContext ctx = Context(16384);
+  int asked = 0;
+  ctx.should_stop = [&asked] { return ++asked == 3; };
+  CompactionJob job(std::move(ctx), scenario.plan,
+                    std::make_shared<const Version>(scenario.state, &job_cache_), {});
+  ASSERT_OK(job.Run());
+  EXPECT_TRUE(job.stopped());
+  EXPECT_EQ(asked, 3);
+  EXPECT_EQ(between_outputs_calls_, 2) << "the job made two outputs before it was told";
+  EXPECT_TRUE(job.outputs().empty());
+  EXPECT_EQ(TableFiles(), (std::set<std::string>{"000002.sst"})) << "an output was left behind";
+  EXPECT_TRUE(job.MakeEdit().new_files.empty());
+}
+
+TEST_F(CompactionJobTest, AJobThatIsToldToStopAtOnceMakesNoFile) {
+  Scenario scenario;
+  ASSERT_NO_FATAL_FAILURE(MakeScenario({{{2, {{IKey("a", 1), "x"}}}}}, 0, &scenario));
+  CompactionJobContext ctx = Context(1 << 20);
+  int allocated = 0;
+  ctx.allocate_file_number = [&allocated, this] {
+    allocated++;
+    return next_number_++;
+  };
+  ctx.should_stop = [] { return true; };
+  CompactionJob job(std::move(ctx), scenario.plan,
+                    std::make_shared<const Version>(scenario.state, &job_cache_), {});
+  ASSERT_OK(job.Run());
+  EXPECT_TRUE(job.stopped());
+  EXPECT_EQ(allocated, 0) << "a number was taken for an output that was never begun";
+  EXPECT_EQ(TableFiles(), (std::set<std::string>{"000002.sst"}));
+}
+
+TEST_F(CompactionJobTest, AJobThatIsNeverToldToStopIsNotStopped) {
+  Scenario scenario;
+  ASSERT_NO_FATAL_FAILURE(MakeScenario({{{2, {{IKey("a", 1), "x"}}}}}, 0, &scenario));
+  CompactionJobContext ctx = Context(1 << 20);
+  int asked = 0;
+  ctx.should_stop = [&asked] {
+    asked++;
+    return false;
+  };
+  CompactionJob job(std::move(ctx), scenario.plan,
+                    std::make_shared<const Version>(scenario.state, &job_cache_), {});
+  ASSERT_OK(job.Run());
+  EXPECT_FALSE(job.stopped());
+  EXPECT_EQ(asked, 1);
+  EXPECT_EQ(job.outputs().size(), 1u);
+}
+
 TEST_F(CompactionJobTest, AFileNumberAtTheCeilingFailsTheJobBeforeAFileIsMade) {
   Scenario scenario;
   ASSERT_NO_FATAL_FAILURE(MakeScenario({{{2, {{IKey("a", 1), "x"}}}}}, 0, &scenario));
@@ -477,8 +593,7 @@ TEST_F(CompactionJobTest, AFailureAnywhereLeavesNoOutputAndNoOpenFile) {
   // Abandon() ends the process, a file that is not closed leaks, and a partial output that is not
   // removed would stay for ever: none of it may happen on any path.
   const std::vector<Op> ops = {Op::kNewWritable, Op::kAppend,  Op::kFlush,           Op::kSync,
-                               Op::kClose,       Op::kSyncDir, Op::kNewRandomAccess, Op::kRead,
-                               Op::kRemove};
+                               Op::kClose,       Op::kSyncDir, Op::kNewRandomAccess, Op::kRead};
   Input input;
   input.number = 2;
   for (int i = 0; i < 300; i++) {
@@ -487,38 +602,93 @@ TEST_F(CompactionJobTest, AFailureAnywhereLeavesNoOutputAndNoOpenFile) {
   Scenario scenario;
   ASSERT_NO_FATAL_FAILURE(MakeScenario({{input}}, 0, &scenario));
   int failed = 0;
-  for (const Op op : ops) {
-    for (int n = 0; n < 40; n++) {
-      env_.FailOpAfter(op, n);
-      const uint64_t before = env_.injected_errors();
-      TableCache cold_cache(kDb, &env_, &block_cache_, 100);
-      CompactionJobContext ctx = Context(16384);
-      ctx.table_cache = &cold_cache;
-      CompactionJob job(std::move(ctx), scenario.plan,
-                        std::make_shared<const Version>(scenario.state, &cold_cache), {});
-      const Status s = job.Run();
-      const bool fired = env_.injected_errors() > before;
-      env_.ClearFaults();
-      if (fired) {
-        failed++;
-        EXPECT_FALSE(s.ok()) << "an injected failure of call " << n << " went unnoticed";
-        EXPECT_TRUE(job.outputs().empty());
-        EXPECT_EQ(TableFiles(), (std::set<std::string>{"000002.sst"}))
-            << "an output survived the failure of call " << n;
-      } else {
-        // A job makes fewer calls of this kind than n + 1: they have all been tried. (A remove is
-        // only made after a failure, so there is nothing to fail in a run that succeeds.)
-        EXPECT_OK(s);
-        for (const FileMetaData& meta : job.outputs()) {
-          EXPECT_TRUE(env_.FileExists(TableFileName(kDb, meta.number)));
+  int left_behind = 0;
+  // The second round makes the first remove fail too, which only happens in the cleanup after a
+  // failure: the job reports the error that came first, and the file it could not remove stays
+  // for the next sweep of the database, which finds no version naming it.
+  for (const bool remove_fails_too : {false, true}) {
+    for (const Op op : ops) {
+      for (int n = 0; n < 40; n++) {
+        env_.FailOpAfter(op, n);
+        if (remove_fails_too) {
+          env_.FailOpAfter(Op::kRemove, 0);
         }
-        job.RemoveOutputs();
-        EXPECT_EQ(TableFiles(), (std::set<std::string>{"000002.sst"}));
-        break;
+        const uint64_t before = env_.injected_errors();
+        TableCache cold_cache(kDb, &env_, &block_cache_, 100);
+        CompactionJobContext ctx = Context(16384);
+        ctx.table_cache = &cold_cache;
+        CompactionJob job(std::move(ctx), scenario.plan,
+                          std::make_shared<const Version>(scenario.state, &cold_cache), {});
+        const Status s = job.Run();
+        const uint64_t injected = env_.injected_errors() - before;
+        env_.ClearFaults();
+        // Whether the call under test was reached: a remove that failed is one more error.
+        const bool op_fired = injected > 0;
+        const std::set<std::string> tables = TableFiles();
+        if (op_fired && !s.ok()) {
+          failed++;
+          EXPECT_TRUE(job.outputs().empty());
+          EXPECT_EQ(s.ToString().find("remove "), std::string::npos)
+              << "the error of the cleanup replaced the first one: " << s.ToString();
+          if (!remove_fails_too) {
+            EXPECT_EQ(tables, (std::set<std::string>{"000002.sst"}))
+                << "an output survived the failure of call " << n;
+          } else {
+            // At most the one file whose removal failed, and it is one of the job's.
+            EXPECT_LE(tables.size(), 2u);
+            for (const std::string& name : tables) {
+              uint64_t number = 0;
+              FileType type = FileType::kCurrentFile;
+              ASSERT_TRUE(ParseFileName(name, &number, &type));
+              EXPECT_TRUE(number == 2 || number >= 100) << name;
+              if (number != 2) {
+                left_behind++;
+                // The next sweep deletes it: here that is the test's.
+                ASSERT_OK(env_.RemoveFile(TableFileName(kDb, number)));
+              }
+            }
+          }
+        } else if (!op_fired) {
+          // A job makes fewer calls of this kind than n + 1: they have all been tried. (A remove
+          // is only made after a failure, so there is nothing to fail in a run that succeeds.)
+          EXPECT_OK(s);
+          for (const FileMetaData& meta : job.outputs()) {
+            EXPECT_TRUE(env_.FileExists(TableFileName(kDb, meta.number)));
+          }
+          job.RemoveOutputs();
+          EXPECT_EQ(TableFiles(), (std::set<std::string>{"000002.sst"}));
+          break;
+        } else {
+          ADD_FAILURE() << "an injected failure of call " << n << " went unnoticed";
+        }
       }
     }
   }
-  EXPECT_GT(failed, 40) << "the sweep hardly made a job fail";
+  EXPECT_GT(failed, 80) << "the sweep hardly made a job fail";
+  EXPECT_GT(left_behind, 10) << "the sweep hardly made a cleanup fail";
+}
+
+TEST_F(CompactionJobTest, AFailedCleanupLeavesTheFileAndKeepsTheFirstError) {
+  Input input;
+  input.number = 2;
+  for (int i = 0; i < 1000; i++) {
+    input.entries.emplace_back(IKey(UserKey(i), static_cast<SequenceNumber>(i) + 1), Value(200));
+  }
+  Scenario scenario;
+  ASSERT_NO_FATAL_FAILURE(MakeScenario({{input}}, 0, &scenario));
+  // The sync of the second output fails, and so does the removal of that output, the first remove
+  // there is. The first output is removed by Run() afterwards.
+  env_.FailOpAfter(Op::kSync, 1);
+  env_.FailOpAfter(Op::kRemove, 0);
+  const std::unique_ptr<CompactionJob> job = NewJob(scenario, 16384);
+  const Status s = job->Run();
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+  EXPECT_EQ(s.ToString().rfind("IO error: sync ", 0), 0u)
+      << "not the first error: " << s.ToString();
+  EXPECT_EQ(env_.injected_errors(), 2u);
+  EXPECT_TRUE(job->outputs().empty());
+  // Output 100 is gone and 101 stayed, which no version names.
+  EXPECT_EQ(TableFiles(), (std::set<std::string>{"000002.sst", "000101.sst"}));
 }
 
 TEST_F(CompactionJobTest, RemoveOutputsDeletesTheFilesAndForgetsThem) {

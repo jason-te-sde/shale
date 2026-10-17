@@ -21,10 +21,10 @@
 namespace shale {
 
 /// Passes every call to another Env, after asking a hook about the calls it knows of. The hook gets
-/// the name of the call, "new_writable", "sync" (of a writable file), "get_children" or "remove",
-/// and the path it is about, and returns OK to let the call through or an error to make the call
-/// return that, without making it. It runs on the thread of the call, without any lock of this
-/// class held, so it may block, and may call into the database.
+/// the name of the call, "new_writable", "new_random_access", "sync" (of a writable file),
+/// "sync_dir", "get_children" or "remove", and the path it is about, and returns OK to let the call
+/// through or an error to make the call return that, without making it. It runs on the thread of
+/// the call, without any lock of this class held, so it may block, and may call into the database.
 class HookEnv final : public Env {
  public:
   /// What a hook is.
@@ -46,6 +46,11 @@ class HookEnv final : public Env {
 
   Status NewRandomAccessFile(const std::string& fname,
                              std::unique_ptr<RandomAccessFile>* result) override {
+    const Status hooked = Ask("new_random_access", fname);
+    if (!hooked.ok()) {
+      result->reset();
+      return hooked;
+    }
     return target_->NewRandomAccessFile(fname, result);
   }
 
@@ -95,7 +100,13 @@ class HookEnv final : public Env {
     return target_->RenameFile(src, target);
   }
 
-  Status SyncDir(const std::string& dirname) override { return target_->SyncDir(dirname); }
+  Status SyncDir(const std::string& dirname) override {
+    const Status hooked = Ask("sync_dir", dirname);
+    if (!hooked.ok()) {
+      return hooked;
+    }
+    return target_->SyncDir(dirname);
+  }
 
   Status LockFile(const std::string& fname, std::unique_ptr<FileLock>* lock) override {
     return target_->LockFile(fname, lock);
