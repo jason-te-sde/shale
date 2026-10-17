@@ -2,6 +2,7 @@
 // writing the one that is waiting out as a level 0 table, compacting the levels, deleting the files
 // that nothing needs any more, and what happens when any of it fails.
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -60,17 +61,29 @@ Status DBImpl::Flush() {
   if (!bg_error_.ok()) {
     return bg_error_;
   }
+  // The switch is the leader's: a group is being appended to the log and added to `mem_` with the
+  // mutex given up, and a switch under it would replace both. So this takes its place in the queue
+  // as a request with no batch, which no group takes in, and switches when it has the front.
+  Writer w(&mutex_);
+  writers_.push_back(&w);
+  while (&w != writers_.front()) {
+    w.cv.Wait();
+  }
+  Status s;
   if (!IsEmpty(*mem_)) {
-    const Status s = MakeRoomForWrite(/*force=*/true);
-    if (!s.ok()) {
-      return s;
-    }
+    s = MakeRoomForWrite(/*force=*/true);
   }
   // The memtable that is waiting now is the one this call has to see written: the one it just
   // switched, or, when there was nothing to switch, the one that an earlier switch left. A flush
   // that ends and another switch after it are not this call's to wait for, so the wait is for this
   // memtable to be gone and not for `imm_` to be empty.
   const std::shared_ptr<MemTable> target = imm_;
+  // The place in the queue is given up before the wait: the writes behind it need not wait for a
+  // flush that they do not depend on, and the memtable they fill is a new one.
+  FinishGroup(&w, &w, Status::OK());
+  if (!s.ok()) {
+    return s;
+  }
   while (target != nullptr && imm_ == target && bg_error_.ok()) {
     WaitForBackgroundWork();
   }
@@ -91,9 +104,22 @@ void DBImpl::WaitForBackgroundWork() {
 }
 
 Status DBImpl::MakeRoomForWrite(bool force) {
+  // A request to switch is not a write, and is not slowed.
+  bool allow_delay = !force;
   while (true) {
     if (!bg_error_.ok()) {
       return bg_error_;
+    }
+    const int level0_files = versions_.current()->NumFiles(0);
+    if (allow_delay && level0_files >= options_.l0_slowdown_trigger) {
+      // Level 0 fills faster than compaction empties it. The write gives it a millisecond, once,
+      // with the mutex given up: the writers that queue meanwhile are in the group that follows.
+      mutex_.Unlock();
+      env_->SleepForMicroseconds(1000);
+      mutex_.Lock();
+      counters_.write_slowdowns++;
+      allow_delay = false;
+      continue;  // what was read above may have changed while the mutex was not held
     }
     if (!force && mem_->ApproximateMemoryUsage() < options_.write_buffer_size) {
       return Status::OK();
@@ -101,6 +127,14 @@ Status DBImpl::MakeRoomForWrite(bool force) {
     if (imm_ != nullptr) {
       // The memtable that was switched before is not yet a table, and there is no place to put
       // this one.
+      counters_.write_stops++;
+      WaitForBackgroundWork();
+      continue;
+    }
+    if (level0_files >= options_.l0_stop_trigger) {
+      // A switch is what adds a file to level 0, once the flush of the memtable it makes is done,
+      // and it waits here for a compaction to take some away. This is what bounds level 0.
+      counters_.write_stops++;
       WaitForBackgroundWork();
       continue;
     }
@@ -199,7 +233,10 @@ void DBImpl::BackgroundCall() {
 
 CompactionOptions DBImpl::PickerOptions() const {
   CompactionOptions picker_options;
-  picker_options.l0_compaction_trigger = options_.l0_compaction_trigger;
+  // Never above the number of files at which writes stop: a write that waits for level 0 to shrink
+  // must have a compaction coming, or it would wait for ever.
+  picker_options.l0_compaction_trigger =
+      std::min(options_.l0_compaction_trigger, options_.l0_stop_trigger);
   picker_options.max_bytes_for_level_base = options_.max_bytes_for_level_base;
   picker_options.level_size_multiplier = options_.level_size_multiplier;
   picker_options.target_file_size = options_.target_file_size;
@@ -310,6 +347,11 @@ Status DBImpl::CompactFiles(const CompactionPlan& plan, std::shared_ptr<const Ve
     // If this fails, the MANIFEST may hold the edit all the same, and the outputs are then tables
     // that the next open finds in the version: they stay, and nothing is deleted.
     s = versions_.LogAndApply(job->MakeEdit());
+    if (s.ok()) {
+      // A write that waits for level 0 to shrink can go on now, and not when the sweep below is
+      // done.
+      background_cv_.SignalAll();
+    }
   }
   for (const uint64_t number : allocated) {
     pending_outputs_.erase(number);

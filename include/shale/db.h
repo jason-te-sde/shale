@@ -81,6 +81,14 @@ class DB {
   /// is. They take the next sequence numbers, in order, so that a later operation on a key
   /// supersedes an earlier one. The batch is given its sequence number, so it is changed.
   ///
+  /// Writers that arrive while another write is being made are queued, and are written together,
+  /// in the order they queued, as one log record with one sync. A group holds up to a megabyte of
+  /// batches, and less when its first is small, and a write that asked for a sync is never in a
+  /// group led by a write that did not.
+  /// A write is slowed by a millisecond while level 0 holds Options::l0_slowdown_trigger files or
+  /// more, and waits when it needs a new memtable and level 0 holds Options::l0_stop_trigger or
+  /// more, or the previous memtable is still being written out.
+  ///
   /// Returns InvalidArgument, applying nothing, for a null batch and for one with a key or value
   /// over the limit. An empty batch is accepted and does nothing. Returns Corruption, applying
   /// nothing and stopping no later write, if the batch would need a sequence number above the

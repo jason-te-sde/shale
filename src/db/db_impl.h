@@ -7,7 +7,10 @@
 // that an iterator shows is made in db_iter.cc.
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <set>
@@ -46,14 +49,14 @@ struct DBCounters {
   uint64_t trivial_moves = 0;             ///< Files moved to the next level as they were.
   uint64_t tombstones_dropped = 0;        ///< Deletion entries that a compaction dropped.
   uint64_t shadowed_dropped = 0;          ///< Entries a compaction dropped for a newer one.
-  uint64_t user_bytes_written = 0;        ///< Key and value bytes the callers wrote.
-  uint64_t wal_bytes_written = 0;         ///< Bytes appended to the write-ahead log.
+  uint64_t user_bytes_written = 0;        ///< Key and value bytes of the writes that were made.
+  uint64_t wal_bytes_written = 0;         ///< Bytes of the records appended to the log.
   uint64_t flush_bytes_written = 0;       ///< Bytes of the tables that flushes wrote.
   uint64_t compaction_bytes_read = 0;     ///< Bytes of the tables that compactions read.
   uint64_t compaction_bytes_written = 0;  ///< Bytes of the tables that compactions wrote.
   uint64_t write_groups = 0;              ///< Groups of writes that shared one log record.
-  uint64_t wal_syncs = 0;                 ///< Syncs of the write-ahead log.
-  uint64_t write_slowdowns = 0;           ///< Writes that were slowed for level 0 being full.
+  uint64_t wal_syncs = 0;                 ///< Syncs of the log that a group of writes asked for.
+  uint64_t write_slowdowns = 0;           ///< Writes (groups) slowed for level 0 being full.
   uint64_t write_stops = 0;               ///< Waits of a write for level 0 or the flush.
   uint64_t bg_errors = 0;                 ///< Errors that stopped writes.
 };
@@ -61,9 +64,23 @@ struct DBCounters {
 /// The implementation of DB.
 ///
 /// Everything the database changes is guarded by `mutex_`: the memtables and the log the newer one
-/// is written to, the version set, the snapshots and the first error of the log. A write holds it
-/// from the sequence number to the memtable, which is what makes one writer at a time, and a read
-/// holds it only to take the memtables, the version and the sequence number it will read.
+/// is written to, the version set, the snapshots and the first error of the log. A read holds it
+/// only to take the memtables, the version and the sequence number it will read.
+///
+/// Writes go through a queue, and the writer at its front, the leader, writes for all of the ones
+/// that are queued behind it: it makes room, takes as many of them as one log record may hold into
+/// its group, numbers them, and, with the mutex given up, appends the group to the log as one
+/// record, syncs it if it was asked to, and puts it in the memtable. Only then is the last sequence
+/// number moved, so that a reader never sees part of a group, and the group's writers are woken
+/// with the one status. The log and the memtable are touched only by the leader, and by the switch
+/// to a new memtable, which is the leader's too: a Flush() takes its place in the queue to make it.
+/// That is what lets a write that is slow to reach the disk not hold up the readers, and the
+/// writers that queue meanwhile share the next write.
+///
+/// A write that finds level 0 with `l0_slowdown_trigger` files or more sleeps a millisecond, once,
+/// and one that must switch the memtable waits while level 0 has `l0_stop_trigger` files or more,
+/// and while the memtable that was switched before is not yet a table. Level 0 only grows by the
+/// flush of a switched memtable, and only one is ever waiting, so the wait is what bounds it.
 ///
 /// Background work is one task at a time on the Scheduler: a full memtable becomes the immutable
 /// one, `imm_`, and a task writes it out as a level 0 table while writes go on into a new `mem_`.
@@ -75,7 +92,11 @@ struct DBCounters {
 /// again. `bg_scheduled_` says a task is queued or running, and it takes the mutex, which it gives
 /// up only to write files. Whoever must wait for background work, a write that finds the memtable
 /// full and `imm_` still there among them, does it in WaitForBackgroundWork(): on a scheduler that
-/// runs tasks on the caller's thread, it runs them itself.
+/// runs tasks on the caller's thread, it runs them itself, which is for one thread at a time: two
+/// that wait at once would run tasks on the same ManualScheduler together.
+///
+/// The first error of the log, of a flush, of a compaction or of the MANIFEST stops all writes: it
+/// is kept in `bg_error_`, counted, and every write and flush after it returns it. Reads go on.
 class DBImpl final : public DB {
  public:
   /// Creates a database that is not open: DB::Open() calls OpenImpl() on it. `options` has been
@@ -94,8 +115,10 @@ class DBImpl final : public DB {
   Status Get(const ReadOptions& options, std::string_view key, std::string* value) override;
 
   /// Switches to a new memtable, if the one in use is not empty, and returns when the memtable
-  /// that was in use, and any that was waiting before it, is a table. Returns the error that stops
-  /// writes, if there is one, and then the memtable may not have been written.
+  /// that was in use, and any that was waiting before it, is a table. It queues as a write does, so
+  /// that no group is being written while it switches, and leaves the queue before it waits for
+  /// the table, so that writes go on. Returns the error that stops writes, if there is one, and
+  /// then the memtable may not have been written.
   Status Flush() override;
 
   /// Compacts the range as DB::CompactRange() says: writes out the memtable, then, level by level
@@ -169,6 +192,16 @@ class DBImpl final : public DB {
   /// Returns the cache of open tables, for a test to ask whether a table is in it.
   TableCache* TEST_TableCache() { return &table_cache_; }
 
+  /// Sets `hook`, which a group leader calls on its own thread after it has built its group and
+  /// given up the mutex, and before it appends to the log: a test holds the leader there while more
+  /// writers queue behind it. An empty `hook` removes it. It runs for every group, from whichever
+  /// thread leads it, so it must be safe to call from any.
+  void TEST_SetBeforeWalWriteHook(std::function<void()> hook) SHALE_EXCLUDES(mutex_);
+
+  /// Returns how many writers are in the queue, the leader of the group that is being written
+  /// among them.
+  size_t TEST_QueuedWriters() SHALE_EXCLUDES(mutex_);
+
  private:
   // The work of OpenImpl(), with the mutex held.
   Status OpenLocked() SHALE_REQUIRES(mutex_);
@@ -218,11 +251,52 @@ class DBImpl final : public DB {
   // woken to see it.
   void RecordBackgroundError(const Status& s) SHALE_REQUIRES(mutex_);
 
+  // What a thread that writes puts in the queue, on its own stack, and waits on until it leads a
+  // group or a leader has written for it. Its fields are guarded by `mutex_`, which the analysis
+  // cannot say of a member of another class; `cv` is bound to it. A `batch` of null is a request
+  // to switch the memtable, which no group takes in.
+  struct Writer {
+    explicit Writer(Mutex* mu) : cv(mu) {}
+    WriteBatch* batch = nullptr;
+    bool sync = false;
+    bool done = false;  // a leader has written the batch, and `status` is the result
+    Status status;
+    CondVar cv;
+  };
+
+  // Takes the group of the leader at the front of the queue: the leader's batch and those of the
+  // writers behind it that may share its log record. A group ends before a writer that is not a
+  // write, before a writer that asks for a sync when the leader does not, since the leader's
+  // record is not synced and would be acknowledged without one, at the size limit, and before the
+  // batch that would take more sequence numbers than the `room` there is. The size limit is 1 MiB,
+  // and when the leader's batch is 128 KiB or less, its size and 128 KiB, so that a small write
+  // is not made slow by a large one that happened to queue after it. Sets `*last_writer` to the
+  // last writer of the group, and returns the batch to write: the leader's own if it is alone,
+  // and else `*merged`, which holds a copy of all of them.
+  WriteBatch* BuildBatchGroup(Writer** last_writer, WriteBatch* merged, uint64_t room)
+      SHALE_REQUIRES(mutex_);
+
+  // Writes the group that `leader` leads, which is the leader's thread's to do with the mutex held
+  // on entry, and held again on return. Returns what every writer of the group is to be told, and
+  // sets `*last_writer` to the last of them. Refuses a leader whose batch alone would take more
+  // sequence numbers than are left, as that batch's own error, which stops no write; any error of
+  // the log stops them.
+  Status CommitGroup(Writer* leader, Writer** last_writer) SHALE_REQUIRES(mutex_);
+
+  // Takes the writers up to `last_writer` off the front of the queue, `leader` being the first,
+  // gives each of the others `status` and wakes it, and wakes the writer that is at the front now,
+  // which leads next.
+  void FinishGroup(Writer* leader, Writer* last_writer, const Status& status)
+      SHALE_REQUIRES(mutex_);
+
   // Makes room in `mem_` for a write, and returns OK when there is, or the error that stops
-  // writes. There is room when `mem_` is below write_buffer_size, and when it is not, or when
-  // `force` is set, `mem_` becomes `imm_` and a new one takes its place, which waits first for an
-  // `imm_` that is still there. May give up the mutex while it waits, so a caller that read
-  // anything under the mutex before it must read it again.
+  // writes. Called by the leader of a group, or by a Flush() that has the front of the queue, and
+  // by no one else. When level 0 has `l0_slowdown_trigger` files or more, and `force` is not set,
+  // it sleeps a millisecond with the mutex given up, once. There is room when `mem_` is below
+  // write_buffer_size, and when it is not, or when `force` is set, `mem_` becomes `imm_` and a new
+  // one takes its place, which waits first for an `imm_` that is still there, and for level 0 to
+  // have fewer than `l0_stop_trigger` files. May give up the mutex while it sleeps or waits, so a
+  // caller that read anything under the mutex before it must read it again.
   Status MakeRoomForWrite(bool force) SHALE_REQUIRES(mutex_);
 
   // Starts a new log and a new `mem_`, and makes the old `mem_` the `imm_`, which must be null.
@@ -342,26 +416,36 @@ class DBImpl final : public DB {
   // make progress looks at what it waits for again.
   CondVar background_cv_{&mutex_};
   VersionSet versions_ SHALE_GUARDED_BY(mutex_);
-  std::shared_ptr<MemTable> mem_ SHALE_GUARDED_BY(mutex_);  // the one that writes go into
+  // The one that writes go into. The leader adds to it with the mutex given up, which the memtable
+  // allows beside readers, and only a leader, or a Flush() in the queue, replaces it.
+  std::shared_ptr<MemTable> mem_ SHALE_GUARDED_BY(mutex_);
   // The memtable that is waiting to be written out as a table, or null. Reads look at it after
   // `mem_`, and it is only ever set when `mem_` is switched and cleared by the flush.
   std::shared_ptr<MemTable> imm_ SHALE_GUARDED_BY(mutex_);
   // Whether `imm_` is set, for a compaction to check between its output files without the mutex.
   std::atomic<bool> has_imm_{false};
   // The write-ahead log of `mem_`. The writer is declared after the file it writes to, so that it
-  // is destroyed first.
+  // is destroyed first. The leader of a group appends to it with the mutex given up, through
+  // pointers it took with the mutex held: only a leader, or a Flush() in the queue, replaces them,
+  // and none of those runs while a leader writes.
   std::unique_ptr<WritableFile> logfile_ SHALE_GUARDED_BY(mutex_);
   std::unique_ptr<log::Writer> log_ SHALE_GUARDED_BY(mutex_);
   uint64_t logfile_number_ SHALE_GUARDED_BY(mutex_) = 0;
   // Whether a record was appended to the log since it was last synced: the switch to a new
   // memtable syncs the old log, and does not when there is nothing to sync, which with every write
-  // synced, as they are by default, is every time.
+  // synced, as they are by default, is every time. Set by the leader when it has the mutex again.
   bool log_unsynced_ SHALE_GUARDED_BY(mutex_) = false;
   SnapshotList snapshots_ SHALE_GUARDED_BY(mutex_);
   // How many iterators from NewIterator() are alive. Counted up under the mutex and down by the
   // iterator, which is destroyed on any thread and must not take the mutex for it, so atomic.
   // The destructor aborts if it is not zero.
   std::atomic<int> live_iterators_{0};
+  // The writers that have not been told the result of their write, the oldest first; the first
+  // leads, and stays here until its group has been written.
+  std::deque<Writer*> writers_ SHALE_GUARDED_BY(mutex_);
+  // What a test sets to run in the leader before it appends to the log, or empty: see
+  // TEST_SetBeforeWalWriteHook().
+  std::function<void()> before_wal_write_hook_ SHALE_GUARDED_BY(mutex_);
   Status bg_error_ SHALE_GUARDED_BY(mutex_);  // the first error of the write path, or OK
   DBCounters counters_ SHALE_GUARDED_BY(mutex_);
   uint64_t memtable_seed_ SHALE_GUARDED_BY(mutex_) = 0;  // the seed of the next memtable

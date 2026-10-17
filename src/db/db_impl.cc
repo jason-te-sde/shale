@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <set>
@@ -175,6 +176,9 @@ DBImpl::~DBImpl() {
                   snapshots_.size());
     SHALE_CHECK(false, message);
   }
+  // A write that is still queued, or being written, is a caller that uses the database while it is
+  // closed, which would read what is freed: it ends the process, as an iterator does.
+  SHALE_CHECK(writers_.empty(), "DB closed while a write or a flush is in progress");
   // A task that is queued is run, by whoever waits, and returns at once: it has nothing to do for a
   // database that is closing. One that is running finishes what it is doing. Closing does not
   // flush: what `mem_` and `imm_` hold is in the logs, which the next open replays.
@@ -722,6 +726,16 @@ SequenceNumber DBImpl::TEST_LastSequence() {
 std::set<uint64_t> DBImpl::TEST_LiveFiles() {
   MutexLock lock(&mutex_);
   return versions_.LiveFiles();
+}
+
+void DBImpl::TEST_SetBeforeWalWriteHook(std::function<void()> hook) {
+  MutexLock lock(&mutex_);
+  before_wal_write_hook_ = std::move(hook);
+}
+
+size_t DBImpl::TEST_QueuedWriters() {
+  MutexLock lock(&mutex_);
+  return writers_.size();
 }
 
 std::shared_ptr<const Version> DBImpl::TEST_CurrentVersion() {

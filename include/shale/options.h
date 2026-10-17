@@ -28,8 +28,15 @@ struct Options {
   Env* env = nullptr;
 
   /// Where the database's background work runs. Null means the database owns a scheduler with a
-  /// thread of its own. A test passes a ManualScheduler to decide when background work runs. It
-  /// must outlive the database.
+  /// thread of its own, which is what a database used from several threads wants. A test passes a
+  /// ManualScheduler to decide when background work runs. It must outlive the database.
+  ///
+  /// A ManualScheduler is not thread-safe, and the database runs its tasks on the thread of a
+  /// caller that has to wait for them: a write that must wait for a flush or a compaction, a
+  /// Flush(), a CompactRange(), the close. Writes may come from several threads, since only the
+  /// first of the writers that are queued ever waits, but a database driven by a ManualScheduler
+  /// must not be pumped from two threads at once: no Flush(), CompactRange() or close may overlap
+  /// another call that may wait, or the scheduler is used by two threads together and aborts.
   Scheduler* scheduler = nullptr;
 
   /// Whether DB::Open() creates the database if there is none at the path. If false, opening a
@@ -68,14 +75,19 @@ struct Options {
   /// them, and the rest for the log and the other files it writes.
   int max_open_files = 1000;
 
-  /// The number of files at level 0 at which that level is compacted into level 1.
+  /// The number of files at level 0 at which that level is compacted into level 1. It is never
+  /// taken to be above l0_stop_trigger: a write that waits for level 0 to shrink must have a
+  /// compaction coming.
   int l0_compaction_trigger = 4;
 
   /// The number of files at level 0 at which each write is slowed down, so that compaction can
-  /// catch up.
+  /// catch up: a write sleeps for a millisecond, once, whatever the number of writers that share
+  /// it.
   int l0_slowdown_trigger = 8;
 
-  /// The number of files at level 0 at which writes wait until compaction has reduced them.
+  /// The number of files at level 0 at which writes wait until compaction has reduced them. A
+  /// write waits when it needs a new memtable, which is what adds a file to level 0, so level 0
+  /// does not grow past this under writes that never stop.
   int l0_stop_trigger = 12;
 
   /// The size in bytes that level 1 may reach before it is compacted into level 2.
