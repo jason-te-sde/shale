@@ -61,6 +61,9 @@ class WriteBatchInternal {
 
   /// Adds the operations of `src` to the end of `*dst`, in order. The sequence number of `dst` is
   /// kept, and `src` is not changed. This is how a group of batches becomes one log record.
+  /// Aborts if the two counts add up to more than 2^32 - 1, which is all the header can say. As
+  /// for WriteBatch::Put(), that is a caller bug and not an error to return: a batch with that
+  /// many operations is at least 8 GiB.
   static void Append(WriteBatch* dst, const WriteBatch* src);
 
   /// Returns the sum of the key sizes and value sizes of what was added through Put() and

@@ -229,8 +229,9 @@ bool IsWellFormed(Key key) { return MakeKey(key >> 16) == key; }
 struct ReaderResult {
   std::atomic<uint64_t> passes{0};
   std::atomic<bool> failed{false};
-  std::string failure;          // the first violation; written before `failed` is set
-  uint64_t partial_passes = 0;  // passes that saw some keys but not all of them
+  std::string failure;             // the first violation; written before `failed` is set
+  uint64_t partial_passes = 0;     // passes whose result had some keys but not all of them
+  uint64_t overlapped_passes = 0;  // passes during which the writer inserted something
   uint64_t last_pass_size = 0;
 };
 
@@ -240,13 +241,17 @@ void Fail(ReaderResult* result, std::string message) {
 }
 
 // Walks the list from the beginning, again and again, until the writer says it is done, and then
-// once more: that last pass starts after the final insert and must see every key.
-void ReadUntilDone(const TestList* list, const std::atomic<bool>* done, uint64_t total,
-                   ReaderResult* result) {
+// once more: that last pass starts after the final insert and must see every key. `inserted` is
+// how many inserts the writer has finished. It is read before and after each pass, and a pass that
+// saw it move is one that raced with the writer, which is not the same as one that merely saw an
+// unfinished list.
+void ReadUntilDone(const TestList* list, const std::atomic<bool>* done,
+                   const std::atomic<uint64_t>* inserted, uint64_t total, ReaderResult* result) {
   uint64_t previous_size = 0;
   bool last = false;
   while (!last) {
     last = done->load(std::memory_order_acquire);
+    const uint64_t inserted_before = inserted->load(std::memory_order_acquire);
     TestList::Iterator it(list);
     it.SeekToFirst();
     uint64_t size = 0;
@@ -288,6 +293,9 @@ void ReadUntilDone(const TestList* list, const std::atomic<bool>* done, uint64_t
     if (size > 0 && size < total) {
       result->partial_passes++;
     }
+    if (inserted->load(std::memory_order_acquire) > inserted_before) {
+      result->overlapped_passes++;
+    }
     result->last_pass_size = size;
     result->passes.fetch_add(1, std::memory_order_release);
   }
@@ -312,11 +320,13 @@ TEST(SkipListTest, ConcurrentReadersSeeSortedValidKeys) {
   Arena arena;
   TestList list(TestComparator(), &arena, kSeed);
   std::atomic<bool> done{false};
+  std::atomic<uint64_t> inserted{0};
   std::vector<ReaderResult> results(kReaders);
   std::vector<std::thread> readers;
   readers.reserve(kReaders);
   for (int r = 0; r < kReaders; r++) {
-    readers.emplace_back(ReadUntilDone, &list, &done, kCount, &results[static_cast<size_t>(r)]);
+    readers.emplace_back(ReadUntilDone, &list, &done, &inserted, kCount,
+                         &results[static_cast<size_t>(r)]);
   }
 
   // The writer inserts a chunk, then waits until every reader has finished a pass that ended
@@ -331,6 +341,7 @@ TEST(SkipListTest, ConcurrentReadersSeeSortedValidKeys) {
     }
     for (uint64_t i = chunk * kChunk; i < (chunk + 1) * kChunk; i++) {
       list.Insert(MakeKey(order[i]));
+      inserted.store(i + 1, std::memory_order_release);
     }
     const auto deadline = std::chrono::steady_clock::now() + kPatience;
     for (size_t r = 0; r < results.size() && !gave_up; r++) {
@@ -355,10 +366,15 @@ TEST(SkipListTest, ConcurrentReadersSeeSortedValidKeys) {
     EXPECT_FALSE(result.failed.load()) << "reader " << r << ": " << result.failure;
     EXPECT_EQ(result.last_pass_size, kCount)
         << "reader " << r << ": the pass after the last insert";
-    // Each chunk needed a pass of its own, and every one that ended before the final chunk saw
-    // fewer keys than the full list. That so many of them did is what shows the readers ran
-    // against a list that was changing.
+    // Two different things are measured. A partial pass is one whose result was neither empty nor
+    // complete; each chunk waits for a pass of every reader, and all but the last chunk's end
+    // before the list is full, so about one per chunk is expected, and this checks that the
+    // handshake above worked. An overlapped pass is one during which the writer's count of
+    // finished inserts moved, which is what shows that a pass raced with inserts, and not only
+    // that it ran against a list that was not yet finished.
     EXPECT_GE(result.partial_passes, kChunks / 2) << "reader " << r;
+    EXPECT_GT(result.overlapped_passes, 0u)
+        << "reader " << r << " never ran a pass while the writer was inserting";
   }
 }
 

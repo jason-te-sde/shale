@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -223,7 +224,9 @@ TEST(MemTableTest, BinaryKeysOrderUnsigned) {
 TEST(MemTableTest, EntriesKeepTheirBytesWhateverTheLengths) {
   // The entry stores its two lengths as varints, so the sizes where a varint grows by a byte
   // are where an encoding mistake would show. The internal key is eight bytes longer than the
-  // user key.
+  // user key, so user keys of 119, 120, 16375 and 16376 bytes put it on 127, 128, 16383 and 16384.
+  // One key per size, added once for every value size under a sequence number of its own: the
+  // entries of a key differ only in that and in the value, so the key keeps its exact length.
   const std::vector<size_t> key_sizes = {0, 1, 119, 120, 16375, 16376};
   const std::vector<size_t> value_sizes = {0, 1, 127, 128, 16383, 16384, 2097152};
   Random rnd(77);
@@ -236,14 +239,15 @@ TEST(MemTableTest, EntriesKeepTheirBytesWhateverTheLengths) {
   };
   std::vector<Written> written;
   for (const size_t key_size : key_sizes) {
+    const std::string key = RandomBinaryString(&rnd, key_size);
     for (const size_t value_size : value_sizes) {
-      Written w{RandomBinaryString(&rnd, key_size) + std::to_string(written.size()),
-                RandomBinaryString(&rnd, value_size), sequence++};
+      Written w{key, RandomBinaryString(&rnd, value_size), sequence++};
       mem->Add(w.sequence, ValueType::kValue, w.key, w.value);
       written.push_back(std::move(w));
     }
   }
   for (const Written& w : written) {
+    // At its own sequence number the newest entry the lookup may see is the one just added.
     const GetResult r = Lookup(*mem, w.key, w.sequence);
     ASSERT_TRUE(r.found) << "key of " << w.key.size() << " bytes";
     ASSERT_EQ(r.value.size(), w.value.size());
@@ -252,6 +256,10 @@ TEST(MemTableTest, EntriesKeepTheirBytesWhateverTheLengths) {
   size_t count = 0;
   const std::unique_ptr<Iterator> iter = mem->NewIterator();
   for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
+    // The internal key read back has one of the lengths that were written, tag included.
+    ASSERT_GE(iter->key().size(), size_t{8});
+    ASSERT_NE(std::find(key_sizes.begin(), key_sizes.end(), iter->key().size() - 8),
+              key_sizes.end());
     count++;
   }
   EXPECT_EQ(count, written.size());
@@ -470,6 +478,7 @@ TEST(MemTableTest, ReadersSeeEveryCompletedAddWhileTheWriterRuns) {
     std::atomic<bool> failed{false};
     std::string failure;
     uint64_t gets = 0;
+    uint64_t overlapped_passes = 0;  // passes during which the writer finished an Add
   };
   std::vector<Report> reports(kReaders);
 
@@ -528,6 +537,12 @@ TEST(MemTableTest, ReadersSeeEveryCompletedAddWhileTheWriterRuns) {
         return;
       }
       previous_usage = usage;
+      // `complete` was read when the pass began, so a larger figure now means the writer finished
+      // an Add while this pass was running: it raced with the writer, which is more than having
+      // run against a memtable that was not yet full.
+      if (published.load(std::memory_order_acquire) > complete) {
+        report->overlapped_passes++;
+      }
       report->passes.fetch_add(1, std::memory_order_release);
     }
   };
@@ -575,6 +590,8 @@ TEST(MemTableTest, ReadersSeeEveryCompletedAddWhileTheWriterRuns) {
     EXPECT_FALSE(report.failed.load()) << "reader " << r << ": " << report.failure;
     EXPECT_GE(report.passes.load(), kCount / kChunk) << "reader " << r << " made too few passes";
     EXPECT_GT(report.gets, 0u) << "reader " << r;
+    EXPECT_GT(report.overlapped_passes, 0u)
+        << "reader " << r << " never ran a pass while the writer was adding";
   }
 }
 
@@ -612,7 +629,10 @@ TEST(MemTableDeathTest, TwoWritersAtOnceAreRefused) {
   // an error instead of a corrupted memtable. To catch two threads inside Add together, the child
   // runs rounds until one is caught: in each, two threads start together and add large entries,
   // so that nearly all of their time is spent inside Add. A child that is never caught gives up
-  // after a minute and exits normally, which fails the test.
+  // after a minute and exits normally, which fails the test. This pins that the memtable has its
+  // own guard, since without it the skip list's message appears instead. It does not pin that the
+  // guard covers the arena allocation: only the hand-off test above does, because a guard that
+  // covered the insert alone would fail it under ThreadSanitizer.
   EXPECT_DEATH(
       {
         const std::string value(1 << 16, 'v');

@@ -25,7 +25,7 @@ constexpr size_t kCountOffset = 8;
 constexpr size_t kMaxEncodedLength = std::numeric_limits<uint32_t>::max();
 
 // Counts one more operation. The count is 32 bits, so a batch of 2^32 operations cannot be
-// described by its own header; reaching that takes at least 12 GiB, and it aborts here instead of
+// described by its own header; reaching that takes at least 8 GiB, and it aborts here instead of
 // wrapping to a count that the batch would then fail to match.
 void CountOneMore(WriteBatch* b) {
   const uint32_t count = WriteBatchInternal::Count(b);
@@ -106,6 +106,10 @@ void WriteBatch::Delete(std::string_view key) {
 
 Status WriteBatch::Iterate(Handler* handler) const {
   std::string_view input(rep_);
+  // Unreachable today: rep_ always holds a header, because the constructor, Clear() and
+  // SetContents() all see to it. It stays because the header is read without further checks below
+  // and in Count(), and a change that broke the rule should get a Status here instead of a read
+  // past the end.
   if (input.size() < kHeaderSize) {
     return Status::Corruption("malformed WriteBatch (too small)");
   }

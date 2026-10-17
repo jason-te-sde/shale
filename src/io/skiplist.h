@@ -24,8 +24,11 @@ namespace shale {
 /// Memory ordering. A node is built completely, key and links, with relaxed stores, and only then
 /// linked into the list with a release store of the pointer that makes it reachable. A reader loads
 /// every pointer it follows with acquire, so whichever node it arrives at, it sees that node's
-/// fields as the writer left them. A node is linked bottom-up, level 0 first, and a reader that
-/// finds it at a higher level will find it at the levels below too. `max_height_` is only a hint
+/// fields as the writer left them. A node is linked one level at a time, bottom up, and each of its
+/// own links is stored before the node is published at that level or any above it. A reader that
+/// arrives at a node through a link of level L reads that node's links at level L and below and
+/// no others, so every link it reads has been stored; the ones above L, which may not be yet, it
+/// never looks at. `max_height_` is only a hint
 /// for where a search starts: a reader that sees a stale value starts lower than it could, and one
 /// that sees a new value before the node that raised it finds only null links at the new levels,
 /// and drops down. So it needs no ordering at all.
@@ -174,6 +177,8 @@ class SkipList {
                 "the arena never runs destructors, so a key must not need one");
   static_assert(sizeof(Node) % alignof(std::atomic<Node*>) == 0,
                 "the links must be aligned where they follow the node");
+  static_assert(alignof(Node) <= alignof(std::max_align_t),
+                "the arena aligns allocations to max_align_t, which must be enough for a node");
 
   /// Marks the list as being inserted into for as long as it lives, and aborts if it already was.
   class InsertScope {

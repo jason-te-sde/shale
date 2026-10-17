@@ -37,12 +37,17 @@ class WriteBatch {
   /// limits above, but if one does the entry is accepted here and the write is refused. An entry
   /// too large to encode at all, 4 GiB or more in the key or the value, is not stored, and is not
   /// counted by Count(); it makes the write fail the same way.
+  ///
+  /// Aborts if the batch already holds 2^32 - 1 operations, which is all its 32-bit count can
+  /// say. That is unlike an oversized entry, which returns InvalidArgument when written: an
+  /// oversized entry is data a user can send, while a batch of 2^32 operations is at least 8 GiB
+  /// and no real batch reaches it, so reaching it is a bug in the caller.
   /// @param key the key to set; may be empty.
   /// @param value the new value; may be empty.
   void Put(std::string_view key, std::string_view value);
 
   /// Adds an operation that deletes `key`. The key is copied. The limit on its size applies as it
-  /// does for Put().
+  /// does for Put(), and so does the abort when the batch already holds 2^32 - 1 operations.
   /// @param key the key to delete; may be empty.
   void Delete(std::string_view key);
 

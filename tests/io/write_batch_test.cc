@@ -355,10 +355,83 @@ TEST(WriteBatchTest, AnEntryTooLargeToEncodeIsFlaggedAndNotStored) {
   EXPECT_EQ(b.Count(), 0u);
   EXPECT_EQ(b.ApproximateSize(), 12u);
 
+  // The same for a deletion. Again the view lies about its length and is never read.
   WriteBatch d;
   d.Delete(std::string_view(&byte, huge));
   EXPECT_TRUE(WriteBatchInternal::HasOversizedEntry(&d));
   EXPECT_EQ(d.Count(), 0u);
+}
+
+// The count in the header is 32 bits. A batch with 2^32 operations is at least 8 GiB, so none is
+// ever built; these tests set the count by hand and add one operation to it.
+constexpr uint32_t kMaxCount = std::numeric_limits<uint32_t>::max();
+
+TEST(WriteBatchTest, TheCountMayReachItsLimit) {
+  WriteBatch b;
+  WriteBatchInternal::SetCount(&b, kMaxCount - 1);
+  b.Put("k", "v");
+  EXPECT_EQ(b.Count(), kMaxCount) << "the last operation the header can count must be accepted";
+
+  WriteBatch d;
+  WriteBatchInternal::SetCount(&d, kMaxCount - 1);
+  d.Delete("k");
+  EXPECT_EQ(d.Count(), kMaxCount);
+}
+
+TEST(WriteBatchTest, AppendMayReachTheCountLimit) {
+  WriteBatch dst;
+  WriteBatchInternal::SetCount(&dst, kMaxCount - 1);
+  WriteBatch src;
+  src.Put("k", "v");
+  WriteBatchInternal::Append(&dst, &src);
+  EXPECT_EQ(dst.Count(), kMaxCount);
+}
+
+TEST(WriteBatchDeathTest, APutPastTheCountLimitAborts) {
+  EXPECT_DEATH(
+      {
+        WriteBatch b;
+        WriteBatchInternal::SetCount(&b, kMaxCount);
+        b.Put("k", "v");
+      },
+      "WriteBatch cannot hold more than");
+}
+
+TEST(WriteBatchDeathTest, ADeletePastTheCountLimitAborts) {
+  EXPECT_DEATH(
+      {
+        WriteBatch b;
+        WriteBatchInternal::SetCount(&b, kMaxCount);
+        b.Delete("k");
+      },
+      "WriteBatch cannot hold more than");
+}
+
+TEST(WriteBatchDeathTest, AnAppendPastTheCountLimitAborts) {
+  EXPECT_DEATH(
+      {
+        WriteBatch dst;
+        WriteBatchInternal::SetCount(&dst, kMaxCount);
+        WriteBatch src;
+        src.Put("k", "v");
+        WriteBatchInternal::Append(&dst, &src);
+      },
+      "appending would give a WriteBatch more than");
+}
+
+TEST(WriteBatchDeathTest, AnAppendOneOperationPastTheLimitAborts) {
+  // The other side of the boundary AppendMayReachTheCountLimit finds: counts that add up to one
+  // more than the header can hold.
+  EXPECT_DEATH(
+      {
+        WriteBatch dst;
+        WriteBatchInternal::SetCount(&dst, kMaxCount - 1);
+        WriteBatch src;
+        src.Put("a", "1");
+        src.Put("b", "2");
+        WriteBatchInternal::Append(&dst, &src);
+      },
+      "appending would give a WriteBatch more than");
 }
 
 TEST(WriteBatchTest, ClearResets) {
