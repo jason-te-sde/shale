@@ -1,22 +1,20 @@
 #!/usr/bin/env bash
 # Tests for scripts/check-layering.sh.
 #
-# A checker that is only ever shown violations cannot be told apart from one that rejects
-# everything, and one that is only shown clean trees cannot be told apart from one that accepts
-# everything. So each rule here has a fixture that must alarm and, where a neighbouring spelling is
-# legitimate, a fixture that must not.
+# Each rule has a fixture that must alarm and, where a neighbouring spelling is legitimate, a
+# fixture that must not.
 set -uo pipefail
 
-script="$(cd "$(dirname "$0")/../../scripts" && pwd)/check-layering.sh"
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=tests/scripts/lib.sh
+. "$here/lib.sh"
+
+# shellcheck disable=SC2034  # read by expect in lib.sh
+script="$here/../../scripts/check-layering.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-failures=0
-cases=0
 case_id=0
-
-# indent: shows checker output under the failure message.
-indent() { sed 's/^/    | /' >&2; }
 
 # new_tree: creates an empty fixture tree and leaves its path in $root.
 new_tree() {
@@ -31,32 +29,6 @@ put() {
   shift
   mkdir -p "$root/$(dirname "$rel")"
   printf '%s\n' "$@" >"$root/$rel"
-}
-
-# expect <description> <exit status> [expected output fragment...]
-# Runs the checker on $root and compares its exit status and combined output.
-expect() {
-  local description=$1 want=$2 output got fragment
-  shift 2
-  cases=$((cases + 1))
-  output="$(bash "$script" "$root" 2>&1)"
-  got=$?
-  if [ "$got" -ne "$want" ]; then
-    echo "FAIL: $description: exit status $got, wanted $want" >&2
-    printf '%s\n' "$output" | indent
-    failures=$((failures + 1))
-    return
-  fi
-  for fragment in "$@"; do
-    case "$output" in
-      *"$fragment"*) ;;
-      *)
-        echo "FAIL: $description: output lacks '$fragment'" >&2
-        printf '%s\n' "$output" | indent
-        failures=$((failures + 1))
-        ;;
-    esac
-  done
 }
 
 # --- The basic pair: a tree with one violation and a clean tree. ----------------------------------
@@ -196,5 +168,4 @@ expect "core with two banned headers" 1 "src/core/a.cc:1:" "src/core/a.cc:3:"
 new_tree
 expect "a tree with neither src/ nor include/" 2 "check-layering"
 
-echo "layering_test: $((cases - failures))/$cases cases behaved as expected"
-[ "$failures" -eq 0 ]
+finish layering_test

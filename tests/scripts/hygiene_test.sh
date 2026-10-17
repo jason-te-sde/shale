@@ -6,7 +6,12 @@
 # sequences nor the attribution strings appear anywhere in this file.
 set -uo pipefail
 
-scripts_dir="$(cd "$(dirname "$0")/../../scripts" && pwd)"
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=tests/scripts/lib.sh
+. "$here/lib.sh"
+
+scripts_dir="$(cd "$here/../../scripts" && pwd)"
+# shellcheck disable=SC2034  # read by expect in lib.sh
 script="$scripts_dir/check-hygiene.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -14,12 +19,7 @@ trap 'rm -rf "$tmp"' EXIT
 # Fixture repositories must not pick up the developer's own git configuration or hooks.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
 
-failures=0
-cases=0
 case_id=0
-
-# indent: shows checker output under the failure message.
-indent() { sed 's/^/    | /' >&2; }
 
 # new_repo: creates an empty git repository and leaves its path in $root.
 new_repo() {
@@ -49,31 +49,6 @@ commit() {
   for paragraph in "$@"; do args+=(-m "$paragraph"); done
   git_in add -A
   git_in commit -q "${args[@]}"
-}
-
-# expect <description> <exit status> [expected output fragment...]
-expect() {
-  local description=$1 want=$2 output got fragment
-  shift 2
-  cases=$((cases + 1))
-  output="$(bash "$script" "$root" 2>&1)"
-  got=$?
-  if [ "$got" -ne "$want" ]; then
-    echo "FAIL: $description: exit status $got, wanted $want" >&2
-    printf '%s\n' "$output" | indent
-    failures=$((failures + 1))
-    return
-  fi
-  for fragment in "$@"; do
-    case "$output" in
-      *"$fragment"*) ;;
-      *)
-        echo "FAIL: $description: output lacks '$fragment'" >&2
-        printf '%s\n' "$output" | indent
-        failures=$((failures + 1))
-        ;;
-    esac
-  done
 }
 
 # The attribution strings, assembled so that no single line of this file contains one.
@@ -177,33 +152,33 @@ expect "a repository with no tracked files" 2 "hygiene:"
 
 # --- The patterns file is part of the checker. -------------------------------------------------
 
+patterns="$scripts_dir/attribution-patterns.txt"
+
+# use_script_copy <name>: from now on check with a private copy of the script. The patterns file
+# is looked up next to the script, so the copy's can be damaged without touching the real one.
+use_script_copy() {
+  copy_dir="$tmp/copy-$1"
+  mkdir -p "$copy_dir"
+  cp "$scripts_dir/check-hygiene.sh" "$copy_dir/check-hygiene.sh"
+  script="$copy_dir/check-hygiene.sh"
+}
+
+use_real_script() {
+  # shellcheck disable=SC2034  # read by expect in lib.sh
+  script="$scripts_dir/check-hygiene.sh"
+}
+
 new_repo
 write_file a.txt '%s\n' 'clean'
 commit 'feat: add a file' "$(co_author_trailer Claude)"
-copy="$tmp/copy-missing"
-mkdir -p "$copy"
-cp "$script" "$copy/check-hygiene.sh"
-cases=$((cases + 1))
-output="$(bash "$copy/check-hygiene.sh" "$root" 2>&1)"
-got=$?
-if [ "$got" -ne 1 ]; then
-  echo "FAIL: a missing patterns file: exit status $got, wanted 1" >&2
-  printf '%s\n' "$output" | indent
-  failures=$((failures + 1))
-fi
 
-copy="$tmp/copy-short"
-mkdir -p "$copy"
-cp "$script" "$copy/check-hygiene.sh"
-head -n 4 "$scripts_dir/attribution-patterns.txt" >"$copy/attribution-patterns.txt"
-cases=$((cases + 1))
-output="$(bash "$copy/check-hygiene.sh" "$root" 2>&1)"
-got=$?
-if [ "$got" -ne 1 ]; then
-  echo "FAIL: a patterns file with four lines: exit status $got, wanted 1" >&2
-  printf '%s\n' "$output" | indent
-  failures=$((failures + 1))
-fi
+use_script_copy missing
+expect "a missing patterns file" 1 "cannot read"
 
-echo "hygiene_test: $((cases - failures))/$cases cases behaved as expected"
-[ "$failures" -eq 0 ]
+use_script_copy short
+head -n 4 "$patterns" >"$copy_dir/attribution-patterns.txt"
+expect "a patterns file with four patterns" 1 "at least 5"
+
+use_real_script
+
+finish hygiene_test

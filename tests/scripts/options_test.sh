@@ -8,13 +8,15 @@ set -uo pipefail
 
 cmake_cmd="${1:?usage: options_test.sh <cmake> <generator>}"
 generator="${2:?usage: options_test.sh <cmake> <generator>}"
-source_dir="$(cd "$(dirname "$0")/../.." && pwd)"
+here="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=tests/scripts/lib.sh
+. "$here/lib.sh"
+
+source_dir="$(cd "$here/../.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 build="$tmp/build"
-failures=0
-cases=0
 
 # configure <flaw> <sanitize> <coverage> <fuzz>: configures from scratch settings on every call,
 # so no option leaks from one case into the next. Leaves the output in $output and the exit status
@@ -26,12 +28,6 @@ configure() {
   status=$?
 }
 
-fail() {
-  echo "FAIL: $1" >&2
-  printf '%s\n' "$output" | sed 's/^/    | /' >&2
-  failures=$((failures + 1))
-}
-
 # accepts <description> <flaw> <sanitize> <coverage> <fuzz> [compile-command fragment...]
 accepts() {
   local description=$1 fragment
@@ -40,7 +36,7 @@ accepts() {
   configure "$1" "$2" "$3" "$4"
   shift 4
   if [ "$status" -ne 0 ]; then
-    fail "$description: configure failed with status $status"
+    fail "$description: configure failed with status $status" "$output"
     return
   fi
   for fragment in "$@"; do
@@ -57,9 +53,9 @@ rejects() {
   cases=$((cases + 1))
   configure "$1" "$2" "$3" "$4"
   if [ "$status" -eq 0 ]; then
-    fail "$description: configure succeeded"
+    fail "$description: configure succeeded" "$output"
   elif [[ $output != *"$want"* ]]; then
-    fail "$description: error does not mention '$want'"
+    fail "$description: error does not mention '$want'" "$output"
   fi
 }
 
@@ -103,5 +99,4 @@ else
   rejects "fuzzing with $compiler_id" "" "" OFF ON "Clang"
 fi
 
-echo "options_test: $((cases - failures))/$cases cases behaved as expected"
-[ "$failures" -eq 0 ]
+finish options_test
