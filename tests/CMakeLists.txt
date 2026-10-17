@@ -62,6 +62,7 @@ shale_add_test(table_format SOURCES io/table_format_test.cc LIBS shale_testkit)
 shale_add_test(table_builder SOURCES io/table_builder_test.cc LIBS shale_testkit)
 shale_add_test(two_level_iterator SOURCES io/two_level_iterator_test.cc LIBS shale_testkit)
 shale_add_test(table SOURCES io/table_test.cc LIBS shale_testkit)
+shale_add_test(merging_iterator SOURCES io/merging_iterator_test.cc LIBS shale_testkit)
 
 # Clang's thread-safety analysis is what makes SHALE_GUARDED_BY more than a comment, and nothing
 # else would notice if it silently stopped working. So the build itself is tested: one translation

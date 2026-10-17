@@ -29,6 +29,7 @@ shale_add_library(shale_io
     io/log_writer.cc
     io/mem_env.cc
     io/memtable.cc
+    io/merging_iterator.cc
     io/scheduler.cc
     io/table.cc
     io/table_builder.cc
