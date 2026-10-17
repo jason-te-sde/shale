@@ -62,8 +62,8 @@ class RandomAccessFile {
 ///
 /// Appended bytes may wait in memory, in the handle, until they are flushed. Flush() hands them to
 /// the operating system, which makes them visible to readers but not durable; Sync() makes them
-/// durable. A handle that is destroyed without Close() discards the bytes that were never flushed,
-/// as a crash would, so every writer ends with Close().
+/// durable. A handle that is destroyed without Close() may discard the bytes that were never
+/// flushed, as a crash would, so every writer ends with Close().
 ///
 /// A handle is used by one thread at a time, as for SequentialFile. Any call after Close(),
 /// including a second Close(), is a bug in the caller and aborts the process.
@@ -192,6 +192,26 @@ class Env {
   /// @param micros how long to sleep.
   virtual void SleepForMicroseconds(uint64_t micros) = 0;
 };
+
+/// Returns a new Env that keeps every file in memory and runs on a virtual clock. Nothing it does
+/// reaches the real filesystem or the real clock, so it is fast, leaves nothing behind, and makes
+/// a run reproducible. It is what the deterministic simulator and most tests run on.
+///
+/// - The clock starts at 0 and moves only when SleepForMicroseconds() is called, by exactly that
+///   much. A sleep returns at once, without waiting.
+/// - Files live in one flat namespace, keyed by the full path as a string. A path is not
+///   normalised: `a//b` and `a/b` name different files. A file can be created at any path, whether
+///   or not CreateDir() was ever called for its directory, but GetChildren(), RemoveDir() and
+///   SyncDir() work only on directories that CreateDir() made. A trailing slash on a directory
+///   name is ignored.
+/// - Appended bytes are visible to every reader at once. Flush() and Sync() succeed and do
+///   nothing, and nothing is ever lost: this Env does not model a crash. A wrapper that does is
+///   built on top of it.
+/// - Locks are per Env: two Envs from this function share no files, no locks and no clock.
+/// - It is safe to use from any number of threads. An open handle keeps its file alive on its own,
+///   so a file that was removed or replaced stays readable through the handles that were open on
+///   it, as on POSIX, and a handle may outlive the Env that made it.
+std::unique_ptr<Env> NewMemEnv();
 
 }  // namespace shale
 

@@ -19,6 +19,7 @@
 #include "shale/env.h"
 #include "shale/status.h"
 #include "testkit/test_util.h"
+#include "util/check.h"
 #include "util/random.h"
 
 namespace shale {
@@ -70,6 +71,22 @@ class PosixEnvUnderTest : public EnvUnderTest {
 
  private:
   const std::string dir_;
+};
+
+class MemEnvUnderTest : public EnvUnderTest {
+ public:
+  MemEnvUnderTest() : env_(NewMemEnv()) {
+    // A directory of its own, as the POSIX fixture has, so that the tests treat both alike.
+    const Status s = env_->CreateDir(dir_);
+    SHALE_CHECK(s.ok(), s.ToString());
+  }
+
+  Env* env() override { return env_.get(); }
+  const std::string& dir() const override { return dir_; }
+
+ private:
+  const std::unique_ptr<Env> env_;
+  const std::string dir_ = "/shale_env_contract";
 };
 
 struct EnvCase {
@@ -241,12 +258,43 @@ TEST_P(EnvContractTest, NewWritableFileTruncates) {
   EXPECT_EQ(ReadFile("f"), "short");
 }
 
+TEST_P(EnvContractTest, TruncatingAnOpenFileIsSeenByItsReaders) {
+  // Opening for write empties the file itself, not a copy of it, so a reader that was already open
+  // finds it empty. Replacing the file by rename is the other case, and leaves the reader alone.
+  WriteFile("f", "old contents");
+  std::unique_ptr<RandomAccessFile> reader;
+  ASSERT_OK(env_->NewRandomAccessFile(Path("f"), &reader));
+  std::unique_ptr<WritableFile> writer;
+  ASSERT_OK(env_->NewWritableFile(Path("f"), &writer));
+  char scratch[100];
+  std::string_view result = "not touched";
+  ASSERT_OK(reader->Read(0, 100, &result, scratch));
+  EXPECT_TRUE(result.empty());
+  ASSERT_OK(writer->Append("new"));
+  ASSERT_OK(writer->Close());
+  ASSERT_OK(reader->Read(0, 100, &result, scratch));
+  EXPECT_EQ(result, "new");
+}
+
 TEST_P(EnvContractTest, RenameReplacesTarget) {
   WriteFile("a", "1");
   WriteFile("b", "2");
   ASSERT_OK(env_->RenameFile(Path("a"), Path("b")));
   EXPECT_EQ(ReadFile("b"), "1");
   EXPECT_FALSE(env_->FileExists(Path("a")));
+}
+
+TEST_P(EnvContractTest, ReplacingAFileByRenameLeavesOpenReadersOnTheOldContents) {
+  WriteFile("a", "new");
+  WriteFile("b", "old contents");
+  std::unique_ptr<RandomAccessFile> reader;
+  ASSERT_OK(env_->NewRandomAccessFile(Path("b"), &reader));
+  ASSERT_OK(env_->RenameFile(Path("a"), Path("b")));
+  char scratch[100];
+  std::string_view result;
+  ASSERT_OK(reader->Read(0, 100, &result, scratch));
+  EXPECT_EQ(result, "old contents");
+  EXPECT_EQ(ReadFile("b"), "new");
 }
 
 TEST_P(EnvContractTest, RenameMovesToAnAbsentName) {
@@ -468,9 +516,10 @@ TEST_P(EnvContractTest, CloseTwiceAborts) {
 
 INSTANTIATE_TEST_SUITE_P(
     Envs, EnvContractTest,
-    testing::Values(EnvCase{"posix", [] { return std::make_unique<PosixEnvUnderTest>(); }}),
+    testing::Values(EnvCase{"posix", [] { return std::make_unique<PosixEnvUnderTest>(); }},
+                    EnvCase{"mem", [] { return std::make_unique<MemEnvUnderTest>(); }}),
     // The parameter is not called `info`: the macro already has one of that name, and GCC's
-    // -Wshadow rejects a lambda that hides it.
+    // -Wshadow rejects the lambda that hides it.
     [](const testing::TestParamInfo<EnvCase>& param_info) { return param_info.param.name; });
 
 }  // namespace
