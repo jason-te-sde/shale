@@ -912,71 +912,156 @@ TEST_F(VersionSetTest, RecoverKeepsFileNumbersAboveTheManifestItReadFrom) {
   EXPECT_EQ(recovered->NewFileNumber(), 10u);
 }
 
-TEST_F(VersionSetTest, NoFileNumberLeftAboveTheOnesInUseIsCorruption) {
-  // A forged MANIFEST can leave nothing to number the next file with, and the first file the
-  // database made would abort the process. It is refused when it is read, as a last sequence
-  // number no write could have is. The number of a MANIFEST at the top of the range is one case, a
-  // snapshot whose counter is at the top is another, and a MANIFEST just below the top of a
-  // snapshot with a small counter is the third, which leaves the counter at the top.
-  constexpr uint64_t kMax = std::numeric_limits<uint64_t>::max();
-
-  WriteManifest(kMax, {Encode(SnapshotEdit(VersionState{}))});
-  const auto top_manifest = NewVersionSet();
-  const Status s1 = top_manifest->Recover();
-  EXPECT_TRUE(s1.IsCorruption()) << s1.ToString();
-  EXPECT_TRUE(Names(s1, ManifestName(kMax)));
-
+// A snapshot of an empty state whose counter is `next_file_number`.
+std::string SnapshotWithCounter(uint64_t next_file_number) {
   VersionState state;
-  state.next_file_number = kMax;
-  WriteManifest(3, {Encode(SnapshotEdit(state))});
-  const auto top_counter = NewVersionSet();
-  const Status s2 = top_counter->Recover();
-  EXPECT_TRUE(s2.IsCorruption()) << s2.ToString();
-  EXPECT_TRUE(Names(s2, ManifestName(3)));
-
-  WriteManifest(kMax - 1, {Encode(SnapshotEdit(VersionState{}))});
-  const auto below_top = NewVersionSet();
-  const Status s3 = below_top->Recover();
-  EXPECT_TRUE(s3.IsCorruption()) << s3.ToString();
-
-  // Nothing was installed by any of them.
-  EXPECT_EQ(top_counter->NextFileNumber(), 2u);
-  EXPECT_EQ(top_counter->current()->state(), VersionState{});
-
-  // One number left is enough to be opened, and is used.
-  state.next_file_number = kMax - 1;
-  WriteManifest(3, {Encode(SnapshotEdit(state))});
-  const auto last_one = NewVersionSet();
-  ASSERT_OK(last_one->Recover());
-  EXPECT_EQ(last_one->NextFileNumber(), kMax - 1);
-  EXPECT_EQ(last_one->NewFileNumber(), kMax - 1);
-  EXPECT_EQ(last_one->NextFileNumber(), kMax);
+  state.next_file_number = next_file_number;
+  return Encode(SnapshotEdit(state));
 }
 
-TEST_F(VersionSetTest, MarkFileNumberUsedStopsAtTheTopOfTheRange) {
-  constexpr uint64_t kMax = std::numeric_limits<uint64_t>::max();
+TEST_F(VersionSetTest, FileNumbersBeyondTheCeilingAreCorruption) {
+  // A forged MANIFEST, or a stray file name, can name any number, and a counter near the top of the
+  // 64 bits is a database that the next switch makes unopenable or the next few files abort. The
+  // numbers a database accepts stop at kMaxFileNumber, as sequence numbers stop at
+  // kMaxSequenceNumber. A MANIFEST numbered at the ceiling or above is refused, and so is a
+  // counter above it.
+  for (const uint64_t number :
+       {kMaxFileNumber, kMaxFileNumber + 1, std::numeric_limits<uint64_t>::max() - 1,
+        std::numeric_limits<uint64_t>::max()}) {
+    SCOPED_TRACE(number);
+    WriteManifest(number, {Encode(SnapshotEdit(VersionState{}))});
+    const auto recovered = NewVersionSet();
+    const Status s = recovered->Recover();
+    EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+    EXPECT_TRUE(Names(s, ManifestName(number)));
+    EXPECT_EQ(recovered->NextFileNumber(), 2u) << "nothing was installed";
+    EXPECT_EQ(recovered->current()->state(), VersionState{});
+  }
+  for (const uint64_t counter : {kMaxFileNumber + 1, std::numeric_limits<uint64_t>::max() - 1,
+                                 std::numeric_limits<uint64_t>::max()}) {
+    SCOPED_TRACE(counter);
+    WriteManifest(3, {SnapshotWithCounter(counter)});
+    const auto recovered = NewVersionSet();
+    const Status s = recovered->Recover();
+    EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+    EXPECT_TRUE(Names(s, ManifestName(3)));
+    EXPECT_EQ(recovered->NextFileNumber(), 2u) << "nothing was installed";
+  }
+}
+
+TEST_F(VersionSetTest, FileNumbersBelowTheCeilingAreAcceptedAndUsable) {
+  // The MANIFEST just below the ceiling is the largest number a MANIFEST may have, and leaves the
+  // counter at the ceiling.
+  WriteManifest(kMaxFileNumber - 1, {Encode(SnapshotEdit(VersionState{}))});
+  const auto manifest_below = NewVersionSet();
+  ASSERT_OK(manifest_below->Recover());
+  EXPECT_EQ(manifest_below->ManifestFileNumber(), kMaxFileNumber - 1);
+  EXPECT_EQ(manifest_below->NextFileNumber(), kMaxFileNumber);
+
+  // A counter just below the ceiling has a number to give, and one at the ceiling is within the
+  // rule and has none left.
+  WriteManifest(3, {SnapshotWithCounter(kMaxFileNumber - 1)});
+  const auto counter_below = NewVersionSet();
+  ASSERT_OK(counter_below->Recover());
+  EXPECT_EQ(counter_below->NextFileNumber(), kMaxFileNumber - 1);
+  EXPECT_EQ(counter_below->NewFileNumber(), kMaxFileNumber - 1);
+  EXPECT_EQ(counter_below->NextFileNumber(), kMaxFileNumber);
+
+  WriteManifest(3, {SnapshotWithCounter(kMaxFileNumber)});
+  const auto counter_at = NewVersionSet();
+  ASSERT_OK(counter_at->Recover());
+  EXPECT_EQ(counter_at->NextFileNumber(), kMaxFileNumber);
+}
+
+TEST_F(VersionSetTest, SwitchRightBelowTheCeilingCanBeRecoveredAgain) {
+  // The switch persists a counter one above the number it took for the new MANIFEST, so the
+  // largest it may take is the one that leaves the counter at the ceiling. A recovery that took a
+  // number above that would write a MANIFEST that the next recovery refuses.
+  WriteManifest(3, {SnapshotWithCounter(kMaxFileNumber - 1)});
+  const auto versions = NewVersionSet();
+  ASSERT_OK(versions->Recover());
+  ASSERT_OK(versions->WriteNewManifest(VersionEdit{}));
+  EXPECT_EQ(versions->ManifestFileNumber(), kMaxFileNumber - 1);
+  EXPECT_EQ(CurrentContents(), ManifestName(kMaxFileNumber - 1) + "\n");
+
+  const auto again = NewVersionSet();
+  ASSERT_OK(again->Recover());
+  EXPECT_EQ(again->current()->state(), versions->current()->state());
+  EXPECT_EQ(again->NextFileNumber(), kMaxFileNumber);
+}
+
+TEST_F(VersionSetTest, NoSwitchIsWrittenThatRecoverWouldRefuse) {
+  // At the ceiling there is no number left to name a MANIFEST with. The switch is an error, and
+  // not an abort, and writes nothing: a MANIFEST with a counter above the ceiling would be one that
+  // no recovery accepts.
+  WriteManifest(3, {SnapshotWithCounter(kMaxFileNumber)});
+  const auto versions = NewVersionSet();
+  ASSERT_OK(versions->Recover());
+  const Status s = versions->WriteNewManifest(VersionEdit{});
+  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+  EXPECT_EQ(CurrentContents(), ManifestName(3) + "\n");
+  EXPECT_EQ(DbFiles(), (std::vector<std::string>{"CURRENT", "MANIFEST-000003"}));
+  const auto again = NewVersionSet();
+  EXPECT_OK(again->Recover());
+}
+
+TEST_F(VersionSetTest, MarkFileNumberUsedIgnoresNumbersAtOrAboveTheCeiling) {
+  // A file found in the directory passes its number here, and a name can say anything. A number
+  // that no database reaches must not carry the counter to where the next switch is refused.
   const auto versions = NewVersionSet();
   ASSERT_OK(versions->CreateNew());
-  versions->MarkFileNumberUsed(kMax - 1);
-  EXPECT_EQ(versions->NextFileNumber(), kMax);
-  versions->MarkFileNumberUsed(kMax);
-  EXPECT_EQ(versions->NextFileNumber(), kMax) << "it does not wrap round to numbers in use";
+  versions->MarkFileNumberUsed(kMaxFileNumber);
+  versions->MarkFileNumberUsed(kMaxFileNumber + 1);
+  versions->MarkFileNumberUsed(std::numeric_limits<uint64_t>::max());
+  EXPECT_EQ(versions->NextFileNumber(), 2u) << "a stray number above the ceiling is not used";
+
+  versions->MarkFileNumberUsed(kMaxFileNumber - 1);
+  EXPECT_EQ(versions->NextFileNumber(), kMaxFileNumber) << "just below it is";
   versions->MarkFileNumberUsed(0);
-  EXPECT_EQ(versions->NextFileNumber(), kMax);
+  EXPECT_EQ(versions->NextFileNumber(), kMaxFileNumber);
+  versions->MarkFileNumberUsed(kMaxFileNumber);
+  EXPECT_EQ(versions->NextFileNumber(), kMaxFileNumber);
 }
 
 TEST_F(VersionSetTest, WriteNewManifestWithNoFileNumberLeftIsAnErrorNotAnAbort) {
-  // A file found in the directory with the largest number there is, which Open passes to
-  // MarkFileNumberUsed(), is data and not a bug, so the switch that cannot be numbered is an error.
+  // The numbers of the files in the directory are data, and so a counter at the ceiling after
+  // Open has seen them is not a bug: the switch that cannot be numbered is an error.
   const auto versions = NewVersionSet();
   ASSERT_OK(versions->CreateNew());
-  versions->MarkFileNumberUsed(std::numeric_limits<uint64_t>::max());
+  versions->MarkFileNumberUsed(kMaxFileNumber - 1);
   const std::shared_ptr<const Version> before = versions->current();
   const Status s = versions->WriteNewManifest(VersionEdit{});
   EXPECT_TRUE(s.IsCorruption()) << s.ToString();
   EXPECT_EQ(versions->current(), before);
   EXPECT_EQ(CurrentContents(), "MANIFEST-000001\n");
   EXPECT_EQ(DbFiles(), (std::vector<std::string>{"CURRENT", "MANIFEST-000001"}));
+}
+
+TEST_F(VersionSetTest, LogAndApplyWritesNoCounterThatRecoverWouldRefuse) {
+  // The counter can pass the ceiling by the numbers given out, which is the one way left to do it.
+  // Persisting it would make the database unopenable, so the edit is refused and nothing is
+  // written.
+  const auto versions = NewVersionSet();
+  ASSERT_OK(versions->CreateNew());
+  versions->MarkFileNumberUsed(kMaxFileNumber - 1);
+  ASSERT_EQ(versions->NextFileNumber(), kMaxFileNumber);
+  // A counter at the ceiling is within the rule, and is written.
+  ASSERT_OK(versions->LogAndApply(VersionEdit{}));
+  const auto at_ceiling = NewVersionSet();
+  ASSERT_OK(at_ceiling->Recover());
+  EXPECT_EQ(at_ceiling->NextFileNumber(), kMaxFileNumber);
+
+  ASSERT_EQ(versions->NewFileNumber(), kMaxFileNumber);
+  ASSERT_EQ(versions->NextFileNumber(), kMaxFileNumber + 1);
+  const std::shared_ptr<const Version> before = versions->current();
+  const std::string manifest = env_.FileContents(DescriptorFileName(kDb, 1));
+
+  const Status s = versions->LogAndApply(VersionEdit{});
+  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+  EXPECT_EQ(versions->current(), before);
+  EXPECT_EQ(env_.FileContents(DescriptorFileName(kDb, 1)), manifest);
+  const auto recovered = NewVersionSet();
+  EXPECT_OK(recovered->Recover());
 }
 
 TEST_F(VersionSetTest, RecoverRefusesAReadErrorAsEndOfFile) {
@@ -1191,14 +1276,6 @@ TEST_F(VersionSetDeathTest, LogAndApplyNeedsAnOpenManifest) {
   const auto versions = NewVersionSet();
   ASSERT_OK(versions->Recover());
   EXPECT_DEATH(static_cast<void>(versions->LogAndApply(VersionEdit{})), "MANIFEST");
-}
-
-TEST_F(VersionSetDeathTest, NewFileNumberRefusesToWrapRound) {
-  const auto versions = NewVersionSet();
-  ASSERT_OK(versions->CreateNew());
-  versions->MarkFileNumberUsed(std::numeric_limits<uint64_t>::max() - 1);
-  ASSERT_EQ(versions->NextFileNumber(), std::numeric_limits<uint64_t>::max());
-  EXPECT_DEATH(static_cast<void>(versions->NewFileNumber()), "used up");
 }
 
 TEST_F(VersionSetDeathTest, RecoverTwiceAborts) {

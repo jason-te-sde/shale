@@ -86,7 +86,10 @@ Status TableCache::Get(const TableReadOptions& options, uint64_t number, uint64_
     return s;
   }
   s = table->Get(options, internal_key, result);
-  return WithFileName(s, TableFileName(dbname_, number));
+  if (!s.ok()) {
+    return WithFileName(s, TableFileName(dbname_, number));
+  }
+  return s;
 }
 
 void TableCache::Evict(uint64_t number) { cache_.Erase(number); }

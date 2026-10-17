@@ -90,6 +90,15 @@ class Version {
   TableCache* const table_cache_;
 };
 
+/// The largest file number a database accepts, and the largest the next file number may be: a
+/// MANIFEST is refused if its number is at or above this, or if its counter is above it, and the
+/// counter is never written above it. It plays the part for file numbers that kMaxSequenceNumber
+/// does for sequence numbers: no real database approaches it (a file a microsecond for 2000
+/// years), and content beyond it is a forged or damaged file whose numbers would otherwise leave
+/// the counter within a few files of the end of the 64 bits, where the database would fail
+/// instead of opening, or abort as it numbered its first files.
+inline constexpr uint64_t kMaxFileNumber = uint64_t{1} << 56;
+
 /// The versions of a database, and the MANIFEST that records how it got from each to the next.
 ///
 /// The MANIFEST is a log of VersionEdits, written with log::Writer. Its first record is a snapshot
@@ -138,9 +147,9 @@ class VersionSet {
   /// error of reading CURRENT or the MANIFEST, and Corruption for any defect the log reader
   /// reports, whether or not a valid record follows it (only the end of the file, cut short, is
   /// the end of the log), for a record that does not decode, for an edit that ApplyEdit() refuses,
-  /// for a MANIFEST with no record at all, for a last sequence number that no write could have, and
-  /// for a MANIFEST that leaves no file number above the ones in use, which the next file the
-  /// database made would abort on. A defect is reported in preference to the failure of a record
+  /// for a MANIFEST with no record at all, for a last sequence number that no write could have,
+  /// and for a MANIFEST numbered at kMaxFileNumber or above or with a counter above it. A defect
+  /// is reported in preference to the failure of a record
   /// after it, which the gap may have caused. Every Corruption but the two about CURRENT names the
   /// MANIFEST in its message. On failure nothing is installed.
   ///
@@ -153,7 +162,8 @@ class VersionSet {
   /// directory entry, makes CURRENT name it with SetCurrentFile(), and then installs the new
   /// version. The MANIFEST stays open for LogAndApply(), and the one before it is closed and left
   /// for the database to delete. The database calls it once, when it is opened. It returns
-  /// Corruption, and writes nothing, if no file number is left to name the new MANIFEST with.
+  /// Corruption, and writes nothing, if the counter is at kMaxFileNumber or above: the snapshot
+  /// would record a counter that Recover() refuses.
   ///
   /// On any failure nothing is installed. If the edit is refused, or the new MANIFEST could not be
   /// written, or switching CURRENT failed and CURRENT is seen to name the old MANIFEST still, the
@@ -179,7 +189,10 @@ class VersionSet {
   /// unknown, and a later Sync() that reports success proves nothing. So every later call returns
   /// that first error, writing nothing, until WriteNewManifest() starts a new one.
   ///
-  /// Aborts if there is no MANIFEST open, which is before CreateNew() or WriteNewManifest().
+  /// Returns Corruption, writing nothing and installing nothing, if the counter is above
+  /// kMaxFileNumber, which only the numbers given out can have done: the record would be one that
+  /// Recover() refuses. Aborts if there is no MANIFEST open, which is before CreateNew() or
+  /// WriteNewManifest().
   /// @param edit what to apply; its log number, files and compact pointers are the caller's.
   Status LogAndApply(VersionEdit edit);
 
@@ -187,11 +200,16 @@ class VersionSet {
   std::shared_ptr<const Version> current() const { return current_; }
 
   /// Returns a file number that has not been used, and will not be again: one for a table, a log
-  /// or a MANIFEST.
+  /// or a MANIFEST. A number at or above kMaxFileNumber is one that no MANIFEST can hold: the
+  /// next LogAndApply() and WriteNewManifest() refuse, and nothing read from disk gets the counter
+  /// that far. Aborts only if the counter would wrap round the 64 bits, which is a bug.
   uint64_t NewFileNumber();
 
   /// Makes sure that numbers handed out from now on are above `number`, for a file that was found
-  /// and is not in the state: a log that recovery replays, say. Does nothing if they already are.
+  /// and is not in the state: a log that recovery replays, say. Does nothing if they already are,
+  /// and does nothing for a `number` at or above kMaxFileNumber: a file named for one cannot be a
+  /// file of this database's own, which never numbers one so high, and raising the counter for it
+  /// would take it to where the next MANIFEST is refused.
   void MarkFileNumberUsed(uint64_t number);
 
   /// Returns the number that NewFileNumber() will return next.

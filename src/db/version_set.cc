@@ -1,5 +1,6 @@
 #include "db/version_set.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -388,18 +389,18 @@ Status VersionSet::Recover() {
                         manifest);
   }
 
+  // The numbers a database accepts stop at kMaxFileNumber: a MANIFEST numbered at it or above, or a
+  // counter above it, is forged or damaged, and what it would leave is a counter within a few files
+  // of the end of the 64 bits. The counter is kept at or below the ceiling from here on, so the
+  // MANIFEST that a switch writes is one that this accepts.
+  if (number >= kMaxFileNumber || state.next_file_number > kMaxFileNumber) {
+    return WithFileName(Status::Corruption("a file number is beyond the largest there can be"),
+                        manifest);
+  }
   // ApplyEdit() has seen to it that every file and the log are numbered below next_file_number. The
-  // MANIFEST that was read is the one number it knows nothing of. Numbers that are given out from
-  // here on must be above it, and there must be one left to give: a forged MANIFEST that leaves
-  // none would make the first file the database makes abort the process.
-  constexpr uint64_t kMax = std::numeric_limits<uint64_t>::max();
-  uint64_t next = state.next_file_number;
-  if (number >= next) {
-    next = number == kMax ? kMax : number + 1;
-  }
-  if (next == kMax) {
-    return WithFileName(Status::Corruption("no file number is left above those in use"), manifest);
-  }
+  // MANIFEST that was read is the one number it knows nothing of, and numbers given out from here
+  // on must be above it.
+  const uint64_t next = std::max(state.next_file_number, number + 1);
   next_file_number_ = next;
   last_sequence_ = state.last_sequence;
   manifest_file_number_ = number;
@@ -410,10 +411,12 @@ Status VersionSet::Recover() {
 
 Status VersionSet::WriteNewManifest(VersionEdit edit) {
   SHALE_CHECK(loaded_, "VersionSet::WriteNewManifest needs CreateNew() or Recover() first");
-  if (next_file_number_ == std::numeric_limits<uint64_t>::max()) {
-    // The number of a file found in the directory can be anything, and Open passes each to
-    // MarkFileNumberUsed(). That is data, not a bug, and it is no reason to abort.
-    return Status::Corruption("no file number is left above those in use");
+  if (next_file_number_ >= kMaxFileNumber) {
+    // The new MANIFEST takes the number the counter is at and the snapshot records the counter one
+    // above it, which Recover() accepts up to kMaxFileNumber and no further. A switch that wrote
+    // more would be a database that cannot be opened. How the counter got here is data, the
+    // numbers of the files in the directory among it, and is no reason to abort.
+    return Status::Corruption("no file number is left below the largest there can be");
   }
   // The number is taken first, so that the counter the snapshot carries is above it.
   const uint64_t number = NewFileNumber();
@@ -437,6 +440,11 @@ Status VersionSet::LogAndApply(VersionEdit edit) {
               "VersionSet::LogAndApply needs an open MANIFEST: CreateNew() or WriteNewManifest()");
   if (!manifest_error_.ok()) {
     return manifest_error_;
+  }
+  if (next_file_number_ > kMaxFileNumber) {
+    // Only the numbers given out can have taken the counter here, past what Recover() accepts, and
+    // writing it would make the database unopenable.
+    return Status::Corruption("no file number is left below the largest there can be");
   }
   edit.next_file_number = next_file_number_;
   edit.last_sequence = last_sequence_;
@@ -465,17 +473,20 @@ Status VersionSet::LogAndApply(VersionEdit edit) {
 }
 
 uint64_t VersionSet::NewFileNumber() {
+  // Nothing read from disk can bring the counter near this: a MANIFEST's counter stops at
+  // kMaxFileNumber, which is 2^56 numbers short of it. It is here so that a bug cannot wrap the
+  // counter round to numbers that are in use.
   SHALE_CHECK(next_file_number_ != std::numeric_limits<uint64_t>::max(),
               "VersionSet: the file numbers are used up");
   return next_file_number_++;
 }
 
 void VersionSet::MarkFileNumberUsed(uint64_t number) {
-  if (number >= next_file_number_) {
-    // A number at the very top leaves none above it; NewFileNumber() then refuses to hand one out,
-    // which is better than wrapping round to numbers that are in use.
-    constexpr uint64_t kMax = std::numeric_limits<uint64_t>::max();
-    next_file_number_ = number == kMax ? kMax : number + 1;
+  // A number at or above the ceiling is not used, so that a file named for one cannot take the
+  // counter to where the next MANIFEST is refused. Nothing the database makes is numbered that
+  // high, so no file of its own is passed over.
+  if (number < kMaxFileNumber && number >= next_file_number_) {
+    next_file_number_ = number + 1;
   }
 }
 
