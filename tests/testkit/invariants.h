@@ -109,6 +109,10 @@ Status CheckVersion(Env* env, const std::string& dbname, const VersionState& sta
 ///   run, without setting an error. A correct database has an orphan until then.
 /// - After a reopen, only with the Env's faults cleared: faults stay armed across a crash, and one
 ///   that fires during the open's own sweep leaves a table as above.
+/// - No iterator has been destroyed since the last sweep. An iterator holds the version it was made
+///   at, and the tables of that version are in the live set until it is gone; once it is, they stay
+///   in the directory until a flush or a compaction ends in a sweep, which destroying the iterator
+///   does not run.
 /// Where any of them does not hold, do not call it; an orphan then is not a finding.
 /// @param env the Env the database runs on.
 /// @param dbname the database directory.

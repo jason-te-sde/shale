@@ -105,6 +105,23 @@ shale_add_test(db_properties SOURCES db/db_properties_test.cc LIBS shale_dbtest)
 shale_add_test(model_db SOURCES sim/model_db_test.cc LIBS shale_testkit)
 shale_add_test(invariants SOURCES sim/invariants_test.cc LIBS shale_db shale_testkit)
 
+# The deterministic simulator: a seeded driver over the fault-injecting Env and a manual scheduler
+# that runs random operations against a database and checks it against the model after every one.
+# It is a library of its own because it drives the engine through DBImpl's test hooks, which the
+# test kit does not link. The regression seeds are read from the source tree.
+shale_add_library(shale_simulator
+  SOURCES
+    testkit/simulator.cc
+  LIBS shale_db shale_testkit)
+
+shale_add_test(sim SOURCES sim/sim_test.cc LIBS shale_simulator)
+target_compile_definitions(sim_test PRIVATE
+  SHALE_REGRESSION_SEEDS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/sim/regression_seeds.txt")
+# Fifty seeds of two thousand steps take about half a minute in a debug build and some six minutes
+# under ThreadSanitizer, which is more than the default of five minutes a test is given.
+set_tests_properties(sim_test PROPERTIES TIMEOUT 1800)
+shale_add_test(determinism SOURCES sim/determinism_test.cc LIBS shale_simulator)
+
 # Clang's thread-safety analysis is what makes SHALE_GUARDED_BY more than a comment, and nothing
 # else would notice if it silently stopped working. So the build itself is tested: one translation
 # unit that reads a guarded member without the lock must be rejected, and the same unit with the
