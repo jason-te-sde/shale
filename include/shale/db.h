@@ -113,7 +113,10 @@ class DB {
   /// @param snapshot the snapshot to release.
   virtual void ReleaseSnapshot(const Snapshot* snapshot) = 0;
 
-  /// Writes what the memtable holds out as a table, and returns when that is done.
+  /// Writes what the memtable holds out as a table, and returns when that is done. Does nothing
+  /// if the memtable is empty and none is waiting to be written.
+  /// @return OK, or the error that stops writes, if one has: the data is then in the log still, and
+  ///   the next open recovers it.
   virtual Status Flush() = 0;
 
   /// Compacts the keys from `begin` to `end` through every level, so that the space the superseded

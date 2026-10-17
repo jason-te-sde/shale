@@ -44,6 +44,13 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   if (count == 0) {
     return Status::OK();
   }
+  // Room first, and the sequence number after: this may give up the mutex while it waits for the
+  // flush of the memtable that is already waiting, and another writer then goes ahead of this one.
+  // From here to the end nothing gives it up.
+  Status s = MakeRoomForWrite(/*force=*/false);
+  if (!s.ok()) {
+    return s;
+  }
   const SequenceNumber last = versions_.LastSequence();
   // `last` is at most kMaxSequenceNumber: a MANIFEST that says more is refused when it is read. A
   // batch that does not fit is refused too, instead of logged, since what a replay of it would do
@@ -59,7 +66,7 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   // The log first, then the memtable: a write that a reader can see is one that the log holds. A
   // failed append or sync leaves the log in an unknown state, so it stops all writes: a later one
   // would be acknowledged into a log that may not hold it.
-  Status s = log_->AddRecord(WriteBatchInternal::Contents(updates));
+  s = log_->AddRecord(WriteBatchInternal::Contents(updates));
   if (s.ok() && options.sync) {
     s = logfile_->Sync();
   }

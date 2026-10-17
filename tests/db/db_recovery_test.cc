@@ -16,6 +16,7 @@
 #include "core/version_state.h"
 #include "db/db_impl.h"
 #include "db/db_test_util.h"
+#include "db/recording_env.h"
 #include "db/version_set.h"
 #include "io/write_batch_internal.h"
 #include "shale/db.h"
@@ -420,7 +421,9 @@ TEST_F(DBRecoveryTest, StrayTableNumbersAreNotReused) {
   EXPECT_GT(state.files[0][0].number, uint64_t{500})
       << "the table written for the recovered data took the number of a file already there";
   EXPECT_EQ(Get("a"), "1");
-  EXPECT_EQ(env_->FileContents(TableFileName(kDb, 500)), "not a table");
+  // No version names the stray, so the sweep at the end of the open takes it, as it takes the
+  // table that a failed open left.
+  EXPECT_FALSE(env_->FileExists(TableFileName(kDb, 500)));
 }
 
 TEST_F(DBRecoveryTest, StrayLogAtTheFileNumberCeilingIsNeitherReplayedNorDeleted) {
@@ -749,6 +752,77 @@ TEST_F(DBRecoveryTest, LenientOpenSetsAsideTheLogWithTheDefectAndEveryLaterLog) 
   EXPECT_EQ(Get("e"), "5");
   EXPECT_EQ(Get("b"), "NOT_FOUND");
   expect_set_aside();
+}
+
+TEST_F(DBRecoveryTest, SettingLogsAsideSyncsTheDirectoryBeforeRenamingTheDefectiveLog) {
+  // The later logs are renamed first, so that a failure part of the way never leaves one of them
+  // replayable behind a log that is not. A filesystem may persist directory changes in any order,
+  // though, and the order only holds across a power loss if the renames of the later logs are
+  // durable before the rename that hides the rest, the defective log's. The Env under test keeps
+  // directory changes in order, so the sequence of calls is what is checked.
+  StartOver();
+  const std::vector<std::string> logs = {LogFileName(kDb, 9), LogFileName(kDb, 10),
+                                         LogFileName(kDb, 11)};
+  WriteDurableLog(logs[0], {EncodedBatch(1, {{"a", "1"}}), EncodedBatch(2, {{"b", "2"}})});
+  WriteDurableLog(logs[1], {EncodedBatch(3, {{"c", "3"}})});
+  WriteDurableLog(logs[2], {EncodedBatch(4, {{"d", "4"}})});
+  const std::vector<uint64_t> offsets = LogRecordOffsets(env_.get(), logs[0]);
+  ASSERT_EQ(offsets.size(), 2u);
+  FlipByte(logs[0], offsets[1] + kLogHeaderSize + 14);
+
+  RecordingEnv recorder(env_.get());
+  Options lenient = CurrentOptions();
+  lenient.env = &recorder;
+  lenient.paranoid_checks = false;
+  Reopen(lenient);
+  Close();  // before the recorder goes out of scope
+
+  const std::vector<std::string> events = recorder.events();
+  const auto position_of = [&](const std::string& event, size_t from) {
+    for (size_t i = from; i < events.size(); i++) {
+      if (events[i] == event) {
+        return i;
+      }
+    }
+    return events.size();
+  };
+  const auto rename_of = [&](size_t i) {
+    return position_of("rename " + logs[i] + " " + logs[i] + ".dropped", 0);
+  };
+  const size_t eleven = rename_of(2);
+  const size_t ten = rename_of(1);
+  const size_t nine = rename_of(0);
+  ASSERT_LT(eleven, events.size());
+  ASSERT_LT(ten, events.size());
+  ASSERT_LT(nine, events.size());
+  EXPECT_LT(eleven, ten) << "the later logs are renamed last first";
+  EXPECT_LT(ten, nine) << "the defective log is renamed after the later ones";
+  const size_t sync_between = position_of(std::string("syncdir ") + kDb, ten + 1);
+  EXPECT_LT(sync_between, nine) << "no SyncDir() between the renames of the later logs and the "
+                                   "rename of the defective one";
+  EXPECT_LT(position_of(std::string("syncdir ") + kDb, nine + 1), events.size())
+      << "no SyncDir() after the last rename";
+}
+
+TEST_F(DBRecoveryTest, LogNamesThatAreNotSpelledCanonicallyAreUnknownFiles) {
+  // "9.log" is not the name of log 9, which is "000009.log": reading it as log 9 would send the
+  // open to a file that is not there. Files with names like these are not the database's, and are
+  // neither replayed nor deleted.
+  PutRange(0, 3);
+  Close();
+  std::vector<std::pair<std::string, std::string>> strays;
+  for (const char* name : {"9.log", "0009.log", "0000009.log", "7.sst", "MANIFEST-1", "5.dbtmp"}) {
+    const std::string path = std::string(kDb) + "/" + name;
+    ASSERT_OK(WriteLogFile(env_.get(), path, {EncodedBatch(100, {{"stray", "1"}})}));
+    strays.emplace_back(path, env_->FileContents(path));
+  }
+  Reopen();
+  ExpectPresent(0, 3);
+  EXPECT_EQ(Get("stray"), "NOT_FOUND");
+  for (const auto& [path, bytes] : strays) {
+    EXPECT_TRUE(env_->FileExists(path)) << path << " was deleted";
+    EXPECT_TRUE(env_->FileContents(path) == bytes) << path << " was changed";
+  }
 }
 
 TEST_F(DBRecoveryTest, AFailureAnywhereInALenientOpenLosesNeitherDataNorDroppedLogs) {

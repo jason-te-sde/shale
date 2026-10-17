@@ -2,9 +2,10 @@
 #define SHALE_DB_DB_IMPL_H_
 
 // The database: opening it and recovering what a previous run left, the write path, and point
-// reads. The other files of src/db that belong to DBImpl are db_write.cc, the write path, and, as
-// they come, the background work and the iterators.
+// reads. The other files of src/db that belong to DBImpl are db_write.cc, the write path,
+// db_background.cc, the memtable switch and the background work, and, as they come, the iterators.
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -27,6 +28,7 @@
 #include "shale/env.h"
 #include "shale/iterator.h"
 #include "shale/options.h"
+#include "shale/scheduler.h"
 #include "shale/status.h"
 #include "shale/write_batch.h"
 #include "util/dbformat.h"
@@ -56,10 +58,17 @@ struct DBCounters {
 
 /// The implementation of DB.
 ///
-/// Everything the database changes is guarded by `mutex_`: the memtable and the log it is written
-/// to, the version set, the snapshots and the first error of the log. A write holds it from the
-/// sequence number to the memtable, which is what makes one writer at a time, and a read holds it
-/// only to take the memtable, the version and the sequence number it will read.
+/// Everything the database changes is guarded by `mutex_`: the memtables and the log the newer one
+/// is written to, the version set, the snapshots and the first error of the log. A write holds it
+/// from the sequence number to the memtable, which is what makes one writer at a time, and a read
+/// holds it only to take the memtables, the version and the sequence number it will read.
+///
+/// Background work is one task at a time on the Scheduler: a full memtable becomes the immutable
+/// one, `imm_`, and a task writes it out as a level 0 table while writes go on into a new `mem_`.
+/// `bg_scheduled_` says a task is queued or running, and it takes the mutex, which it gives up only
+/// to write files. Whoever must wait for background work, a write that finds the memtable full and
+/// `imm_` still there among them, does it in WaitForBackgroundWork(): on a scheduler that runs
+/// tasks on the caller's thread, it runs them itself.
 class DBImpl final : public DB {
  public:
   /// Creates a database that is not open: DB::Open() calls OpenImpl() on it. `options` has been
@@ -76,9 +85,13 @@ class DBImpl final : public DB {
   Status Write(const WriteOptions& options, WriteBatch* updates) override;
   Status Get(const ReadOptions& options, std::string_view key, std::string* value) override;
 
+  /// Switches to a new memtable, if the one in use is not empty, and returns when the memtable
+  /// that was in use, and any that was waiting before it, is a table. Returns the error that stops
+  /// writes, if there is one, and then the memtable may not have been written.
+  Status Flush() override;
+
   // These return NotSupported, or nothing, until they are written.
   std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) override;
-  Status Flush() override;
   Status CompactRange(std::optional<std::string_view> begin,
                       std::optional<std::string_view> end) override;
   bool GetProperty(std::string_view property, std::string* value) override;
@@ -89,7 +102,8 @@ class DBImpl final : public DB {
   /// Opens the database: the work of DB::Open() after the options are checked. The sequence is
   /// the directory, the lock, CURRENT and the MANIFEST, the replay of the write-ahead logs that
   /// hold writes the tables do not, a new log, the recovered writes as a level 0 table, a new
-  /// MANIFEST that names both, and last the deletion of the files that these replace. A failure
+  /// MANIFEST that names both, and last the deletion of the files that these replace, which also
+  /// takes the tables that an earlier open or a flush left that no version names. A failure
   /// anywhere leaves what was in the directory as it was, except for a new log, a new table or a
   /// new MANIFEST that may or may not have come to be named, none of which is deleted.
   Status OpenImpl() SHALE_EXCLUDES(mutex_);
@@ -131,22 +145,67 @@ class DBImpl final : public DB {
 
   // Renames logs[first] and every log after it to "<name>.dropped", the last first, so that a
   // failure part of the way never leaves a later log replayable behind one that is not, and says
-  // for each in the info log why. `why` is what was wrong with logs[first]. Syncs the directory.
-  // The renamed files have a name that nothing reads or deletes.
+  // for each in the info log why. `why` is what was wrong with logs[first]. Syncs the directory
+  // after the later logs are renamed and before logs[first] is, so that the order holds across a
+  // power loss on a filesystem that does not persist directory changes in order, and again at the
+  // end. The renamed files have a name that nothing reads or deletes.
   Status SetAsideLogs(const std::vector<uint64_t>& logs, size_t first, const std::string& why)
       SHALE_REQUIRES(mutex_);
+
+  // Takes a number for a log or a table. Returns Corruption instead when none is left below
+  // kMaxFileNumber: a file numbered at it is one that no MANIFEST holds, and a log numbered so high
+  // would be taken for a stray file by the next open and never replayed.
+  Status AllocateFileNumber(uint64_t* number) SHALE_REQUIRES(mutex_);
 
   // Writes `mem_`, the recovered writes, as a level 0 table and adds it to `*edit`.
   Status WriteRecoveredMemTable(VersionEdit* edit) SHALE_REQUIRES(mutex_);
 
-  // Deletes the logs and MANIFESTs that the database has no more use for, after a successful open:
-  // every log but the current one, and every MANIFEST but the current one. A file it does not
-  // know, or a log numbered beyond kMaxFileNumber, which is not the database's own, is not touched.
-  void RemoveObsoleteFilesAfterOpen() SHALE_REQUIRES(mutex_);
-
   // Remembers `s` as the first error of the write path, if there is none yet: every later write
-  // returns it.
+  // returns it, no more background work is scheduled, and whoever waits for background work is
+  // woken to see it.
   void RecordBackgroundError(const Status& s) SHALE_REQUIRES(mutex_);
+
+  // Makes room in `mem_` for a write, and returns OK when there is, or the error that stops
+  // writes. There is room when `mem_` is below write_buffer_size, and when it is not, or when
+  // `force` is set, `mem_` becomes `imm_` and a new one takes its place, which waits first for an
+  // `imm_` that is still there. May give up the mutex while it waits, so a caller that read
+  // anything under the mutex before it must read it again.
+  Status MakeRoomForWrite(bool force) SHALE_REQUIRES(mutex_);
+
+  // Starts a new log and a new `mem_`, and makes the old `mem_` the `imm_`, which must be null.
+  // The old log is synced first and the new one's directory entry before any write goes into it, so
+  // that a write that is durable in the new log never has an earlier one that is not in the old.
+  // Any failure is a background error: the state of the log is not known after it.
+  Status SwitchMemTable() SHALE_REQUIRES(mutex_);
+
+  // Queues a background task if there is work and none is queued or running: there is none once
+  // the database is closing or an error has stopped writes.
+  void MaybeScheduleBackgroundWork() SHALE_REQUIRES(mutex_);
+
+  // The task that the scheduler runs. Takes the mutex.
+  void BackgroundCall() SHALE_EXCLUDES(mutex_);
+
+  // Writes `imm_` as a level 0 table and installs it, with the mutex given up while the table is
+  // built. Returns the error of whichever step failed; then `imm_` is still there, a table that the
+  // MANIFEST may or may not name may be left in the directory, and nothing has been deleted.
+  Status FlushImmutable() SHALE_REQUIRES(mutex_);
+
+  // Deletes the files that nothing needs: the tables that no version, in use by a reader or not,
+  // names and no flush or compaction is producing, the logs older than `LogNumber()`, the MANIFESTs
+  // but the current one, and temporary files. A file whose name is not one of the database's, a
+  // log that a lenient open set aside among them, is not touched, nor is a numbered file at or
+  // above kMaxFileNumber, which the database never makes. A table that is deleted is evicted from
+  // the table cache. Does nothing after an error has stopped writes, since whether the version
+  // that a failed edit would have installed is the one that a restart finds is not known. Gives up
+  // the mutex while it lists and deletes: what it decides is obsolete never becomes needed, since a
+  // file number is not used twice, and the one task at a time that makes files is the caller.
+  void DeleteObsoleteFiles() SHALE_REQUIRES(mutex_);
+
+  // Waits for the background work to make progress, and returns so that the caller can look at
+  // what it is waiting for again. On a scheduler that runs tasks on the caller's thread it runs
+  // them: the mutex is given up while they do, and it is a bug to be here with nothing queued,
+  // since no one else will ever run a task. On any other it waits for the end of a task.
+  void WaitForBackgroundWork() SHALE_REQUIRES(mutex_);
 
   std::shared_ptr<MemTable> NewMemTable() SHALE_REQUIRES(mutex_);
 
@@ -167,8 +226,16 @@ class DBImpl final : public DB {
   TableCache table_cache_;
 
   Mutex mutex_;
+  // Signalled, with the mutex held, when a background task ends: whoever waits for the work to
+  // make progress looks at what it waits for again.
+  CondVar background_cv_{&mutex_};
   VersionSet versions_ SHALE_GUARDED_BY(mutex_);
-  std::shared_ptr<MemTable> mem_ SHALE_GUARDED_BY(mutex_);
+  std::shared_ptr<MemTable> mem_ SHALE_GUARDED_BY(mutex_);  // the one that writes go into
+  // The memtable that is waiting to be written out as a table, or null. Reads look at it after
+  // `mem_`, and it is only ever set when `mem_` is switched and cleared by the flush.
+  std::shared_ptr<MemTable> imm_ SHALE_GUARDED_BY(mutex_);
+  // Whether `imm_` is set, for a compaction to check between its output files without the mutex.
+  std::atomic<bool> has_imm_{false};
   // The write-ahead log of `mem_`. The writer is declared after the file it writes to, so that it
   // is destroyed first.
   std::unique_ptr<WritableFile> logfile_ SHALE_GUARDED_BY(mutex_);
@@ -178,6 +245,22 @@ class DBImpl final : public DB {
   Status bg_error_ SHALE_GUARDED_BY(mutex_);  // the first error of the write path, or OK
   DBCounters counters_ SHALE_GUARDED_BY(mutex_);
   uint64_t memtable_seed_ SHALE_GUARDED_BY(mutex_) = 0;  // the seed of the next memtable
+  // Whether a background task is queued or running: at most one is, and it is the one that makes
+  // tables, so a table that is being made is also here, in `pending_outputs_`.
+  bool bg_scheduled_ SHALE_GUARDED_BY(mutex_) = false;
+  // The numbers of the tables that are being written and are in no version yet, which the deletion
+  // of obsolete files must not take.
+  std::set<uint64_t> pending_outputs_ SHALE_GUARDED_BY(mutex_);
+  // Set when the database is closing: a task that has not started returns at once, and no more are
+  // scheduled.
+  std::atomic<bool> shutting_down_{false};
+
+  // Where background work runs: the scheduler of the options, or the one the database made for
+  // itself when there was none. Never null once the constructor has run.
+  Scheduler* scheduler_ = nullptr;
+  // Declared last, so that it is destroyed first, which joins its thread before anything that a
+  // task could use is gone. Nothing is queued on it by then: the destructor waits for the task.
+  std::unique_ptr<Scheduler> owned_scheduler_;
 };
 
 }  // namespace shale

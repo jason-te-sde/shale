@@ -53,6 +53,7 @@ shale_add_library(shale_core
 shale_add_library(shale_db
   SOURCES
     db/builder.cc
+    db/db_background.cc
     db/db_impl.cc
     db/db_write.cc
     db/filename_io.cc
