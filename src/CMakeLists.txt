@@ -30,5 +30,7 @@ shale_add_library(shale_io
     io/mem_env.cc
     io/memtable.cc
     io/scheduler.cc
+    io/table_builder.cc
+    io/table_format.cc
     io/write_batch.cc
   LIBS shale_util Threads::Threads)
