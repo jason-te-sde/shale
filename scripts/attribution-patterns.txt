@@ -1,0 +1,5 @@
+Co-Authored-By:.*(Claude|Anthropic|noreply@anthropic)
+Generated with .*(Claude|Claude Code)
+(written|created|authored) (by|with) (Claude|an? AI|ChatGPT|Copilot)
+🤖
+AI-generated

@@ -1,0 +1,11 @@
+# Build trees, one per preset (build/dev, build/asan, ...), and the generated documentation.
+/build/
+
+# Tooling caches and the compilation database some editors drop in the source root.
+/.cache/
+/compile_commands.json
+
+# Editors and the operating system.
+.idea/
+.vscode/
+.DS_Store

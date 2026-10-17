@@ -1,0 +1,16 @@
+---
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  performance-*,
+  modernize-use-override,
+  modernize-use-nullptr,
+  modernize-use-using,
+  modernize-make-unique,
+  modernize-make-shared,
+  readability-container-size-empty,
+  misc-redundant-expression,
+  misc-unused-using-decls
+WarningsAsErrors: '*'
+HeaderFilterRegex: '(src|include)/'

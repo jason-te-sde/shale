@@ -1,0 +1,26 @@
+# Doxygen configuration for the public API. Run from the repository root:
+#   cmake --build --preset dev --target docs
+# Every public type, function and member under include/shale/ needs a `///` comment, and a
+# missing or malformed one fails the build.
+
+PROJECT_NAME           = "shale"
+OUTPUT_DIRECTORY       = build/docs
+
+INPUT                  = include/shale
+FILE_PATTERNS          = *.h
+RECURSIVE              = YES
+
+# What counts as documented: the first sentence of a `///` comment is the brief description.
+JAVADOC_AUTOBRIEF      = YES
+EXTRACT_ALL            = NO
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = NO
+
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_IF_INCOMPLETE_DOC = YES
+WARN_AS_ERROR          = YES
+
+QUIET                  = YES
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
