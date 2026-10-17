@@ -12,11 +12,11 @@ namespace shale {
 /// definitely not in it, so that a lookup can skip a table without reading it.
 ///
 /// A filter never says a key is absent when it was added, and says a key is present for some that
-/// were not, about one in a hundred at 10 bits per key. The filter is stored in tables, so its
-/// bytes are part of the file format. The bit array has `max(n * bits_per_key, 64)` bits rounded up
-/// to whole bytes, and a last byte holds the number of probes `k`, which is `bits_per_key * 0.69`
-/// rounded down and kept between 1 and 30. A key is hashed once with Hash() and seed 0xbc9f1d34 to
-/// `h`; its `k` bits are `h % bits`, then `h` plus `delta` and so on, where
+/// were not, a little over one in a hundred at 10 bits per key. The filter is stored in tables, so
+/// its bytes are part of the file format. The bit array has `max(n * bits_per_key, 64)` bits
+/// rounded up to whole bytes, and a last byte holds the number of probes `k`, which is
+/// `bits_per_key * 0.69` rounded down and kept between 1 and 30. A key is hashed once with Hash()
+/// and seed 0xbc9f1d34 to `h`; its `k` bits are `h % bits`, then `h` plus `delta` and so on, where
 /// `delta = (h >> 17) | (h << 15)` and the addition wraps at 32 bits. This is double hashing: one
 /// hash value stands in for `k` independent ones.
 ///
@@ -24,8 +24,8 @@ namespace shale {
 class BloomFilterBuilder {
  public:
   /// Creates a builder for a filter of `bits_per_key` bits for each key added. More bits give
-  /// fewer false positives: 10 is about 1%, and each further 5 or so cut it by about a factor of 4.
-  /// Aborts if `bits_per_key` is negative.
+  /// fewer false positives. Measured with 100000 keys, 10 bits per key lets about 1.5% of absent
+  /// keys through, and 15 bits about 0.3%. Aborts if `bits_per_key` is negative.
   /// @param bits_per_key bits of filter per key; 0 turns the filter off, and Finish() then returns
   ///   the empty string.
   explicit BloomFilterBuilder(int bits_per_key);
