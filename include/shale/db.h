@@ -102,6 +102,8 @@ class DB {
 
   /// Returns an iterator over the whole database, as it is now or as of `options.snapshot`. It is
   /// not affected by writes made after it was created. It must be destroyed before the database.
+  /// Valid() being false after a seek or a step may mean that a table could not be read and not
+  /// that the data ran out, so check status() when it is.
   /// @param options how to read.
   virtual std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) = 0;
 

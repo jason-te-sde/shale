@@ -23,19 +23,28 @@ namespace {
 class DBSnapshotTest : public DBTestBase {};
 
 // A snapshot that the test releases on its way out, whether or not it fails: one that is still
-// open aborts the close of the database, which would hide the failure.
+// open aborts the close of the database, which would hide the failure. A test that gives it back
+// earlier calls Release(), and the destructor then has nothing to do: a snapshot is released once.
 class ScopedSnapshot {
  public:
   explicit ScopedSnapshot(DB* db) : db_(db), snapshot_(db->GetSnapshot()) {}
-  ~ScopedSnapshot() { db_->ReleaseSnapshot(snapshot_); }
+  ~ScopedSnapshot() { Release(); }
   ScopedSnapshot(const ScopedSnapshot&) = delete;
   ScopedSnapshot& operator=(const ScopedSnapshot&) = delete;
 
   const Snapshot* get() const { return snapshot_; }
 
+  // Gives the snapshot back now, if it is still held.
+  void Release() {
+    if (snapshot_ != nullptr) {
+      db_->ReleaseSnapshot(snapshot_);
+      snapshot_ = nullptr;
+    }
+  }
+
  private:
   DB* const db_;
-  const Snapshot* const snapshot_;
+  const Snapshot* snapshot_;
 };
 
 TEST_F(DBSnapshotTest, IteratorAtSnapshot) {
@@ -110,13 +119,13 @@ TEST_F(DBSnapshotTest, AnIteratorKeepsWhatItReadsWhenItsSnapshotIsReleased) {
   ASSERT_OK(Put("gone", "x"));
   ASSERT_OK(db_->CompactRange(std::nullopt, std::nullopt));
   ASSERT_EQ(NumTableFilesAtLevel(1), 1);
-  const Snapshot* snapshot = db_->GetSnapshot();
+  ScopedSnapshot snapshot(db_.get());
   ASSERT_OK(Put("a", "2"));
   ASSERT_OK(Delete("gone"));
   ReadOptions at_snapshot;
-  at_snapshot.snapshot = snapshot;
+  at_snapshot.snapshot = snapshot.get();
   std::unique_ptr<Iterator> it = db_->NewIterator(at_snapshot);
-  db_->ReleaseSnapshot(snapshot);
+  snapshot.Release();
   ASSERT_OK(db_->CompactRange(std::nullopt, std::nullopt));
   ASSERT_OK(Put("a", "3"));
   ASSERT_OK(db_->CompactRange(std::nullopt, std::nullopt));
@@ -129,31 +138,7 @@ TEST_F(DBSnapshotTest, AnIteratorKeepsWhatItReadsWhenItsSnapshotIsReleased) {
   EXPECT_EQ(seen, "a=1;gone=x;");
 }
 
-// Closing with something alive aborts, so each of these runs in a child process.
-class DBSnapshotDeathTest : public DBTestBase {};
-
-TEST_F(DBSnapshotDeathTest, ClosingWithLiveIteratorAborts) {
-  GTEST_FLAG_SET(death_test_style, "threadsafe");
-  EXPECT_DEATH(
-      {
-        auto it = db_->NewIterator({});
-        db_.reset();
-      },
-      "1 live iterator");
-}
-
-TEST_F(DBSnapshotDeathTest, ClosingWithTwoLiveIteratorsCountsBoth) {
-  GTEST_FLAG_SET(death_test_style, "threadsafe");
-  EXPECT_DEATH(
-      {
-        auto first = db_->NewIterator({});
-        auto second = db_->NewIterator({});
-        db_.reset();
-      },
-      "2 live iterator");
-}
-
-TEST_F(DBSnapshotDeathTest, ClosingAfterAnIteratorIsDestroyedDoesNotAbort) {
+TEST_F(DBSnapshotTest, ClosingAfterAnIteratorIsDestroyedDoesNotAbort) {
   // The check must also be able to stay quiet. Each of these ends with the iterator gone, whatever
   // it was used for, and the database closes and opens again.
   {
@@ -170,6 +155,45 @@ TEST_F(DBSnapshotDeathTest, ClosingAfterAnIteratorIsDestroyedDoesNotAbort) {
   }
   Reopen();
   EXPECT_EQ(Contents(), "a=1");
+}
+
+// Closing with something alive aborts, so each of these runs in a child process.
+class DBSnapshotDeathTest : public DBTestBase {};
+
+TEST_F(DBSnapshotDeathTest, ClosingWithLiveIteratorAborts) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(
+      {
+        auto it = db_->NewIterator({});
+        db_.reset();
+      },
+      "1 live iterator");
+}
+
+TEST_F(DBSnapshotDeathTest, ClosingWithAnIteratorAndASnapshotNamesTheIteratorFirst) {
+  // Both are alive, and the close checks the iterator first: it points into what is about to be
+  // freed, and a snapshot is only a number. The message is the first check's alone, so a pattern
+  // that names the iterator fails if the snapshot is checked before it.
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(
+      {
+        const Snapshot* snapshot = db_->GetSnapshot();
+        auto it = db_->NewIterator({});
+        static_cast<void>(snapshot);
+        db_.reset();
+      },
+      "1 live iterator");
+}
+
+TEST_F(DBSnapshotDeathTest, ClosingWithTwoLiveIteratorsCountsBoth) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(
+      {
+        auto first = db_->NewIterator({});
+        auto second = db_->NewIterator({});
+        db_.reset();
+      },
+      "2 live iterator");
 }
 
 TEST_F(DBSnapshotDeathTest, ANewIteratorAtAReleasedSnapshotAborts) {

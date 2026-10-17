@@ -23,6 +23,7 @@
 #include "db/db_test_util.h"
 #include "io/iterator_util.h"
 #include "io/memtable.h"
+#include "io/table.h"
 #include "shale/db.h"
 #include "shale/iterator.h"
 #include "shale/options.h"
@@ -364,6 +365,48 @@ class DBIterTest : public DBTestBase {
     options.sync = false;
     return db_->Delete(options, key);
   }
+
+  // Flips the low bit of the byte at `offset` of the file `fname`, as it is at rest, and returns
+  // whether there was such a byte. A handle that is already open stays on the file it had, so the
+  // database is reopened after this for the damage to be read.
+  bool FlipBitAtRest(const std::string& fname, size_t offset) {
+    std::string contents = env_->FileContents(fname);
+    if (offset >= contents.size()) {
+      return false;
+    }
+    contents[offset] = static_cast<char>(contents[offset] ^ 0x01);
+    env_->SetFileContents(fname, std::move(contents));
+    return true;
+  }
+
+  // Reopens the database, so that no block of any table is cached, and sets `*table` to the table
+  // `file` that the database's table cache opens: the one every read of it goes through.
+  void ReopenAndFindTable(const FileMetaData& file, std::shared_ptr<Table>* table) {
+    ASSERT_OK(TryReopen(CurrentOptions()));
+    ASSERT_OK(dbfull()->TEST_TableCache()->FindTable(file.number, file.file_size, table));
+  }
+
+  // Makes the same read twice, a Get of UserKey(7) or a scan of every entry, with `options`, on a
+  // database opened afresh, and sets `*reads` to how many data blocks the table `file` was read
+  // for. A block that went into the cache the first time is not read the second.
+  void CountBlockReadsOfTwoReads(const FileMetaData& file, const ReadOptions& options, bool scan,
+                                 uint64_t* reads) {
+    std::shared_ptr<Table> table;
+    ASSERT_NO_FATAL_FAILURE(ReopenAndFindTable(file, &table));
+    const uint64_t before = table->data_block_reads();
+    for (int round = 0; round < 2; round++) {
+      if (scan) {
+        const std::unique_ptr<Iterator> it = db_->NewIterator(options);
+        ASSERT_EQ(Scan(it.get()).size(), 20u);
+        ASSERT_OK(it->status());
+      } else {
+        std::string value;
+        ASSERT_OK(db_->Get(options, UserKey(7), &value));
+        ASSERT_EQ(value, ValueOf(7));
+      }
+    }
+    *reads = table->data_block_reads() - before;
+  }
 };
 
 TEST_F(DBIterTest, EmptyDatabase) {
@@ -495,19 +538,29 @@ TEST_F(DBIterTest, BinaryKeysIterateInUnsignedOrder) {
 TEST_F(DBIterTest, MergesAllSources) {
   Reopen(SmallBuffer());
   std::map<std::string, std::string> model;
+  // An ASSERT in a lambda returns from the lambda and not from the test, so these check with EXPECT
+  // and change the model only for a write that was made; the test stops where it checks
+  // HasFailure(), before it compares anything with a model that is out of step.
   const auto put = [&](const std::string& key, const std::string& value) {
-    ASSERT_OK(PutUnsynced(key, value));
-    model[key] = value;
+    const Status s = PutUnsynced(key, value);
+    EXPECT_OK(s);
+    if (s.ok()) {
+      model[key] = value;
+    }
   };
   const auto del = [&](const std::string& key) {
-    ASSERT_OK(DeleteUnsynced(key));
-    model.erase(key);
+    const Status s = DeleteUnsynced(key);
+    EXPECT_OK(s);
+    if (s.ok()) {
+      model.erase(key);
+    }
   };
 
   // Level 1: 60 keys, spread by a stride so that the next rounds interleave with them.
   for (int i = 0; i < 60; i++) {
     put(UserKey(i * 5), "l1-" + ValueOf(i));
   }
+  ASSERT_FALSE(HasFailure()) << "a write failed";
   ASSERT_OK(db_->CompactRange(std::nullopt, std::nullopt));
   ASSERT_EQ(NumTableFilesAtLevel(0), 0);
   ASSERT_GE(NumTableFilesAtLevel(1), 1);
@@ -517,6 +570,7 @@ TEST_F(DBIterTest, MergesAllSources) {
   }
   put(UserKey(10), "l0-overwrite");
   del(UserKey(15));
+  ASSERT_FALSE(HasFailure()) << "a write failed";
   ASSERT_OK(db_->Flush());
   ASSERT_EQ(NumTableFilesAtLevel(0), 1);
   // The immutable memtable: written, and switched, and not flushed because no one runs the
@@ -536,6 +590,7 @@ TEST_F(DBIterTest, MergesAllSources) {
   del(UserKey(2));
   del(UserKey(20));
   put(UserKey(1000), "mem-last");
+  ASSERT_FALSE(HasFailure()) << "a write failed";
 
   const std::unique_ptr<Iterator> it = NewIter();
   EXPECT_EQ(Scan(it.get()), Expected(model));
@@ -799,6 +854,146 @@ TEST_F(DBIterTest, CorruptionMidScanStopsTheIteratorAndIsReported) {
   EXPECT_TRUE(it->status().IsCorruption());
 }
 
+TEST_F(DBIterTest, ATombstoneInADamagedLevel0BlockNeverUncoversTheOlderValueBelow) {
+  // Level 1 holds an old value of every key, all of them readable. Level 0 holds new values of the
+  // first few keys and then a deletion of every other one, in blocks of about a dozen entries,
+  // and one byte of it is damaged where only the deletions are. A scan that was told nothing of
+  // the deletions in that block would go on to show the old values from level 1 as if they were
+  // live: it has to stop, with the damage as its status, and so does a read of one such key.
+  constexpr int kKeys = 300;
+  constexpr int kRewritten = 5;
+  Options options = CurrentOptions();
+  options.block_size = 256;  // the smallest, so that the deletions are in many blocks
+  Reopen(options);
+  for (int i = 0; i < kKeys; i++) {
+    ASSERT_OK(PutUnsynced(UserKey(i), Padded("old-", i)));
+  }
+  ASSERT_OK(db_->CompactRange(std::nullopt, std::nullopt));
+  ASSERT_EQ(NumTableFilesAtLevel(0), 0);
+  ASSERT_GE(NumTableFilesAtLevel(1), 1);
+  Entries rewritten;
+  for (int i = 0; i < kRewritten; i++) {
+    rewritten.emplace_back(UserKey(i), Padded("new-", i));
+    ASSERT_OK(PutUnsynced(rewritten.back().first, rewritten.back().second));
+  }
+  for (int i = kRewritten; i < kKeys; i++) {
+    ASSERT_OK(DeleteUnsynced(UserKey(i)));
+  }
+  ASSERT_OK(db_->Flush());
+  ASSERT_EQ(NumTableFilesAtLevel(0), 1);
+  const FileMetaData level0 = dbfull()->TEST_VersionState().files[0][0];
+
+  // The middle of the file is inside the deletions: the values come first and take a tenth of it,
+  // and the index, the filter and the footer are after the last data block.
+  Close();
+  ASSERT_TRUE(FlipBitAtRest(TableFileName(dbname_, level0.number), level0.file_size / 2));
+  Reopen(options);
+
+  int damaged = 0;
+  for (int i = 0; i < kKeys; i++) {
+    std::string value;
+    const Status s = db_->Get(ReadOptions(), UserKey(i), &value);
+    if (s.IsCorruption()) {
+      damaged++;
+    } else if (i < kRewritten) {
+      ASSERT_OK(s);
+      EXPECT_EQ(value, Padded("new-", i));
+    } else {
+      EXPECT_TRUE(s.IsNotFound()) << UserKey(i) << ": " << s.ToString() << " " << value;
+    }
+  }
+  ASSERT_GT(damaged, 0) << "no key was in the damaged block: the test proves nothing";
+
+  const std::unique_ptr<Iterator> it = NewIter();
+  const Entries scanned = Scan(it.get());
+  EXPECT_FALSE(it->Valid());
+  EXPECT_TRUE(it->status().IsCorruption()) << it->status().ToString();
+  EXPECT_EQ(scanned, rewritten)
+      << "the scan showed a value that a deletion hides, or stopped before the damage";
+  it->Seek(UserKey(100));
+  EXPECT_FALSE(it->Valid());
+  EXPECT_TRUE(it->status().IsCorruption()) << "a seek went past the damage";
+}
+
+TEST_F(DBIterTest, FillCacheOfReadOptionsReachesTheBlockReads) {
+  for (int i = 0; i < 20; i++) {
+    ASSERT_OK(Put(UserKey(i), ValueOf(i)));  // a table of one data block
+  }
+  ASSERT_OK(db_->Flush());
+  ASSERT_EQ(NumTableFilesAtLevel(0), 1);
+  const FileMetaData file = dbfull()->TEST_VersionState().files[0][0];
+
+  for (const bool scan : {false, true}) {
+    SCOPED_TRACE(scan ? "a scan" : "a Get");
+    uint64_t cached = 0;
+    uint64_t not_cached = 0;
+    ReadOptions fill;
+    ASSERT_NO_FATAL_FAILURE(CountBlockReadsOfTwoReads(file, fill, scan, &cached));
+    EXPECT_EQ(cached, 1u) << "the second read did not find the block in the cache";
+    ReadOptions no_fill;
+    no_fill.fill_cache = false;
+    ASSERT_NO_FATAL_FAILURE(CountBlockReadsOfTwoReads(file, no_fill, scan, &not_cached));
+    EXPECT_EQ(not_cached, 2u) << "a read with fill_cache off left its block in the cache";
+  }
+}
+
+TEST_F(DBIterTest, ChecksumsOfReadOptionsDecideWhetherAnUncheckedBlockIsRead) {
+  for (int i = 0; i < 20; i++) {
+    ASSERT_OK(Put(UserKey(i), ValueOf(i)));
+  }
+  ASSERT_OK(db_->Flush());
+  ASSERT_EQ(NumTableFilesAtLevel(0), 1);
+  const FileMetaData file = dbfull()->TEST_VersionState().files[0][0];
+
+  // A block that nothing has checked is not put in the cache, where a read that does check would
+  // find it and take it as checked.
+  for (const bool scan : {false, true}) {
+    SCOPED_TRACE(scan ? "a scan" : "a Get");
+    uint64_t reads = 0;
+    ReadOptions unchecked;
+    unchecked.verify_checksums = false;
+    ASSERT_NO_FATAL_FAILURE(CountBlockReadsOfTwoReads(file, unchecked, scan, &reads));
+    EXPECT_EQ(reads, 2u) << "a block that was not verified went into the cache";
+  }
+}
+
+TEST_F(DBIterTest, ChecksumsOfReadOptionsDecideWhetherADamagedBlockIsCaught) {
+  const std::string marker = "marker-value-0123456789";
+  ASSERT_OK(Put("a", "1"));
+  ASSERT_OK(Put("b", marker));
+  ASSERT_OK(Put("c", "3"));
+  ASSERT_OK(db_->Flush());
+  ASSERT_EQ(NumTableFilesAtLevel(0), 1);
+  const FileMetaData file = dbfull()->TEST_VersionState().files[0][0];
+  Close();
+  // A byte of the value of "b", which is stored as it is: the block still parses, and only its
+  // checksum says it is damaged.
+  const std::string fname = TableFileName(dbname_, file.number);
+  const size_t at = env_->FileContents(fname).find(marker);
+  ASSERT_NE(at, std::string::npos);
+  ASSERT_TRUE(FlipBitAtRest(fname, at + 3));
+  std::string damaged_value = marker;
+  damaged_value[3] = static_cast<char>(damaged_value[3] ^ 0x01);
+  Reopen();
+
+  ReadOptions checked;
+  ReadOptions unchecked;
+  unchecked.verify_checksums = false;
+  std::string value;
+  EXPECT_TRUE(db_->Get(checked, "b", &value).IsCorruption());
+  ASSERT_OK(db_->Get(unchecked, "b", &value));
+  EXPECT_EQ(value, damaged_value) << "the read was made without the check";
+  EXPECT_TRUE(db_->Get(checked, "b", &value).IsCorruption())
+      << "the unchecked read left the damaged block in the cache";
+
+  const std::unique_ptr<Iterator> checking = db_->NewIterator(checked);
+  EXPECT_EQ(Scan(checking.get()), Entries{});
+  EXPECT_TRUE(checking->status().IsCorruption()) << checking->status().ToString();
+  const std::unique_ptr<Iterator> unchecking = db_->NewIterator(unchecked);
+  EXPECT_EQ(Scan(unchecking.get()), (Entries{{"a", "1"}, {"b", damaged_value}, {"c", "3"}}));
+  EXPECT_OK(unchecking->status());
+}
+
 TEST_F(DBIterTest, ConcurrentIteratorsSeeAPrefixOfTheWrites) {
   // The writer writes UserKey(0), UserKey(1), ..., one after another. Whatever sequence number an
   // iterator reads at, what it shows is the keys up to some n, with none missing and none after.
@@ -832,13 +1027,18 @@ TEST_F(DBIterTest, ConcurrentIteratorsSeeAPrefixOfTheWrites) {
       }
     });
   }
-  for (int i = 0; i < kWrites; i++) {
-    ASSERT_OK(PutUnsynced(UserKey(i), KiB(i)));
+  // The readers are joinable threads: a fatal failure that returned from here would destroy them
+  // and end the process. So the loop only notes a failed write and stops, and the threads are
+  // joined before anything is asserted.
+  Status write_status;
+  for (int i = 0; i < kWrites && write_status.ok(); i++) {
+    write_status = PutUnsynced(UserKey(i), KiB(i));
   }
   done.store(true);
   for (std::thread& reader : readers) {
     reader.join();
   }
+  ASSERT_OK(write_status);
   EXPECT_EQ(broken.load(), 0) << "an iterator showed something that is not a prefix of the writes";
   EXPECT_EQ(failed.load(), 0);
   EXPECT_GE(scans.load(), 3 * kReaders);
