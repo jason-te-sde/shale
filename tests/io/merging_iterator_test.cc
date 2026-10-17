@@ -31,7 +31,6 @@
 namespace shale {
 namespace {
 
-using Entries = std::vector<std::pair<std::string, std::string>>;
 using Keys = std::vector<std::string>;
 
 std::vector<std::unique_ptr<Iterator>> Children(std::vector<Entries> lists) {
@@ -196,42 +195,11 @@ TEST(MergingIteratorTest, ChildThatFailsEndsTheIteration) {
   EXPECT_TRUE(it->status().IsCorruption());
 }
 
-// Serves the keys "b", "d", ..., `limit` of them, then becomes invalid with an error, as an
-// iterator does that finds damage after it has returned some entries.
-class FailsAfter final : public Iterator {
- public:
-  explicit FailsAfter(int limit) : limit_(limit) {}
-
-  bool Valid() const override { return position_ >= 0 && position_ < limit_; }
-  void SeekToFirst() override { position_ = 0; }
-  void Seek(std::string_view target) override {
-    position_ = 0;
-    while (position_ < limit_ && Key(position_) < target) {
-      ++position_;
-    }
-  }
-  void Next() override { ++position_; }
-  std::string_view key() const override {
-    key_ = Key(position_);
-    return key_;
-  }
-  std::string_view value() const override { return "v"; }
-  Status status() const override {
-    return position_ >= limit_ ? Status::Corruption("failed after some entries") : Status();
-  }
-
- private:
-  static std::string Key(int i) { return std::string(1, static_cast<char>('b' + 2 * i)); }
-
-  const int limit_;
-  int position_ = -1;
-  mutable std::string key_;
-};
-
 TEST(MergingIteratorTest, ChildThatFailsMidwayEndsTheIterationThere) {
   std::vector<std::unique_ptr<Iterator>> children;
   children.push_back(NewVectorIterator(Of({"a", "c", "e", "g"})));
-  children.push_back(std::make_unique<FailsAfter>(2));  // "b", "d", then it fails
+  children.push_back(
+      NewFailingIterator(Of({"b", "d"}), Status::Corruption("failed after some entries")));
   std::unique_ptr<Iterator> it = NewMergingIterator(std::move(children), BytewiseCompare);
   it->SeekToFirst();
   const Keys seen = Remaining(it.get());

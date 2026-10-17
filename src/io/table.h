@@ -38,13 +38,15 @@ using BlockCache = ShardedLRUCache<BlockCacheKey, const Block, BlockCacheKeyHash
 
 /// How one read of a table is done.
 struct TableReadOptions {
-  /// Whether to check the checksum of each data block read from the file. A block that was
-  /// cached by an earlier read is not checked again, so a read that does not verify can leave an
-  /// unchecked block in the cache for one that does.
+  /// Whether to check the checksum of each data block read from the file. A read that does not
+  /// check never puts what it read into the block cache, whatever `fill_cache` says, because the
+  /// cache is shared with reads that do, and a block that nothing has checked would be handed to
+  /// one that asked for checking, which would return a value that was never stored. A block that
+  /// is already in the cache has been checked, and is used either way.
   bool verify_checksums = true;
-  /// Whether a data block read from the file goes into the block cache. A bulk scan sets it to
-  /// false so that it does not push out the blocks that point lookups are using. Blocks already
-  /// in the cache are used either way.
+  /// Whether a data block read from the file, and checked, goes into the block cache. A bulk scan
+  /// sets it to false so that it does not push out the blocks that point lookups are using.
+  /// Blocks already in the cache are used either way.
   bool fill_cache = true;
 };
 
@@ -76,7 +78,14 @@ struct TableGetResult {
 ///
 /// A Table is immutable once opened and every method may be called from any number of threads at
 /// once. It is owned by shared pointers, and an iterator holds one, so a table is closed when the
-/// last reader of it is done, however the caller's own pointer to it is dropped.
+/// last reader of it is done, however the caller's own pointer to it is dropped. Open() is the
+/// only way to make one: a Table that no shared pointer owned could not give an iterator its
+/// share of itself.
+///
+/// What an iterator returns is in strictly increasing order of internal key, whatever the file
+/// holds, so that it can be fed to a TableBuilder, which aborts on a key that is not. A block
+/// with its keys out of order, or with a key after the last key its index entry names, ends the
+/// iteration with Corruption.
 class Table : public std::enable_shared_from_this<Table> {
  public:
   /// Opens a table of `file_size` bytes in `file`, reading its footer, index block and filter
@@ -119,25 +128,30 @@ class Table : public std::enable_shared_from_this<Table> {
   /// was served by the block cache. A block that was read and failed its checks counts.
   uint64_t data_block_reads() const { return data_block_reads_.load(std::memory_order_relaxed); }
 
-  // The constructor is public for std::make_shared and unusable otherwise: it takes a type that
-  // only Open() can make.
+  Table(const Table&) = delete;
+  Table& operator=(const Table&) = delete;
+
+ private:
+  // The constructor has to be public for std::make_shared, and takes this, which no code outside
+  // Table can name, so that nothing outside can call it.
   struct PrivateTag {
     explicit PrivateTag() = default;
   };
+
+ public:
+  /// Not for callers: use Open(). It takes a type that only Table can name.
   Table(PrivateTag, std::unique_ptr<RandomAccessFile> file, uint64_t cache_id, BlockCache* cache,
         uint64_t data_end, std::shared_ptr<const Block> index_block, std::string filter);
-
-  Table(const Table&) = delete;
-  Table& operator=(const Table&) = delete;
 
  private:
   // Reads the block the index value `index_value` names, from the cache if it is there.
   Status ReadDataBlock(const TableReadOptions& options, std::string_view index_value,
                        std::shared_ptr<const Block>* block) const;
 
-  // An iterator over that block, or one that reports why there is none.
+  // An iterator over the block that an entry of the index with the key and value in `keyed_value`
+  // names, which checks the block's keys against the key, or one that reports why there is none.
   std::unique_ptr<Iterator> NewDataBlockIterator(const TableReadOptions& options,
-                                                 std::string_view index_value) const;
+                                                 std::string_view keyed_value) const;
 
   const std::unique_ptr<RandomAccessFile> file_;
   const uint64_t cache_id_;

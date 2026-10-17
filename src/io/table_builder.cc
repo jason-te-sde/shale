@@ -17,9 +17,6 @@ namespace shale {
 
 namespace {
 
-// The size of the tag that ends an internal key.
-constexpr size_t kInternalKeyTagSize = 8;
-
 // The type byte of a block stored as it is, the only kind this builder writes.
 constexpr char kBlockTypeRaw = 0;
 

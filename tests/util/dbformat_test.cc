@@ -188,6 +188,21 @@ TEST(DbFormatTest, LookupKeySortsBeforeEveryEntryItCouldFind) {
   EXPECT_GT(CompareInternalKey(k.internal_key(), InternalKey("a", 8, ValueType::kValue)), 0);
 }
 
+TEST(DbFormatTest, TagSizeIsWhatAnInternalKeyAddsToItsUserKey) {
+  static_assert(kInternalKeyTagSize == sizeof(uint64_t), "the tag is a fixed64");
+  for (const std::string& user_key : {std::string(), std::string("k"), std::string(300, 'x')}) {
+    EXPECT_EQ(InternalKey(user_key, 5, ValueType::kValue).size(),
+              user_key.size() + kInternalKeyTagSize);
+    const LookupKey lookup(user_key, 5);
+    EXPECT_EQ(lookup.internal_key().size(), user_key.size() + kInternalKeyTagSize);
+    EXPECT_EQ(lookup.user_key(), user_key);
+  }
+  // A key of exactly the tag's size is the shortest there is, and has the empty user key.
+  const std::string shortest = InternalKey("", 1, ValueType::kValue);
+  ASSERT_EQ(shortest.size(), kInternalKeyTagSize);
+  EXPECT_EQ(ExtractUserKey(shortest), "");
+}
+
 TEST(DbFormatDeathTest, SequenceAboveTheMaximumFails) {
   EXPECT_DEATH(PackSequenceAndType(kMaxSequenceNumber + 1, ValueType::kValue), "sequence");
   std::string s;

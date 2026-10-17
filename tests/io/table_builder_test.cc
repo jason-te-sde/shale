@@ -34,32 +34,6 @@
 namespace shale {
 namespace {
 
-using Entries = std::vector<std::pair<std::string, std::string>>;
-
-std::string IKey(std::string_view user_key, SequenceNumber sequence,
-                 ValueType type = ValueType::kValue) {
-  std::string key;
-  AppendInternalKey(&key, ParsedInternalKey{user_key, sequence, type});
-  return key;
-}
-
-std::string UserKey(int i) {
-  char buf[16];
-  std::snprintf(buf, sizeof(buf), "k%06d", i);
-  return buf;
-}
-
-// `n` entries for user keys "k000000", "k000001", ..., each at its own sequence number.
-Entries NumberedEntries(int n, uint64_t seed) {
-  Random rnd(seed);
-  Entries entries;
-  for (int i = 0; i < n; ++i) {
-    entries.emplace_back(IKey(UserKey(i), static_cast<SequenceNumber>(i) + 1),
-                         RandomString(&rnd, rnd.Skewed(7)));
-  }
-  return entries;
-}
-
 // A table written to an in-memory file, and what is known about it.
 struct BuiltTable {
   std::string bytes;
@@ -140,7 +114,7 @@ void Parse(const std::string& bytes, ParsedTable* parsed) {
 }
 
 TEST(TableBuilderTest, FileSizeMatchesBytesWritten) {
-  const Entries entries = NumberedEntries(10000, 1);
+  const Entries entries = NumberedEntries(10000);
   std::unique_ptr<Env> env = NewMemEnv();
   std::unique_ptr<WritableFile> file;
   ASSERT_OK(env->NewWritableFile("/t.sst", &file));
@@ -179,7 +153,7 @@ TEST(TableBuilderTest, EmptyTableHasFooter) {
 }
 
 TEST(TableBuilderTest, FileHoldsEveryEntryInOrderAcrossBlocks) {
-  const Entries entries = NumberedEntries(3000, 2);
+  const Entries entries = NumberedEntries(3000);
   const BuiltTable built = Build(entries);
   EXPECT_EQ(built.reported_size, built.bytes.size());
   EXPECT_EQ(built.reported_entries, uint64_t{3000});
@@ -213,7 +187,7 @@ TEST(TableBuilderTest, BlockIsCutWhenItsEstimateReachesTheBlockSize) {
   TableBuilderOptions options;
   options.block_size = 1000;
   options.block_restart_interval = 4;
-  const Entries entries = NumberedEntries(2000, 3);
+  const Entries entries = NumberedEntries(2000);
   const BuiltTable built = Build(entries, options);
   ParsedTable parsed;
   Parse(built.bytes, &parsed);
@@ -241,7 +215,7 @@ TEST(TableBuilderTest, IndexBlockStoresEveryKeyWhole) {
   TableBuilderOptions options;
   options.block_size = 512;
   options.block_restart_interval = 16;
-  const BuiltTable built = Build(NumberedEntries(1000, 4), options);
+  const BuiltTable built = Build(NumberedEntries(1000), options);
   ParsedTable parsed;
   Parse(built.bytes, &parsed);
   ASSERT_GT(parsed.blocks.size(), size_t{5});
@@ -298,7 +272,7 @@ TEST(TableBuilderTest, FilterHoldsEachUserKeyOnce) {
 TEST(TableBuilderTest, NoBloomBitsMeansAnEmptyFilterBlock) {
   TableBuilderOptions options;
   options.bloom_bits_per_key = 0;
-  const BuiltTable built = Build(NumberedEntries(100, 5), options);
+  const BuiltTable built = Build(NumberedEntries(100), options);
   ParsedTable parsed;
   Parse(built.bytes, &parsed);
   EXPECT_TRUE(parsed.filter.empty());
@@ -370,7 +344,7 @@ class FailingFile final : public WritableFile {
 };
 
 TEST(TableBuilderTest, WriteFailureIsReportedAndStopsTheWriting) {
-  const Entries entries = NumberedEntries(2000, 6);
+  const Entries entries = NumberedEntries(2000);
   FailingFile file(5000);
   TableBuilder builder(TableBuilderOptions{}, &file);
   for (const auto& [key, value] : entries) {
@@ -386,7 +360,7 @@ TEST(TableBuilderTest, WriteFailureIsReportedAndStopsTheWriting) {
 
 TEST(TableBuilderTest, FailureWhileFinishingIsReturnedFromFinish) {
   // Everything but the footer goes in; the footer is the last write, and its failure is Finish's.
-  const Entries entries = NumberedEntries(10, 7);
+  const Entries entries = NumberedEntries(10);
   const BuiltTable built = Build(entries);
   FailingFile file(built.bytes.size() - 1);
   TableBuilder builder(TableBuilderOptions{}, &file);
@@ -405,12 +379,14 @@ TEST(TableBuilderTest, AbandonWritesNothingMore) {
   uint64_t size_at_abandon = 0;
   {
     TableBuilder builder(TableBuilderOptions{}, file.get());
-    for (const auto& [key, value] : NumberedEntries(1000, 8)) {
+    for (const auto& [key, value] : NumberedEntries(1000)) {
       builder.Add(key, value);
     }
     size_at_abandon = builder.FileSize();
-    ASSERT_GT(size_at_abandon, uint64_t{0}) << "the test needs some blocks written";
+    // Not an ASSERT: a builder that is not ended aborts when it is destroyed, and an ASSERT would
+    // leave the scope with it still live.
     builder.Abandon();
+    EXPECT_GT(size_at_abandon, uint64_t{0}) << "the test needs some blocks written";
     EXPECT_EQ(builder.FileSize(), size_at_abandon);
   }
   ASSERT_OK(file->Close());

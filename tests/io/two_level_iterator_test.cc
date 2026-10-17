@@ -25,8 +25,6 @@
 namespace shale {
 namespace {
 
-using Entries = std::vector<std::pair<std::string, std::string>>;
-
 // Drains `it` from its current position: the keys, in order.
 std::vector<std::string> Remaining(Iterator* it) {
   std::vector<std::string> keys;
@@ -193,37 +191,6 @@ TEST(TwoLevelIteratorTest, BlockErrorPropagates) {
   EXPECT_TRUE(it->status().IsIOError());
 }
 
-// Serves `limit` entries of keys "a", "b", ..., then becomes invalid with an error, as an iterator
-// does that finds damage after it has returned some entries.
-class FailsAfter final : public Iterator {
- public:
-  FailsAfter(int limit, Status error) : limit_(limit), error_(std::move(error)) {}
-
-  bool Valid() const override { return position_ >= 0 && position_ < limit_; }
-  void SeekToFirst() override { position_ = 0; }
-  void Seek(std::string_view target) override {
-    position_ = 0;
-    while (position_ < limit_ && Key(position_) < target) {
-      ++position_;
-    }
-  }
-  void Next() override { ++position_; }
-  std::string_view key() const override {
-    key_ = Key(position_);
-    return key_;
-  }
-  std::string_view value() const override { return "v"; }
-  Status status() const override { return position_ >= limit_ ? error_ : Status(); }
-
- private:
-  static std::string Key(int i) { return std::string(1, static_cast<char>('a' + i)); }
-
-  const int limit_;
-  const Status error_;
-  int position_ = -1;
-  mutable std::string key_;
-};
-
 TEST(TwoLevelIteratorTest, ErrorAfterSomeEntriesOfABlockIsNotTakenForItsEnd) {
   int calls = 0;
   std::unique_ptr<Iterator> index =
@@ -232,7 +199,7 @@ TEST(TwoLevelIteratorTest, ErrorAfterSomeEntriesOfABlockIsNotTakenForItsEnd) {
       std::move(index), [&](std::string_view index_value) -> std::unique_ptr<Iterator> {
         ++calls;
         if (index_value == "0") {
-          return std::make_unique<FailsAfter>(2, Status::Corruption("bad entry"));
+          return NewFailingIterator({{"a", "v"}, {"b", "v"}}, Status::Corruption("bad entry"));
         }
         return NewVectorIterator({{"x", "v"}, {"y", "v"}});
       });
@@ -264,7 +231,7 @@ TEST(TwoLevelIteratorTest, IndexErrorPropagates) {
   {
     int opened = 0;
     std::unique_ptr<Iterator> it =
-        NewTwoLevelIterator(std::make_unique<FailsAfter>(1, Status::IOError("index read")),
+        NewTwoLevelIterator(NewFailingIterator({{"a", "v"}}, Status::IOError("index read")),
                             [&](std::string_view) -> std::unique_ptr<Iterator> {
                               ++opened;
                               return NewVectorIterator({{"1", "v"}, {"2", "v"}});

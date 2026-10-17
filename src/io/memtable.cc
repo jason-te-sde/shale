@@ -20,9 +20,6 @@ namespace shale {
 
 namespace {
 
-// The size of the tag that ends an internal key.
-constexpr size_t kTagSize = 8;
-
 // The most bytes a varint32 takes.
 constexpr size_t kMaxVarint32Size = 5;
 
@@ -82,7 +79,7 @@ class MemTable::Cursor final : public Iterator {
 
   void Seek(std::string_view target) override {
     // Checked here, and not left to the comparator, which only runs if the memtable has an entry.
-    SHALE_CHECK(target.size() >= kTagSize,
+    SHALE_CHECK(target.size() >= kInternalKeyTagSize,
                 "MemTable iterator: Seek takes an internal key, which is at least 8 bytes");
     // The skip list compares entries, whose keys carry a length in front, so the target gets one.
     SHALE_CHECK(target.size() <= std::numeric_limits<uint32_t>::max(),
@@ -127,10 +124,10 @@ void MemTable::Add(SequenceNumber seq, ValueType type, std::string_view key,
   SHALE_CHECK(type == ValueType::kValue || value.empty(), "a deletion carries no value");
 
   constexpr size_t kMaxLength = std::numeric_limits<uint32_t>::max();
-  SHALE_CHECK(key.size() <= kMaxLength - kTagSize,
+  SHALE_CHECK(key.size() <= kMaxLength - kInternalKeyTagSize,
               "MemTable::Add: key is too long to be length-prefixed");
   SHALE_CHECK(value.size() <= kMaxLength, "MemTable::Add: value is too long to be length-prefixed");
-  const size_t internal_size = key.size() + kTagSize;
+  const size_t internal_size = key.size() + kInternalKeyTagSize;
   const size_t encoded_size = static_cast<size_t>(VarintLength(internal_size)) + internal_size +
                               static_cast<size_t>(VarintLength(value.size())) + value.size();
 
@@ -138,7 +135,7 @@ void MemTable::Add(SequenceNumber seq, ValueType type, std::string_view key,
   char* p = EncodeVarint32(entry, static_cast<uint32_t>(internal_size));
   p = std::copy(key.begin(), key.end(), p);
   EncodeFixed64(p, PackSequenceAndType(seq, type));
-  p += kTagSize;
+  p += kInternalKeyTagSize;
   p = EncodeVarint32(p, static_cast<uint32_t>(value.size()));
   p = std::copy(value.begin(), value.end(), p);
   SHALE_CHECK(p == entry + encoded_size, "MemTable::Add wrote a different size than it allocated");

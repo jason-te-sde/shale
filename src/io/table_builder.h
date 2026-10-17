@@ -34,9 +34,12 @@ struct TableBuilderOptions {
 /// point for every entry, so that a reader's search of it compares the whole key at every probe.
 ///
 /// A write that fails makes the builder's status an error, and it writes nothing more: the file is
-/// not a table, and the caller discards it. A builder has to be ended by Finish() or Abandon();
-/// destroying one that was neither ends the process, because the file it leaves looks like a table
-/// that was cut short, which is the worst kind of damage to meet later.
+/// not a table, and the caller discards it. A builder has to be ended by Finish() or Abandon().
+/// Destroying one that was neither ends the process. That is not because the file would pass for
+/// a table: a table cut short has no footer, and Table::Open() refuses it. It is because a builder
+/// that is dropped half-way is a path of the caller's that neither finished its file nor gave it
+/// up, and the caller that finds out by being stopped at once has a mistake it can see. A caller
+/// that leaves on an error path therefore calls Abandon() first.
 ///
 /// It does not own the file, and never syncs or closes it. It is not thread-safe.
 class TableBuilder {

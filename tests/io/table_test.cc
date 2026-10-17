@@ -21,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -32,6 +33,7 @@
 #include "shale/env.h"
 #include "shale/iterator.h"
 #include "shale/status.h"
+#include "testkit/fault_env.h"
 #include "testkit/test_util.h"
 #include "util/coding.h"
 #include "util/crc32c.h"
@@ -41,31 +43,21 @@
 namespace shale {
 namespace {
 
-using Entries = std::vector<std::pair<std::string, std::string>>;
-
-std::string IKey(std::string_view user_key, SequenceNumber sequence,
-                 ValueType type = ValueType::kValue) {
-  std::string key;
-  AppendInternalKey(&key, ParsedInternalKey{user_key, sequence, type});
-  return key;
-}
-
-std::string UserKey(int i) {
-  char buf[16];
-  std::snprintf(buf, sizeof(buf), "k%06d", i);
-  return buf;
-}
-
-std::string ValueOf(int i) { return "value-" + std::to_string(i); }
-
-// Entries for user keys "k000000" to "k<n-1>", the key i at sequence number i + 1.
-Entries NumberedEntries(int n) {
-  Entries entries;
-  for (int i = 0; i < n; ++i) {
-    entries.emplace_back(IKey(UserKey(i), static_cast<SequenceNumber>(i) + 1), ValueOf(i));
-  }
-  return entries;
-}
+// The sweeps over every byte of a table are single-threaded, so ThreadSanitizer has nothing to find
+// in them and slows them down about tenfold. Under it they visit every 11th byte, which still puts
+// damage in every block, trailer and the footer; everywhere else they visit all of them.
+#if defined(__SANITIZE_THREAD__)
+#define SHALE_TEST_UNDER_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define SHALE_TEST_UNDER_TSAN 1
+#endif
+#endif
+#ifdef SHALE_TEST_UNDER_TSAN
+constexpr size_t kSweepStride = 11;
+#else
+constexpr size_t kSweepStride = 1;
+#endif
 
 // What a full iteration returns, and how it ended.
 struct Drained {
@@ -162,6 +154,25 @@ Lookup Get(const Table& table, std::string_view user_key, SequenceNumber sequenc
   lookup.status = table.Get(options, IKey(user_key, sequence, kValueTypeForSeek), &lookup.result);
   return lookup;
 }
+
+// A Table is made by Open(), which gives it to a shared pointer. One made any other way would
+// throw from shared_from_this() the first time an iterator was asked for, and nothing under src/
+// throws, so the way in is closed at compile time: the constructor takes a type that is private to
+// Table, which no other code can name. The check is a concept, since an access error is a failure
+// of substitution, and it is tried on a class that does have a public type of that name, so that a
+// check that could not fail would show.
+template <typename T>
+concept NamesPrivateTag = requires { typename T::PrivateTag; };
+
+struct HasPublicTag {
+  struct PrivateTag {};
+};
+
+static_assert(NamesPrivateTag<HasPublicTag>, "the check can tell a public tag from a private one");
+static_assert(!NamesPrivateTag<Table>,
+              "Table::PrivateTag must be private, or anyone can build a Table");
+static_assert(!std::is_default_constructible_v<Table>);
+static_assert(!std::is_copy_constructible_v<Table>);
 
 TEST_F(TableTest, IterateAndSeek) {
   const Entries entries = NumberedEntries(10000);
@@ -715,6 +726,67 @@ TEST_F(TableTest, CorruptBlockIsNotCached) {
   EXPECT_EQ(cache.TotalCharge(), size_t{0});
 }
 
+TEST_F(TableTest, UnverifiedReadDoesNotLeaveAnUnverifiedBlockInTheCache) {
+  const std::string stored(40, 'v');
+  Entries entries;
+  entries.emplace_back(IKey("a", 1), stored);
+  entries.emplace_back(IKey("b", 2), "other");
+  BuildTable("/good.sst", entries);
+  std::string bytes = ReadFile("/good.sst");
+  const size_t at = bytes.find(stored);
+  ASSERT_NE(at, std::string::npos);
+  bytes[at + 10] = static_cast<char>(bytes[at + 10] ^ 0x01);  // inside the value
+  WriteFile("/bad.sst", bytes);
+
+  BlockCache cache(1 << 20);
+  std::shared_ptr<Table> table;
+  ASSERT_OK(OpenTable("/bad.sst", &cache, &table));
+  TableReadOptions unverified;
+  unverified.verify_checksums = false;
+
+  // The reader that asked for no checking gets what is in the file, changed byte and all.
+  const Lookup first = Get(*table, "a", kMaxSequenceNumber, unverified);
+  ASSERT_OK(first.status);
+  ASSERT_EQ(first.result.kind, TableGetResult::Kind::kFound);
+  EXPECT_NE(first.result.value, stored);
+  EXPECT_EQ(cache.TotalCharge(), size_t{0}) << "a block that was not checked is not kept";
+
+  // A reader that asks for checking is not given that block by the cache.
+  const Lookup second = Get(*table, "a", kMaxSequenceNumber);
+  EXPECT_TRUE(second.status.IsCorruption()) << second.status.ToString();
+  EXPECT_NE(second.result.kind, TableGetResult::Kind::kFound)
+      << "a value that was never stored came back as found: " << second.result.value;
+
+  // The same for iterators, in either order.
+  {
+    std::unique_ptr<Iterator> it = table->NewIterator(unverified);
+    EXPECT_EQ(Drain(it.get()).entries.size(), entries.size());
+  }
+  EXPECT_EQ(cache.TotalCharge(), size_t{0});
+  {
+    std::unique_ptr<Iterator> it = table->NewIterator({});
+    const Drained drained = Drain(it.get());
+    EXPECT_TRUE(drained.status.IsCorruption()) << drained.status.ToString();
+    EXPECT_TRUE(drained.entries.empty());
+  }
+}
+
+TEST_F(TableTest, UnverifiedReadStillUsesABlockThatWasVerified) {
+  // The other direction costs nothing and is kept: a block a verifying read cached has been
+  // checked, so a read that does not check may use it.
+  BlockCache cache(1 << 20);
+  const std::shared_ptr<Table> table = BuildAndOpen(NumberedEntries(2000), &cache);
+  ASSERT_NE(table, nullptr);
+  ASSERT_OK(Get(*table, "k000100", kMaxSequenceNumber).status);
+  const uint64_t reads = table->data_block_reads();
+  TableReadOptions unverified;
+  unverified.verify_checksums = false;
+  const Lookup got = Get(*table, "k000100", kMaxSequenceNumber, unverified);
+  ASSERT_OK(got.status);
+  EXPECT_EQ(got.result.value, ValueOf(100));
+  EXPECT_EQ(table->data_block_reads(), reads);
+}
+
 TEST_F(TableTest, TruncatedFileIsCorruption) {
   const uint64_t size = BuildTable("/t.sst", NumberedEntries(1000));
   const std::string bytes = ReadFile("/t.sst");
@@ -768,18 +840,83 @@ TEST_F(TableTest, RandomBytesAreCorruption) {
   }
 }
 
-TEST_F(TableTest, OpenReportsAnErrorFromTheFileAsItIs) {
-  // A file that cannot be read is an IO error, not a corrupt table: the table may be fine.
-  class BrokenFile final : public RandomAccessFile {
-   public:
-    Status Read(uint64_t, size_t, std::string_view*, char*) const override {
-      return Status::IOError("read failed");
+// A table in a FaultInjectionEnv, so that a read of its file can be made to fail. The file is
+// sound: what fails is the disk, and a table that cannot be read is not a table that is damaged.
+class TableIOErrorTest : public testing::Test {
+ protected:
+  void SetUp() override {
+    std::unique_ptr<WritableFile> file;
+    ASSERT_OK(env_.NewWritableFile("/t.sst", &file));
+    TableBuilderOptions options;
+    options.block_size = 512;
+    TableBuilder builder(options, file.get());
+    for (const auto& [key, value] : NumberedEntries(500)) {
+      builder.Add(key, value);
     }
-  };
+    ASSERT_OK(builder.Finish());
+    ASSERT_OK(file->Close());
+    ASSERT_OK(env_.GetFileSize("/t.sst", &size_));
+  }
+
+  Status OpenTable(BlockCache* cache, std::shared_ptr<Table>* table) {
+    std::unique_ptr<RandomAccessFile> file;
+    Status s = env_.NewRandomAccessFile("/t.sst", &file);
+    if (!s.ok()) {
+      return s;
+    }
+    return Table::Open(std::move(file), size_, 1, cache, table);
+  }
+
+  FaultInjectionEnv env_{1};
+  uint64_t size_ = 0;
+};
+
+TEST_F(TableIOErrorTest, FailedReadWhileOpeningIsAnIOError) {
+  // Open reads the footer, then the index block, then the filter block. A failure of any of them
+  // is the disk's, whatever the table is.
+  for (int reads_before = 0; reads_before < 3; ++reads_before) {
+    env_.FailOpAfter(FaultInjectionEnv::Op::kRead, reads_before);
+    std::shared_ptr<Table> table;
+    const Status s = OpenTable(nullptr, &table);
+    EXPECT_TRUE(s.IsIOError()) << "failure of read " << reads_before << ": " << s.ToString();
+    EXPECT_EQ(table, nullptr);
+    env_.ClearFaults();
+  }
   std::shared_ptr<Table> table;
-  const Status s = Table::Open(std::make_unique<BrokenFile>(), 1000, 1, nullptr, &table);
-  EXPECT_TRUE(s.IsIOError()) << s.ToString();
-  EXPECT_EQ(table, nullptr);
+  ASSERT_OK(OpenTable(nullptr, &table)) << "and the table opens when the disk does not fail";
+}
+
+TEST_F(TableIOErrorTest, FailedReadInGetIsAnIOErrorAndNothingIsRemembered) {
+  BlockCache cache(1 << 20);
+  std::shared_ptr<Table> table;
+  ASSERT_OK(OpenTable(&cache, &table));
+
+  env_.FailOpAfter(FaultInjectionEnv::Op::kRead, 0);
+  TableGetResult result;
+  const Status failed = table->Get({}, IKey(UserKey(250), kMaxSequenceNumber), &result);
+  EXPECT_TRUE(failed.IsIOError()) << failed.ToString();
+  EXPECT_NE(result.kind, TableGetResult::Kind::kFound);
+  EXPECT_EQ(cache.TotalCharge(), size_t{0});
+
+  // The failure was one read; the next lookup of the same key reads the block and finds it.
+  ASSERT_OK(table->Get({}, IKey(UserKey(250), kMaxSequenceNumber), &result));
+  EXPECT_EQ(result.kind, TableGetResult::Kind::kFound);
+  EXPECT_EQ(result.value, ValueOf(250));
+}
+
+TEST_F(TableIOErrorTest, FailedReadInAnIteratorIsAnIOError) {
+  std::shared_ptr<Table> table;
+  ASSERT_OK(OpenTable(nullptr, &table));
+  // The first read of the iteration succeeds and a later one fails.
+  env_.FailOpAfter(FaultInjectionEnv::Op::kRead, 2);
+  std::unique_ptr<Iterator> it = table->NewIterator({});
+  const Drained drained = Drain(it.get());
+  EXPECT_TRUE(drained.status.IsIOError()) << drained.status.ToString();
+  EXPECT_FALSE(drained.entries.empty()) << "what came before the failure was returned";
+  EXPECT_LT(drained.entries.size(), size_t{500});
+  // And it is the end: the iterator does not skip the block that failed.
+  const Entries all = NumberedEntries(500);
+  EXPECT_TRUE(std::equal(drained.entries.begin(), drained.entries.end(), all.begin()));
 }
 
 // ---- Tables with checksums that pass and contents that are wrong ----
@@ -1094,6 +1231,123 @@ TEST_F(HostileTableTest, DataBlockThatIsNotABlock) {
   }
 }
 
+// A table of the blocks given, each with the key the index names it by. The blocks are intact and
+// their checksums are right; what is wrong with them is the order of their keys, which only the
+// reader's own checks can see.
+class OrderTableTest : public HostileTableTest {
+ protected:
+  std::string TableOf(const std::vector<std::pair<std::string, Entries>>& blocks) {
+    RawTable raw;
+    std::vector<std::pair<std::string, BlockHandle>> index_entries;
+    for (const auto& [index_key, entries] : blocks) {
+      index_entries.emplace_back(index_key, raw.AddEntries(entries, 16));
+    }
+    const BlockHandle filter = raw.AddBlock("");
+    const BlockHandle index = raw.AddIndex(index_entries);
+    return raw.Finish(filter, index);
+  }
+
+  // Iterates the table in `bytes` and returns what came back before the iteration stopped.
+  Drained Iterate(const std::string& bytes) {
+    std::shared_ptr<Table> table;
+    EXPECT_OK(Open(bytes, &table));
+    Drained drained;
+    if (table != nullptr) {
+      std::unique_ptr<Iterator> it = table->NewIterator({});
+      drained = Drain(it.get());
+    }
+    return drained;
+  }
+};
+
+TEST_F(OrderTableTest, KeysOutOfOrderInsideABlockEndTheIteration) {
+  const Entries block = {{IKey("b", 1), "vb"}, {IKey("a", 1), "va"}};
+  const Drained drained = Iterate(TableOf({{IKey("b", 1), block}}));
+  EXPECT_TRUE(drained.status.IsCorruption()) << drained.status.ToString();
+  EXPECT_EQ(drained.entries, (Entries{{IKey("b", 1), "vb"}}))
+      << "up to the key that is out of order";
+
+  // A repeated key is out of order too: the keys of a table are strictly increasing.
+  const Entries twice = {{IKey("a", 1), "x"}, {IKey("a", 1), "y"}};
+  const Drained repeated = Iterate(TableOf({{IKey("a", 1), twice}}));
+  EXPECT_TRUE(repeated.status.IsCorruption());
+  EXPECT_EQ(repeated.entries.size(), size_t{1});
+}
+
+TEST_F(OrderTableTest, FirstKeyOfABlockNotAfterTheEndOfThePreviousBlockEndsTheIteration) {
+  // The second block starts with "b", which is before the "c" the first block ends at.
+  const Drained drained =
+      Iterate(TableOf({{IKey("c", 1), {{IKey("a", 1), "va"}, {IKey("c", 1), "vc"}}},
+                       {IKey("d", 1), {{IKey("b", 1), "vb"}, {IKey("d", 1), "vd"}}}}));
+  EXPECT_TRUE(drained.status.IsCorruption()) << drained.status.ToString();
+  EXPECT_EQ(drained.entries, (Entries{{IKey("a", 1), "va"}, {IKey("c", 1), "vc"}}));
+
+  // The same key at the end of one block and the start of the next.
+  const Drained equal =
+      Iterate(TableOf({{IKey("c", 1), {{IKey("a", 1), "va"}, {IKey("c", 1), "vc"}}},
+                       {IKey("d", 1), {{IKey("c", 1), "vc"}, {IKey("d", 1), "vd"}}}}));
+  EXPECT_TRUE(equal.status.IsCorruption());
+  EXPECT_EQ(equal.entries.size(), size_t{2});
+}
+
+TEST_F(OrderTableTest, KeyAfterTheIndexKeyOfItsBlockEndsTheIteration) {
+  // The index says the block ends at "m", and it holds "z".
+  const Drained drained =
+      Iterate(TableOf({{IKey("m", 1), {{IKey("a", 1), "va"}, {IKey("z", 1), "vz"}}}}));
+  EXPECT_TRUE(drained.status.IsCorruption()) << drained.status.ToString();
+  EXPECT_EQ(drained.entries, (Entries{{IKey("a", 1), "va"}}));
+}
+
+TEST_F(OrderTableTest, SeekIntoABlockChecksItToo) {
+  const std::string bytes = TableOf({{IKey("c", 1), {{IKey("a", 1), "va"}, {IKey("c", 1), "vc"}}},
+                                     {IKey("m", 1), {{IKey("e", 1), "ve"}, {IKey("z", 1), "vz"}}}});
+  std::shared_ptr<Table> table;
+  ASSERT_OK(Open(bytes, &table));
+  std::unique_ptr<Iterator> it = table->NewIterator({});
+  it->Seek(IKey("d", kMaxSequenceNumber));
+  ASSERT_TRUE(it->Valid());
+  EXPECT_EQ(it->key(), IKey("e", 1))
+      << "the seek is sent to the second block and finds its first key";
+  it->Next();
+  EXPECT_FALSE(it->Valid()) << "and the key after it is past the end the index names";
+  EXPECT_TRUE(it->status().IsCorruption());
+}
+
+TEST_F(OrderTableTest, SeekThatLandsBeforeItsTargetEndsTheIteration) {
+  // The first block says it ends at "e" and holds only "a" and "c", so a seek to "d" finds nothing
+  // in it and moves on to the second block, whose first key is "b". The seek was for "d" or after.
+  const std::string bytes = TableOf({{IKey("e", 1), {{IKey("a", 1), "va"}, {IKey("c", 1), "vc"}}},
+                                     {IKey("m", 1), {{IKey("b", 1), "vb"}, {IKey("m", 1), "vm"}}}});
+  std::shared_ptr<Table> table;
+  ASSERT_OK(Open(bytes, &table));
+  std::unique_ptr<Iterator> it = table->NewIterator({});
+  it->Seek(IKey("d", kMaxSequenceNumber));
+  EXPECT_FALSE(it->Valid());
+  EXPECT_TRUE(it->status().IsCorruption()) << it->status().ToString();
+}
+
+TEST_F(OrderTableTest, WellOrderedBlocksAreNotRefused) {
+  // The control: the same tables with their keys in order are read to the end.
+  const Entries first = {{IKey("a", 1), "va"}, {IKey("c", 1), "vc"}};
+  const Entries second = {{IKey("d", 1), "vd"}, {IKey("m", 1), "vm"}};
+  const Drained drained = Iterate(TableOf({{IKey("c", 1), first}, {IKey("m", 1), second}}));
+  EXPECT_OK(drained.status);
+  Entries expected = first;
+  expected.insert(expected.end(), second.begin(), second.end());
+  EXPECT_EQ(drained.entries, expected);
+}
+
+TEST_F(OrderTableTest, GetRefusesAnEntryAfterTheIndexKeyOfItsBlock) {
+  // The block ends, by its index entry, at "a" at sequence 5, and holds "a" at sequence 3, which
+  // sorts after that. A lookup at sequence 9 is sent to this block and the first entry it finds is
+  // that one: its user key is the one asked for, and nothing else in the table says it is wrong.
+  std::shared_ptr<Table> table;
+  ASSERT_OK(Open(TableOf({{IKey("a", 5), {{IKey("a", 3), "v3"}}}}), &table));
+  const Lookup got = Get(*table, "a", 9);
+  EXPECT_TRUE(got.status.IsCorruption()) << got.status.ToString();
+  EXPECT_NE(got.result.kind, TableGetResult::Kind::kFound);
+}
+
 TEST_F(HostileTableTest, FilterThatCannotBeReadFailsOpen) {
   // A filter the reader cannot make sense of says nothing about the key, and the lookup goes on to
   // the block: a damaged filter costs a read and not a key that is there.
@@ -1192,6 +1446,12 @@ class TableDamageTest : public TableTest {
     EXPECT_TRUE(drained.status.ok() || drained.status.IsCorruption())
         << what << ": " << drained.status.ToString();
     bool found_damage = !drained.status.ok();
+    // Whatever the bytes are, what an iteration returns before it stops is in strictly increasing
+    // order: a compaction feeds it to a TableBuilder, which aborts on a key that is not.
+    for (size_t i = 1; i < drained.entries.size(); ++i) {
+      ASSERT_LT(CompareInternalKey(drained.entries[i - 1].first, drained.entries[i].first), 0)
+          << what << ": entry " << i << " is not after the one before it";
+    }
     if (checks.must_match_written) {
       ASSERT_LE(drained.entries.size(), entries_.size()) << what;
       for (size_t i = 0; i < drained.entries.size(); ++i) {
@@ -1227,8 +1487,18 @@ class TableDamageTest : public TableTest {
               << what << ": " << user_key << "?";
         }
       }
-      it->Seek(IKey(user_key, kMaxSequenceNumber));
+      const std::string target = IKey(user_key, kMaxSequenceNumber);
+      it->Seek(target);
       EXPECT_TRUE(it->status().ok() || it->status().IsCorruption()) << what;
+      if (it->Valid()) {
+        // A seek lands at or after its target, and what follows is after that.
+        const std::string landed(it->key());
+        EXPECT_GE(CompareInternalKey(landed, target), 0) << what << ": seek to " << user_key;
+        it->Next();
+        if (it->Valid()) {
+          EXPECT_GT(CompareInternalKey(it->key(), landed), 0) << what << ": after " << user_key;
+        }
+      }
     }
     if (checks.must_find_damage) {
       EXPECT_TRUE(found_damage) << what << ": the table opened and read as if nothing were wrong";
@@ -1263,7 +1533,7 @@ TEST_F(TableDamageTest, AnyChangedByteIsFoundAndNeverReadAsAnotherValue) {
   verified.must_find_damage = true;
   ReadChecks unverified;
   unverified.verify = false;
-  for (size_t i = 0; i < bytes_.size(); ++i) {
+  for (size_t i = 0; i < bytes_.size(); i += kSweepStride) {
     for (const int mask : {0x01, 0xff}) {
       std::string damaged = bytes_;
       Flip(&damaged, i, mask);
@@ -1301,7 +1571,7 @@ TEST_F(TableDamageTest, DamageWithTheChecksumMadeRightAgain) {
   ReadChecks checks;
   size_t variants = 0;
   for (const BlockHandle& block : blocks_) {
-    for (size_t at = 0; at < block.size; ++at) {
+    for (size_t at = 0; at < block.size; at += kSweepStride) {
       for (const int mask : {0x01, 0xff}) {
         std::string damaged = bytes_;
         Flip(&damaged, static_cast<size_t>(block.offset) + at, mask);
@@ -1316,7 +1586,7 @@ TEST_F(TableDamageTest, DamageWithTheChecksumMadeRightAgain) {
       }
     }
   }
-  EXPECT_GT(variants, size_t{1000}) << "the test is meant to damage a lot";
+  EXPECT_GT(variants, size_t{1000} / kSweepStride) << "the test is meant to damage a lot";
 }
 
 TEST_F(TableDamageTest, IndexBytesReplacedAndResealedAreNeverFollowedOutOfTheFile) {
@@ -1324,7 +1594,7 @@ TEST_F(TableDamageTest, IndexBytesReplacedAndResealedAreNeverFollowedOutOfTheFil
   // replaced by values that set a continuation bit, clear it, or are zero, trailer made right.
   const BlockHandle index = blocks_.back();
   ReadChecks checks;
-  for (size_t at = 0; at < static_cast<size_t>(index.size); ++at) {
+  for (size_t at = 0; at < static_cast<size_t>(index.size); at += kSweepStride) {
     for (const int replacement : {0x00, 0x7f, 0x80, 0xff}) {
       std::string damaged = bytes_;
       damaged[static_cast<size_t>(index.offset) + at] = static_cast<char>(replacement);

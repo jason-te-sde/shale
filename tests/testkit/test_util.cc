@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -22,16 +23,21 @@ namespace {
 
 class VectorIterator final : public Iterator {
  public:
-  using Entries = std::vector<std::pair<std::string, std::string>>;
-
-  VectorIterator(Entries entries, Status status)
-      : entries_(std::move(entries)), status_(std::move(status)), position_(entries_.size()) {}
+  VectorIterator(Entries entries, Status status, Status end_status)
+      : entries_(std::move(entries)),
+        status_(std::move(status)),
+        end_status_(std::move(end_status)),
+        position_(entries_.size()) {}
 
   bool Valid() const override { return position_ < entries_.size(); }
 
-  void SeekToFirst() override { position_ = 0; }
+  void SeekToFirst() override {
+    positioned_ = true;
+    position_ = 0;
+  }
 
   void Seek(std::string_view target) override {
+    positioned_ = true;
     size_t low = 0;
     size_t high = entries_.size();
     while (low < high) {
@@ -60,12 +66,19 @@ class VectorIterator final : public Iterator {
     return entries_[position_].second;
   }
 
-  Status status() const override { return status_; }
+  Status status() const override {
+    if (!status_.ok()) {
+      return status_;
+    }
+    return positioned_ && position_ >= entries_.size() ? end_status_ : Status();
+  }
 
  private:
   const Entries entries_;
-  const Status status_;
-  size_t position_;  // entries_.size() when the iterator is not valid
+  const Status status_;      // reported always
+  const Status end_status_;  // reported once the iterator has run off its entries
+  size_t position_;          // entries_.size() when the iterator is not valid
+  bool positioned_ = false;  // a seek has been made
 };
 
 }  // namespace
@@ -93,9 +106,34 @@ std::string RandomBinaryString(Random* rnd, size_t len) {
   return result;
 }
 
-std::unique_ptr<Iterator> NewVectorIterator(std::vector<std::pair<std::string, std::string>> sorted,
-                                            Status status) {
-  return std::make_unique<VectorIterator>(std::move(sorted), std::move(status));
+std::string IKey(std::string_view user_key, SequenceNumber sequence, ValueType type) {
+  std::string key;
+  AppendInternalKey(&key, ParsedInternalKey{user_key, sequence, type});
+  return key;
+}
+
+std::string UserKey(int i) {
+  char buf[16];
+  std::snprintf(buf, sizeof(buf), "k%06d", i);
+  return buf;
+}
+
+std::string ValueOf(int i) { return "value-" + std::to_string(i); }
+
+Entries NumberedEntries(int n) {
+  Entries entries;
+  for (int i = 0; i < n; ++i) {
+    entries.emplace_back(IKey(UserKey(i), static_cast<SequenceNumber>(i) + 1), ValueOf(i));
+  }
+  return entries;
+}
+
+std::unique_ptr<Iterator> NewVectorIterator(Entries sorted, Status status) {
+  return std::make_unique<VectorIterator>(std::move(sorted), std::move(status), Status());
+}
+
+std::unique_ptr<Iterator> NewFailingIterator(Entries sorted, Status error) {
+  return std::make_unique<VectorIterator>(std::move(sorted), Status(), std::move(error));
 }
 
 std::string NewTempDir(const std::string& prefix) {
