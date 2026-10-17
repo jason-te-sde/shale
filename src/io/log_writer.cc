@@ -49,6 +49,7 @@ Status Writer::AppendFragments(std::string_view record) {
         if (!s.ok()) {
           return s;
         }
+        bytes_written_ += leftover;
       }
       block_offset_ = 0;
     }
@@ -90,8 +91,14 @@ Status Writer::EmitPhysicalRecord(RecordType type, const char* data, size_t leng
   EncodeFixed32(header.data(), crc32c::Mask(crc));
 
   Status s = dest_->Append(std::string_view(header.data(), header.size()));
-  if (s.ok() && length > 0) {
-    s = dest_->Append(std::string_view(data, length));
+  if (s.ok()) {
+    bytes_written_ += header.size();
+    if (length > 0) {
+      s = dest_->Append(std::string_view(data, length));
+      if (s.ok()) {
+        bytes_written_ += length;
+      }
+    }
   }
   block_offset_ += kHeaderSize + length;
   return s;
