@@ -29,7 +29,7 @@ namespace {
 
 using Op = FaultInjectionEnv::Op;
 
-constexpr size_t kOpCount = static_cast<size_t>(Op::kNewRandomAccess) + 1;
+constexpr size_t kOpCount = static_cast<size_t>(Op::kFlush) + 1;
 
 size_t IndexOf(Op op) {
   const auto index = static_cast<size_t>(op);
@@ -75,12 +75,65 @@ constexpr uint64_t kFaultStream = 0x6661756c74ULL;
 
 }  // namespace
 
-// One file's contents, standing for a POSIX inode: the live view, the durable view and every open
-// handle share it. Everything in it is guarded by the mutex of the FaultState that made it.
-struct Inode {
+// What the disk holds for one file: the bytes that reached it, and how many leading ones are
+// durable. Everything in it is guarded by the mutex of the FaultState that made it.
+struct File {
   std::string data;
   // How many leading bytes of `data` are durable.
   uint64_t synced_size = 0;
+  // True once a Sync() of this file has failed. From then on a Sync() reports success and makes
+  // nothing durable: `synced_size` never moves again. See FaultState::Sync().
+  bool sync_failed = false;
+};
+
+// What a handle is open on, standing for a POSIX inode: the file a name had when the handle was
+// opened. Opening the name for write puts a new, empty File behind the same Inode, so that handles
+// already open on it find it emptied, as O_TRUNC makes them; the File it had stays in the durable
+// view until the directory is synced.
+struct Inode {
+  std::shared_ptr<File> file;
+};
+
+using DurableView = std::map<std::string, std::shared_ptr<File>>;
+
+// One change to a directory that no SyncDir() has made durable yet.
+struct NamespaceOp {
+  enum class Kind {
+    kSet,     // `name` now names `file`: a creation, or an open for write that emptied the file.
+    kRemove,  // `name` is gone.
+    kRename,  // `name` is gone and `target` names `file`, in one step: both are in one directory.
+  };
+
+  static NamespaceOp Set(std::string name, std::shared_ptr<File> file) {
+    return NamespaceOp{Kind::kSet, std::move(name), std::string(), std::move(file)};
+  }
+  static NamespaceOp Remove(std::string name) {
+    return NamespaceOp{Kind::kRemove, std::move(name), std::string(), nullptr};
+  }
+  static NamespaceOp Rename(std::string name, std::string target, std::shared_ptr<File> file) {
+    return NamespaceOp{Kind::kRename, std::move(name), std::move(target), std::move(file)};
+  }
+
+  // Makes the change in `*view`.
+  void ApplyTo(DurableView* view) const {
+    switch (kind) {
+      case Kind::kSet:
+        (*view)[name] = file;
+        break;
+      case Kind::kRemove:
+        view->erase(name);
+        break;
+      case Kind::kRename:
+        view->erase(name);
+        (*view)[target] = file;
+        break;
+    }
+  }
+
+  Kind kind;
+  std::string name;
+  std::string target;
+  std::shared_ptr<File> file;
 };
 
 // Everything one FaultInjectionEnv knows. Handles hold a share of it, so that one may outlive the
@@ -126,16 +179,17 @@ class FaultState {
     if (dirs_.count(NormalizeDir(fname)) != 0) {
       return Status::IOError("open " + fname, "Is a directory");
     }
-    auto [entry, created] = files_.try_emplace(fname);
-    if (created) {
-      entry->second = std::make_shared<Inode>();
+    const auto it = files_.find(fname);
+    if (it == files_.end()) {
+      *inode = CreateFile(fname);
     } else {
-      // The same file, emptied, as O_TRUNC does: handles already open on it see it empty. The
-      // emptying counts as durable, see the class description.
-      entry->second->data.clear();
-      entry->second->synced_size = 0;
+      // A new, empty file behind the same Inode, which is what O_TRUNC looks like to the handles
+      // open on it. The old file is still what the durable view has until the directory is
+      // synced, so a power loss may bring it back, and its bytes with it.
+      it->second->file = std::make_shared<File>();
+      LogChange(NamespaceOp::Set(fname, it->second->file));
+      *inode = it->second;
     }
-    *inode = entry->second;
     *epoch = epoch_;
     NoteSuccess(Op::kNewWritable);
     return Status::OK();
@@ -182,6 +236,7 @@ class FaultState {
     if (files_.erase(fname) == 0) {
       return NoSuchEntry("remove", fname);
     }
+    LogChange(NamespaceOp::Remove(fname));
     NoteSuccess(Op::kRemove);
     return Status::OK();
   }
@@ -217,7 +272,7 @@ class FaultState {
                  ? Status::IOError("get size of " + fname, "Is a directory")
                  : NoSuchEntry("get size of", fname);
     }
-    *size = it->second->data.size();
+    *size = it->second->file->data.size();
     return Status::OK();
   }
 
@@ -236,11 +291,21 @@ class FaultState {
       return Status::IOError("rename " + what, "Is a directory");
     }
     if (src != target) {
+      std::shared_ptr<File> file = source->second->file;
       // Whatever `target` held is dropped from the live view, and lives on in the handles that
       // were open on it and in the durable view, as an unlinked file does until the directory is
       // synced.
       files_[target] = std::move(source->second);
       files_.erase(source);
+      if (ParentOf(src) == ParentOf(target)) {
+        // One step in the one directory's log, so that a power loss keeps the whole rename or none
+        // of it.
+        LogChange(NamespaceOp::Rename(src, target, file));
+      } else {
+        // Two directories, two logs, and a power loss may keep either half or both.
+        LogChange(NamespaceOp::Remove(src));
+        LogChange(NamespaceOp::Set(target, file));
+      }
     }
     NoteSuccess(Op::kRename);
     return Status::OK();
@@ -248,7 +313,6 @@ class FaultState {
 
   Status SyncDir(const std::string& dirname) {
     const std::string normalized = NormalizeDir(dirname);
-    const std::string prefix = PrefixOf(normalized);
     MutexLock lock(&mu_);
     Status s = Inject(Op::kSyncDir, "sync directory", dirname);
     if (!s.ok()) {
@@ -257,19 +321,14 @@ class FaultState {
     if (dirs_.count(normalized) == 0) {
       return NoSuchEntry("open directory", dirname);
     }
-    // Every name directly under the directory in either view: the ones the live view has are made
-    // durable, and the ones it has not any more are made durable as absent. The names are
-    // collected first because the durable map changes as they are applied.
-    std::vector<std::string> names;
-    CollectEntriesOf(files_, prefix, normalized, &names);
-    CollectEntriesOf(durable_, prefix, normalized, &names);
-    for (const std::string& name : names) {
-      const auto live = files_.find(name);
-      if (live != files_.end()) {
-        durable_[name] = live->second;
-      } else {
-        durable_.erase(name);
+    // Every change to the directory so far becomes durable, in the order it was made, and the log
+    // starts again empty. Changes to other directories wait for their own SyncDir().
+    const auto log = logs_.find(normalized);
+    if (log != logs_.end()) {
+      for (const NamespaceOp& op : log->second) {
+        op.ApplyTo(&durable_);
       }
+      logs_.erase(log);
     }
     NoteSuccess(Op::kSyncDir);
     return Status::OK();
@@ -282,9 +341,8 @@ class FaultState {
       return Status::IOError("open lock file " + fname, "Is a directory");
     }
     // Like open(O_CREAT) on POSIX, taking the lock creates the file if it is missing.
-    auto [entry, created] = files_.try_emplace(fname);
-    if (created) {
-      entry->second = std::make_shared<Inode>();
+    if (files_.count(fname) == 0) {
+      CreateFile(fname);
     }
     if (!locks_.insert(fname).second) {
       return Status::IOError("lock " + fname, "already held by another process or handle");
@@ -323,7 +381,10 @@ class FaultState {
 
   // --- Handle operations -------------------------------------------------------------------------
 
-  Status Append(const std::string& fname, uint64_t epoch, Inode* inode, std::string_view data) {
+  // Adds `data` to the handle's buffer, `*buffer`. Nothing reaches the file until the handle
+  // flushes, syncs or closes.
+  Status Append(const std::string& fname, uint64_t epoch, std::string* buffer,
+                std::string_view data) {
     MutexLock lock(&mu_);
     if (epoch != epoch_) {
       return Invalidated("append to", fname);
@@ -332,33 +393,61 @@ class FaultState {
     if (!s.ok()) {
       return s;
     }
-    inode->data.append(data);
+    buffer->append(data);
     NoteSuccess(Op::kAppend);
     return Status::OK();
   }
 
-  // The part of Flush() and Skip() that a handle cannot do on its own: say whether the handle is
-  // still alive.
+  // The part of Skip() that a handle cannot do on its own: say whether the handle is still alive.
   Status CheckAlive(std::string_view operation, const std::string& fname, uint64_t epoch) {
     MutexLock lock(&mu_);
     return epoch == epoch_ ? Status::OK() : Invalidated(operation, fname);
   }
 
-  Status Sync(const std::string& fname, uint64_t epoch, Inode* inode) {
+  // Hands the handle's buffer to the file, where readers see it. A failed Flush hands over nothing.
+  Status Flush(const std::string& fname, uint64_t epoch, Inode* inode, std::string* buffer) {
+    MutexLock lock(&mu_);
+    if (epoch != epoch_) {
+      return Invalidated("flush", fname);
+    }
+    Status s = Inject(Op::kFlush, "flush", fname);
+    if (!s.ok()) {
+      return s;
+    }
+    HandOver(inode, buffer);
+    NoteSuccess(Op::kFlush);
+    return Status::OK();
+  }
+
+  // Flushes, then makes every byte of the file durable.
+  //
+  // A Sync() that fails marks the file: from then on it reports success and makes nothing durable,
+  // whatever it is asked. The Env's documentation says a Sync() that succeeds after a failed one
+  // proves nothing, because some operating systems drop the data the first one failed to write and
+  // then report success for the second. A caller that retries and trusts the result must lose its
+  // bytes here, where a test can see it, and not on a machine that has lost power.
+  Status Sync(const std::string& fname, uint64_t epoch, Inode* inode, std::string* buffer) {
     MutexLock lock(&mu_);
     if (epoch != epoch_) {
       return Invalidated("sync", fname);
     }
     Status s = Inject(Op::kSync, "sync", fname);
     if (!s.ok()) {
+      inode->file->sync_failed = true;
       return s;
     }
-    inode->synced_size = inode->data.size();
+    HandOver(inode, buffer);
+    File& file = *inode->file;
+    if (!file.sync_failed) {
+      file.synced_size = file.data.size();
+    }
     NoteSuccess(Op::kSync);
     return Status::OK();
   }
 
-  Status Close(const std::string& fname, uint64_t epoch) {
+  // Flushes, and ends the handle's use of the file. A failed Close() flushes nothing, and the
+  // handle is gone either way, so what it buffered is lost.
+  Status Close(const std::string& fname, uint64_t epoch, Inode* inode, std::string* buffer) {
     MutexLock lock(&mu_);
     if (epoch != epoch_) {
       return Invalidated("close", fname);
@@ -367,6 +456,7 @@ class FaultState {
     if (!s.ok()) {
       return s;
     }
+    HandOver(inode, buffer);
     NoteSuccess(Op::kClose);
     return Status::OK();
   }
@@ -384,10 +474,11 @@ class FaultState {
     if (!s.ok()) {
       return s;
     }
-    if (offset < inode.data.size()) {
-      const size_t available = inode.data.size() - static_cast<size_t>(offset);
+    const std::string& data = inode.file->data;
+    if (offset < data.size()) {
+      const size_t available = data.size() - static_cast<size_t>(offset);
       *count = std::min(n, available);
-      std::memcpy(scratch, inode.data.data() + static_cast<size_t>(offset), *count);
+      std::memcpy(scratch, data.data() + static_cast<size_t>(offset), *count);
     }
     if (*count > 0 && Chance(corruption_probability_)) {
       FlipOneBit(scratch, *count);
@@ -411,22 +502,43 @@ class FaultState {
     if (kind == Crash::kProcess) {
       return;
     }
-    // Back to what the directories had made durable.
-    files_ = durable_;
-    // The names are visited in order, and one draw is made per file that has unsynced bytes, so a
-    // seed always loses the same bytes of the same files. A file that is under two names in the
-    // durable view (a rename across directories that was synced on one side only) is visited twice;
-    // the second visit finds nothing unsynced, because the first made what survived durable.
-    for (const auto& entry : files_) {
-      Inode& inode = *entry.second;
-      const uint64_t unsynced = inode.data.size() - inode.synced_size;
+    // Back to what the directories had made durable, plus a prefix of what they had not. Each
+    // directory keeps a prefix of its own log, from none of it to all of it, of a length drawn
+    // from the crash stream: a change is never kept without the ones made before it in the same
+    // directory. The directories are taken in name order, and one draw is made for each that has a
+    // log, so a seed always keeps the same changes. Dropping the unsynced keeps no prefix at all.
+    for (const auto& [dir, log] : logs_) {
+      uint64_t kept = 0;
+      if (kind == Crash::kPowerLoss && !log.empty()) {
+        kept = crash_random_.Next() % (log.size() + 1);
+      }
+      for (uint64_t i = 0; i < kept; i++) {
+        log[static_cast<size_t>(i)].ApplyTo(&durable_);
+      }
+    }
+    logs_.clear();
+    // The live view is what is durable now. Its handles are dead, so it gets Inodes of its own.
+    files_.clear();
+    for (const auto& [name, file] : durable_) {
+      auto inode = std::make_shared<Inode>();
+      inode->file = file;
+      files_[name] = std::move(inode);
+    }
+    // What each file keeps. The names are visited in order, and one draw is made per file that has
+    // unsynced bytes, so a seed always loses the same bytes of the same files. A file that is under
+    // two names in the durable view (a rename across directories that was kept on one side only)
+    // is visited twice; the second visit finds nothing unsynced, because the first made what
+    // survived durable. Bytes still in a handle never reached the file, so they are not here.
+    for (const auto& entry : durable_) {
+      File& file = *entry.second;
+      const uint64_t unsynced = file.data.size() - file.synced_size;
       uint64_t kept = 0;
       if (kind == Crash::kPowerLoss && unsynced > 0) {
         kept = crash_random_.Next() % (unsynced + 1);
       }
-      inode.data.resize(static_cast<size_t>(inode.synced_size + kept));
+      file.data.resize(static_cast<size_t>(file.synced_size + kept));
       // What the disk kept is on the disk now.
-      inode.synced_size = inode.data.size();
+      file.synced_size = file.data.size();
     }
   }
 
@@ -475,19 +587,29 @@ class FaultState {
   void SetFileContents(const std::string& fname, std::string data) {
     MutexLock lock(&mu_);
     SHALE_CHECK(dirs_.count(NormalizeDir(fname)) == 0, "SetFileContents on a directory: " + fname);
-    std::shared_ptr<Inode>& inode = files_[fname];
-    if (inode == nullptr) {
-      inode = std::make_shared<Inode>();
+    // A new file, not a change to the old one: the old file may still be the durable view's file
+    // under another name, if it was renamed and the rename was not synced.
+    auto file = std::make_shared<File>();
+    file->data = std::move(data);
+    file->synced_size = file->data.size();
+    auto inode = std::make_shared<Inode>();
+    inode->file = file;
+    files_[fname] = std::move(inode);
+    durable_[fname] = std::move(file);
+    // The name is durable as it is now, so the changes to it that were waiting for a SyncDir()
+    // would only undo it.
+    const auto log = logs_.find(ParentOf(fname));
+    if (log != logs_.end()) {
+      std::erase_if(log->second, [&fname](const NamespaceOp& op) {
+        return op.name == fname || (op.kind == NamespaceOp::Kind::kRename && op.target == fname);
+      });
     }
-    inode->data = std::move(data);
-    inode->synced_size = inode->data.size();
-    durable_[fname] = inode;
   }
 
   std::string FileContents(const std::string& fname) const {
     MutexLock lock(&mu_);
     const auto it = files_.find(fname);
-    return it == files_.end() ? std::string() : it->second->data;
+    return it == files_.end() ? std::string() : it->second->file->data;
   }
 
  private:
@@ -559,19 +681,26 @@ class FaultState {
     return dir != dirs_.end() && dir->starts_with(prefix);
   }
 
-  // Appends the names in `entries` whose parent is `dir` to `*names`. `prefix` is the prefix of
-  // `dir`, which narrows the search to one contiguous run of the ordered map.
-  static void CollectEntriesOf(const std::map<std::string, std::shared_ptr<Inode>>& entries,
-                               const std::string& prefix, const std::string& dir,
-                               std::vector<std::string>* names) {
-    for (auto it = entries.lower_bound(prefix); it != entries.end(); ++it) {
-      if (!it->first.starts_with(prefix)) {
-        break;
-      }
-      if (ParentOf(it->first) == dir) {
-        names->push_back(it->first);
-      }
-    }
+  // Creates an empty file under a name that has none, and makes it the live view's.
+  std::shared_ptr<Inode> CreateFile(const std::string& fname) SHALE_REQUIRES(mu_) {
+    auto inode = std::make_shared<Inode>();
+    inode->file = std::make_shared<File>();
+    files_[fname] = inode;
+    LogChange(NamespaceOp::Set(fname, inode->file));
+    return inode;
+  }
+
+  // Records a change to the live namespace that the durable one does not have yet, in the log of
+  // the directory it was made in.
+  void LogChange(NamespaceOp op) SHALE_REQUIRES(mu_) {
+    const std::string dir = ParentOf(op.name);
+    logs_[dir].push_back(std::move(op));
+  }
+
+  // Moves what a handle buffered into the file it is open on, where readers see it.
+  static void HandOver(Inode* inode, std::string* buffer) {
+    inode->file->data.append(*buffer);
+    buffer->clear();
   }
 
   // Adds the part of `path` after `prefix` to `*names` if it is a single name.
@@ -584,10 +713,13 @@ class FaultState {
   }
 
   mutable Mutex mu_;
-  // The live view of the namespace, and the durable one. They share the files: an Inode is in
-  // both while an entry has been synced, and in one of them while it has not.
+  // The live view of the namespace, and the durable one. The live one maps names to what a handle
+  // can be opened on; the durable one maps them to the files the disk would show after a crash.
   std::map<std::string, std::shared_ptr<Inode>> files_ SHALE_GUARDED_BY(mu_);
-  std::map<std::string, std::shared_ptr<Inode>> durable_ SHALE_GUARDED_BY(mu_);
+  DurableView durable_ SHALE_GUARDED_BY(mu_);
+  // The changes to the live view that the durable view lacks, per directory, oldest first. The
+  // durable view with every log applied in order is the live view.
+  std::map<std::string, std::vector<NamespaceOp>> logs_ SHALE_GUARDED_BY(mu_);
   std::set<std::string> dirs_ SHALE_GUARDED_BY(mu_);
   std::set<std::string> locks_ SHALE_GUARDED_BY(mu_);
   uint64_t now_micros_ SHALE_GUARDED_BY(mu_) = 0;
@@ -686,29 +818,30 @@ class FaultWritableFile final : public WritableFile {
   Status Append(std::string_view data) override {
     const ExclusiveUse::Scope scope(&use_, fname_);
     CheckOpen("Append");
-    return state_->Append(fname_, epoch_, inode_.get(), data);
+    return state_->Append(fname_, epoch_, &buffer_, data);
   }
 
-  // There is no buffer between this handle and the file, so there is nothing to flush; the call
-  // only reports a crash.
   Status Flush() override {
     const ExclusiveUse::Scope scope(&use_, fname_);
     CheckOpen("Flush");
-    return state_->CheckAlive("flush", fname_, epoch_);
+    return state_->Flush(fname_, epoch_, inode_.get(), &buffer_);
   }
 
   Status Sync() override {
     const ExclusiveUse::Scope scope(&use_, fname_);
     CheckOpen("Sync");
-    return state_->Sync(fname_, epoch_, inode_.get());
+    return state_->Sync(fname_, epoch_, inode_.get(), &buffer_);
   }
 
   Status Close() override {
     const ExclusiveUse::Scope scope(&use_, fname_);
     CheckOpen("Close");
-    // Closed whatever the outcome, as the Env's documentation says.
+    // Closed whatever the outcome, as the Env's documentation says, and so whatever the buffer
+    // still holds after a failure is gone.
     closed_ = true;
-    return state_->Close(fname_, epoch_);
+    const Status s = state_->Close(fname_, epoch_, inode_.get(), &buffer_);
+    buffer_.clear();
+    return s;
   }
 
  private:
@@ -723,6 +856,9 @@ class FaultWritableFile final : public WritableFile {
   const std::string fname_;
   const std::shared_ptr<Inode> inode_;
   const uint64_t epoch_;
+  // The bytes appended and not yet flushed. A handle that is dropped, or that a crash invalidates,
+  // takes them with it. Only the thread using the handle touches it.
+  std::string buffer_;
   bool closed_ = false;
   ExclusiveUse use_;
 };

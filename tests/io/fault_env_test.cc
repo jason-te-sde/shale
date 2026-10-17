@@ -119,10 +119,95 @@ TEST_F(FaultEnvTest, PowerLossKeepsAPrefixOfUnsynced) {
 }
 
 TEST_F(FaultEnvTest, ProcessCrashKeepsEverything) {
-  ASSERT_OK(Put(&env_, "/d/f", "", "abcdef"));
+  // Everything the operating system has: every byte that was flushed to it, synced or not, and
+  // every directory change. What still waits in a handle is the next test.
+  std::unique_ptr<WritableFile> writer;
+  ASSERT_OK(env_.NewWritableFile("/d/f", &writer));
+  ASSERT_OK(writer->Append("abc"));
+  ASSERT_OK(writer->Flush());
+  ASSERT_OK(writer->Append("def"));
+  ASSERT_OK(writer->Flush());
   env_.SimulateProcessCrash();
   EXPECT_TRUE(env_.FileExists("/d/f")) << "the directory entry was never synced, and survives";
   EXPECT_EQ(env_.FileContents("/d/f"), "abcdef");
+}
+
+TEST_F(FaultEnvTest, ProcessCrashDropsUnflushedBytes) {
+  std::unique_ptr<WritableFile> writer;
+  ASSERT_OK(env_.NewWritableFile("/d/f", &writer));
+  ASSERT_OK(writer->Append("abc"));
+  ASSERT_OK(writer->Flush());
+  ASSERT_OK(writer->Append("def"));  // Never flushed: it dies with the process.
+  env_.SimulateProcessCrash();
+  EXPECT_EQ(env_.FileContents("/d/f"), "abc");
+}
+
+TEST_F(FaultEnvTest, PowerLossDropsUnflushedBytes) {
+  // A byte that never left the handle is not among those a power loss may keep, whatever the seed.
+  // The flushed ones are, in a prefix, because none of them was synced.
+  std::set<size_t> lengths;
+  for (uint64_t seed = 0; seed < 100; seed++) {
+    SCOPED_TRACE("seed " + std::to_string(seed));
+    FaultInjectionEnv env(seed);
+    ASSERT_OK(env.CreateDir("/d"));
+    std::unique_ptr<WritableFile> writer;
+    ASSERT_OK(env.NewWritableFile("/d/f", &writer));
+    ASSERT_OK(writer->Append("abc"));
+    ASSERT_OK(writer->Flush());
+    ASSERT_OK(writer->Append("def"));
+    ASSERT_OK(env.SyncDir("/d"));
+    env.SimulatePowerLoss();
+    const std::string contents = env.FileContents("/d/f");
+    ASSERT_LE(contents.size(), 3u);
+    ASSERT_EQ(std::string_view("abc").substr(0, contents.size()), contents);
+    lengths.insert(contents.size());
+  }
+  EXPECT_EQ(lengths, (std::set<size_t>{0, 1, 2, 3}));
+}
+
+TEST_F(FaultEnvTest, AppendedBytesStayInTheHandleUntilTheyAreFlushed) {
+  std::unique_ptr<WritableFile> writer;
+  ASSERT_OK(env_.NewWritableFile("/d/f", &writer));
+  std::unique_ptr<RandomAccessFile> reader;
+  ASSERT_OK(env_.NewRandomAccessFile("/d/f", &reader));
+  ASSERT_OK(writer->Append("abc"));
+  uint64_t size = 99;
+  ASSERT_OK(env_.GetFileSize("/d/f", &size));
+  EXPECT_EQ(size, 0u);
+  EXPECT_EQ(env_.FileContents("/d/f"), "");
+  char scratch[10];
+  std::string_view result = "not touched";
+  ASSERT_OK(reader->Read(0, 10, &result, scratch));
+  EXPECT_TRUE(result.empty()) << "a reader sees only what was flushed";
+  ASSERT_OK(writer->Flush());
+  ASSERT_OK(env_.GetFileSize("/d/f", &size));
+  EXPECT_EQ(size, 3u);
+  ASSERT_OK(reader->Read(0, 10, &result, scratch));
+  EXPECT_EQ(result, "abc");
+  ASSERT_OK(writer->Close());
+}
+
+TEST_F(FaultEnvTest, SyncAndCloseHandTheBufferOver) {
+  std::unique_ptr<WritableFile> writer;
+  ASSERT_OK(env_.NewWritableFile("/d/f", &writer));
+  ASSERT_OK(writer->Append("abc"));
+  ASSERT_OK(writer->Sync());
+  EXPECT_EQ(env_.FileContents("/d/f"), "abc");
+  ASSERT_OK(writer->Append("def"));
+  ASSERT_OK(writer->Close());
+  EXPECT_EQ(env_.FileContents("/d/f"), "abcdef");
+}
+
+TEST_F(FaultEnvTest, AHandleDroppedWithoutCloseLosesItsUnflushedBytes) {
+  {
+    std::unique_ptr<WritableFile> writer;
+    ASSERT_OK(env_.NewWritableFile("/d/f", &writer));
+    ASSERT_OK(writer->Append("abc"));
+    ASSERT_OK(writer->Flush());
+    ASSERT_OK(writer->Append("def"));
+  }
+  EXPECT_TRUE(env_.FileExists("/d/f"));
+  EXPECT_EQ(env_.FileContents("/d/f"), "abc");
 }
 
 TEST_F(FaultEnvTest, AProcessCrashDoesNotMakeAnythingDurable) {
@@ -153,7 +238,7 @@ TEST_F(FaultEnvTest, WhatSurvivesAPowerLossIsDurable) {
 TEST_F(FaultEnvTest, UnsyncedCreationVanishes) {
   ASSERT_OK(Put(&env_, "/d/f", "abc", ""));  // The bytes are synced; the directory entry is not.
   ASSERT_TRUE(env_.FileExists("/d/f"));
-  env_.SimulatePowerLoss();
+  env_.SimulatePowerLossDropUnsynced();
   EXPECT_FALSE(env_.FileExists("/d/f"));
   std::vector<std::string> children;
   ASSERT_OK(env_.GetChildren("/d", &children));
@@ -172,7 +257,7 @@ TEST_F(FaultEnvTest, UnsyncedRemovalIsUndone) {
   env_.SetFileContents("/d/x", "1");
   ASSERT_OK(env_.RemoveFile("/d/x"));
   ASSERT_FALSE(env_.FileExists("/d/x"));
-  env_.SimulatePowerLoss();
+  env_.SimulatePowerLossDropUnsynced();
   ASSERT_TRUE(env_.FileExists("/d/x"));
   EXPECT_EQ(env_.FileContents("/d/x"), "1");
 }
@@ -190,7 +275,7 @@ TEST_F(FaultEnvTest, UnsyncedRenameReverts) {
   env_.SetFileContents("/d/b", "2");
   ASSERT_OK(env_.RenameFile("/d/a", "/d/b"));
   ASSERT_EQ(env_.FileContents("/d/b"), "1");
-  env_.SimulatePowerLoss();
+  env_.SimulatePowerLossDropUnsynced();
   EXPECT_EQ(env_.FileContents("/d/a"), "1");
   EXPECT_EQ(env_.FileContents("/d/b"), "2");
 }
@@ -213,7 +298,7 @@ TEST_F(FaultEnvTest, SyncDirCoversOnlyTheEntriesOfThatDirectory) {
   ASSERT_OK(Put(&env_, "/d/sub/g", "2", ""));
   ASSERT_OK(Put(&env_, "/e/h", "3", ""));
   ASSERT_OK(env_.SyncDir("/d"));
-  env_.SimulatePowerLoss();
+  env_.SimulatePowerLossDropUnsynced();
   EXPECT_TRUE(env_.FileExists("/d/f"));
   EXPECT_FALSE(env_.FileExists("/d/sub/g")) << "a subdirectory is a different directory";
   EXPECT_FALSE(env_.FileExists("/e/h"));
@@ -246,43 +331,175 @@ TEST_F(FaultEnvTest, ARenameAcrossDirectoriesIsDurableOnlyWhereItIsSynced) {
          "across directories";
 }
 
-TEST_F(FaultEnvTest, ARewrittenFileKeepsOnlyTheNewSyncedBytes) {
-  // Opening for write empties the file and that is durable at once: a power loss does not bring the
-  // old bytes back. The engine never reopens a file for write, so this is a choice, not a need.
+TEST_F(FaultEnvTest, ARenameAcrossDirectoriesSyncedOnTheSourceSideOnlyLosesTheFile) {
+  // The removal from /d is durable and the creation in /e is not: a caller that syncs the wrong
+  // directory, or the right ones in the wrong order, finds no file under either name.
+  ASSERT_OK(env_.CreateDir("/e"));
+  env_.SetFileContents("/d/x", "1");
+  ASSERT_OK(env_.RenameFile("/d/x", "/e/x"));
+  ASSERT_OK(env_.SyncDir("/d"));
+  env_.SimulatePowerLossDropUnsynced();
+  EXPECT_FALSE(env_.FileExists("/d/x"));
+  EXPECT_FALSE(env_.FileExists("/e/x"));
+}
+
+TEST_F(FaultEnvTest, ARewrittenFileKeepsOnlyTheNewSyncedBytesOnceTheDirectoryIsSynced) {
+  // Opening a file for write replaces its contents with an empty file. That is a change of the
+  // directory like any other, and it is durable once the directory is synced.
   env_.SetFileContents("/d/f", "the old contents");
   ASSERT_OK(Put(&env_, "/d/f", "new", "er"));
+  ASSERT_OK(env_.SyncDir("/d"));
   env_.SimulatePowerLossDropUnsynced();
   EXPECT_EQ(env_.FileContents("/d/f"), "new");
 }
 
-TEST_F(FaultEnvTest, AReopenedFileHoldsNothingOfTheOldBytesEvenIfTheNewOnesWereNeverSynced) {
+TEST_F(FaultEnvTest, ATruncationThatWasNotSyncedBringsTheOldBytesBack) {
   env_.SetFileContents("/d/f", "the old contents");
   std::unique_ptr<WritableFile> writer;
   ASSERT_OK(env_.NewWritableFile("/d/f", &writer));
   ASSERT_OK(writer->Append("er"));
   ASSERT_OK(writer->Close());
+  ASSERT_EQ(env_.FileContents("/d/f"), "er");
   env_.SimulatePowerLossDropUnsynced();
-  EXPECT_EQ(env_.FileContents("/d/f"), "") << "emptying the file is durable, and nothing else is";
+  EXPECT_EQ(env_.FileContents("/d/f"), "the old contents");
+}
+
+TEST_F(FaultEnvTest, ATruncationIsKeptOrNotAsAUnitWithTheOtherChangesOfItsDirectory) {
+  std::set<std::string> outcomes;
+  for (uint64_t seed = 0; seed < 100; seed++) {
+    SCOPED_TRACE("seed " + std::to_string(seed));
+    FaultInjectionEnv env(seed);
+    ASSERT_OK(env.CreateDir("/d"));
+    env.SetFileContents("/d/f", "old");
+    ASSERT_OK(Put(&env, "/d/f", "new", ""));  // Synced bytes, so either "old" or "new" remains.
+    env.SimulatePowerLoss();
+    outcomes.insert(env.FileContents("/d/f"));
+  }
+  EXPECT_EQ(outcomes, (std::set<std::string>{"old", "new"}));
 }
 
 TEST_F(FaultEnvTest, ARecreatedFileComesBackAsTheOldOneIfTheRemovalWasNotSynced) {
   env_.SetFileContents("/d/f", "old");
   ASSERT_OK(env_.RemoveFile("/d/f"));
   ASSERT_OK(Put(&env_, "/d/f", "new", ""));
-  env_.SimulatePowerLoss();
+  env_.SimulatePowerLossDropUnsynced();
   EXPECT_EQ(env_.FileContents("/d/f"), "old");
+}
+
+// --- Namespace changes persist as a prefix ------------------------------------------------------
+
+TEST_F(FaultEnvTest, UnsyncedNamespaceChangesSurviveAsAnInOrderPrefix) {
+  // Two changes to /d with no SyncDir: the creation of a, then the removal of b. A power loss keeps
+  // none of them, the first, or both, and never the second without the first.
+  std::set<std::pair<bool, bool>> outcomes;  // (a exists, b exists)
+  for (uint64_t seed = 0; seed < 200; seed++) {
+    SCOPED_TRACE("seed " + std::to_string(seed));
+    FaultInjectionEnv env(seed);
+    ASSERT_OK(env.CreateDir("/d"));
+    env.SetFileContents("/d/b", "1");
+    ASSERT_OK(Put(&env, "/d/a", "x", ""));
+    ASSERT_OK(env.RemoveFile("/d/b"));
+    env.SimulatePowerLoss();
+    const bool a = env.FileExists("/d/a");
+    const bool b = env.FileExists("/d/b");
+    ASSERT_TRUE(a || b) << "the removal of b survived without the creation of a before it";
+    outcomes.emplace(a, b);
+  }
+  EXPECT_EQ(outcomes,
+            (std::set<std::pair<bool, bool>>{{false, true}, {true, true}, {true, false}}));
+}
+
+TEST_F(FaultEnvTest, TheDropUnsyncedLossAppliesNoNamespaceChangeAtAll) {
+  env_.SetFileContents("/d/b", "1");
+  ASSERT_OK(Put(&env_, "/d/a", "x", ""));
+  ASSERT_OK(env_.RemoveFile("/d/b"));
+  env_.SimulatePowerLossDropUnsynced();
+  EXPECT_FALSE(env_.FileExists("/d/a"));
+  EXPECT_TRUE(env_.FileExists("/d/b"));
+}
+
+TEST_F(FaultEnvTest, SyncDirMakesEveryEarlierChangeOfThatDirectoryDurable) {
+  for (uint64_t seed = 0; seed < 50; seed++) {
+    SCOPED_TRACE("seed " + std::to_string(seed));
+    FaultInjectionEnv env(seed);
+    ASSERT_OK(env.CreateDir("/d"));
+    env.SetFileContents("/d/b", "1");
+    ASSERT_OK(Put(&env, "/d/a", "x", ""));
+    ASSERT_OK(env.RemoveFile("/d/b"));
+    ASSERT_OK(env.SyncDir("/d"));
+    env.SimulatePowerLoss();
+    EXPECT_TRUE(env.FileExists("/d/a"));
+    EXPECT_FALSE(env.FileExists("/d/b"));
+  }
+}
+
+TEST_F(FaultEnvTest, ALogStartsAgainWhenItsDirectoryIsSynced) {
+  // After a SyncDir the changes waiting in the directory are the ones made since, and only them:
+  // with one such change left, a power loss keeps it about half the time. A log that still held
+  // the synced changes would dilute that.
+  int kept = 0;
+  for (uint64_t seed = 0; seed < 200; seed++) {
+    SCOPED_TRACE("seed " + std::to_string(seed));
+    FaultInjectionEnv env(seed);
+    ASSERT_OK(env.CreateDir("/d"));
+    for (const char* name : {"/d/a", "/d/b", "/d/c", "/d/e"}) {
+      ASSERT_OK(Put(&env, name, "x", ""));
+    }
+    ASSERT_OK(env.SyncDir("/d"));
+    ASSERT_OK(Put(&env, "/d/late", "y", ""));
+    env.SimulatePowerLoss();
+    kept += env.FileExists("/d/late") ? 1 : 0;
+  }
+  EXPECT_GT(kept, 70);  // 100 expected, and the spread is about 7.
+  EXPECT_LT(kept, 130);
+}
+
+TEST_F(FaultEnvTest, EachDirectoryKeepsItsOwnPrefix) {
+  std::set<std::pair<bool, bool>> outcomes;  // (/d/a exists, /e/b exists)
+  for (uint64_t seed = 0; seed < 100; seed++) {
+    SCOPED_TRACE("seed " + std::to_string(seed));
+    FaultInjectionEnv env(seed);
+    ASSERT_OK(env.CreateDir("/d"));
+    ASSERT_OK(env.CreateDir("/e"));
+    ASSERT_OK(Put(&env, "/d/a", "x", ""));
+    ASSERT_OK(Put(&env, "/e/b", "y", ""));
+    env.SimulatePowerLoss();
+    outcomes.emplace(env.FileExists("/d/a"), env.FileExists("/e/b"));
+  }
+  EXPECT_EQ(outcomes.size(), 4u);
+}
+
+TEST_F(FaultEnvTest, ARenameInOneDirectoryIsKeptOrLostAsAWhole) {
+  std::set<std::pair<bool, bool>> outcomes;  // (a exists, b exists)
+  for (uint64_t seed = 0; seed < 100; seed++) {
+    SCOPED_TRACE("seed " + std::to_string(seed));
+    FaultInjectionEnv env(seed);
+    ASSERT_OK(env.CreateDir("/d"));
+    env.SetFileContents("/d/a", "1");
+    ASSERT_OK(env.RenameFile("/d/a", "/d/b"));
+    env.SimulatePowerLoss();
+    const bool a = env.FileExists("/d/a");
+    const bool b = env.FileExists("/d/b");
+    ASSERT_NE(a, b) << "the file must be under exactly one of its names";
+    EXPECT_EQ(env.FileContents(a ? "/d/a" : "/d/b"), "1");
+    outcomes.emplace(a, b);
+  }
+  EXPECT_EQ(outcomes, (std::set<std::pair<bool, bool>>{{true, false}, {false, true}}));
 }
 
 TEST_F(FaultEnvTest, HandlesDieWithTheCrash) {
   std::unique_ptr<WritableFile> writer;
   ASSERT_OK(env_.NewWritableFile("/d/f", &writer));
   ASSERT_OK(writer->Append("abc"));
+  ASSERT_OK(writer->Flush());
+  ASSERT_OK(writer->Append("buffered"));
   env_.SimulateProcessCrash();
   EXPECT_TRUE(IsInvalidated(writer->Append("def")));
-  EXPECT_EQ(env_.FileContents("/d/f"), "abc") << "an invalidated handle writes nothing";
   EXPECT_TRUE(IsInvalidated(writer->Flush()));
   EXPECT_TRUE(IsInvalidated(writer->Sync()));
   EXPECT_TRUE(IsInvalidated(writer->Close()));
+  EXPECT_EQ(env_.FileContents("/d/f"), "abc")
+      << "an invalidated handle writes nothing, and what it buffered is gone";
 }
 
 TEST_F(FaultEnvTest, EveryKindOfHandleDiesWithEveryKindOfCrash) {
@@ -307,6 +524,8 @@ TEST_F(FaultEnvTest, EveryKindOfHandleDiesWithEveryKindOfCrash) {
     EXPECT_TRUE(IsInvalidated(sequential->Skip(1)));
     EXPECT_TRUE(IsInvalidated(random_access->Read(0, 5, &result, scratch)));
     EXPECT_TRUE(IsInvalidated(writer->Append("x")));
+    EXPECT_TRUE(IsInvalidated(writer->Flush()));
+    EXPECT_TRUE(IsInvalidated(writer->Sync()));
     EXPECT_TRUE(IsInvalidated(writer->Close()));
   }
 }
@@ -403,7 +622,7 @@ TEST_F(FaultEnvTest, SetFileContentsIsDurableAtOnce) {
   EXPECT_EQ(env_.FileContents("/d/f"), "abc") << "synced, and its entry durable, with no SyncDir";
 }
 
-TEST_F(FaultEnvTest, SetFileContentsReplacesTheContentsOfAnOpenFile) {
+TEST_F(FaultEnvTest, SetFileContentsInstallsAFreshFileAndLeavesOpenHandlesOnTheOldOne) {
   env_.SetFileContents("/d/f", "old contents");
   std::unique_ptr<RandomAccessFile> reader;
   ASSERT_OK(env_.NewRandomAccessFile("/d/f", &reader));
@@ -411,7 +630,34 @@ TEST_F(FaultEnvTest, SetFileContentsReplacesTheContentsOfAnOpenFile) {
   char scratch[100];
   std::string_view result;
   ASSERT_OK(reader->Read(0, 100, &result, scratch));
-  EXPECT_EQ(result, "new");
+  EXPECT_EQ(result, "old contents") << "the handle was opened on the file that was replaced";
+  EXPECT_EQ(env_.FileContents("/d/f"), "new");
+}
+
+TEST_F(FaultEnvTest, SetFileContentsDoesNotChangeTheOtherDurableNameOfARenamedFile) {
+  // a is renamed to b, and the rename is not synced: the durable view still has the file as a.
+  // Setting the contents of b must not reach it.
+  env_.SetFileContents("/d/a", "1");
+  ASSERT_OK(env_.RenameFile("/d/a", "/d/b"));
+  env_.SetFileContents("/d/b", "2");
+  env_.SimulatePowerLossDropUnsynced();
+  EXPECT_EQ(env_.FileContents("/d/a"), "1");
+  EXPECT_EQ(env_.FileContents("/d/b"), "2");
+}
+
+TEST_F(FaultEnvTest, SetFileContentsSupersedesTheUnsyncedChangesToItsName) {
+  for (uint64_t seed = 0; seed < 50; seed++) {
+    SCOPED_TRACE("seed " + std::to_string(seed));
+    FaultInjectionEnv env(seed);
+    ASSERT_OK(env.CreateDir("/d"));
+    env.SetFileContents("/d/x", "1");
+    ASSERT_OK(env.RemoveFile("/d/x"));
+    env.SetFileContents("/d/x",
+                        "2");  // Durable at once: the removal must not come back to undo it.
+    env.SimulatePowerLoss();
+    ASSERT_TRUE(env.FileExists("/d/x"));
+    EXPECT_EQ(env.FileContents("/d/x"), "2");
+  }
 }
 
 TEST_F(FaultEnvTest, FileContentsOfAMissingFileIsEmpty) {
@@ -448,8 +694,8 @@ TEST_F(FaultEnvTest, AFailedAppendWritesNoBytes) {
   ASSERT_OK(writer->Append("abc"));
   env_.FailOpAfter(Op::kAppend, 0);
   EXPECT_FALSE(writer->Append("def").ok());
-  EXPECT_EQ(env_.FileContents("/d/f"), "abc");
   ASSERT_OK(writer->Close());
+  EXPECT_EQ(env_.FileContents("/d/f"), "abc");
 }
 
 TEST_F(FaultEnvTest, AFailedSyncMakesNothingDurable) {
@@ -462,6 +708,126 @@ TEST_F(FaultEnvTest, AFailedSyncMakesNothingDurable) {
   ASSERT_OK(env_.SyncDir("/d"));
   env_.SimulatePowerLossDropUnsynced();
   EXPECT_EQ(env_.FileContents("/d/f"), "") << "the bytes were never synced";
+}
+
+TEST_F(FaultEnvTest, ASyncThatSucceedsAfterAFailedOneMakesNothingDurable) {
+  // Some operating systems report success from a second fsync of data that the first failed to
+  // write and then dropped. The Env's documentation says such a Sync proves nothing, and here it
+  // really does nothing: the bytes that were there when the first one failed are never synced.
+  std::unique_ptr<WritableFile> writer;
+  ASSERT_OK(env_.NewWritableFile("/d/f", &writer));
+  ASSERT_OK(writer->Append("abc"));
+  env_.FailOpAfter(Op::kSync, 0);
+  EXPECT_FALSE(writer->Sync().ok());
+  EXPECT_OK(writer->Sync());
+  ASSERT_OK(writer->Close());
+  ASSERT_OK(env_.SyncDir("/d"));
+  ASSERT_EQ(env_.FileContents("/d/f"), "abc") << "the bytes are there for readers";
+  env_.SimulatePowerLossDropUnsynced();
+  EXPECT_EQ(env_.FileContents("/d/f"), "");
+}
+
+TEST_F(FaultEnvTest, AFailedSyncKeepsWhatWasSyncedBeforeAndNothingAfter) {
+  std::unique_ptr<WritableFile> writer;
+  ASSERT_OK(env_.NewWritableFile("/d/f", &writer));
+  ASSERT_OK(writer->Append("abc"));
+  ASSERT_OK(writer->Sync());
+  ASSERT_OK(writer->Append("def"));
+  env_.FailOpAfter(Op::kSync, 0);
+  EXPECT_FALSE(writer->Sync().ok());
+  ASSERT_OK(writer->Append("ghi"));
+  EXPECT_OK(writer->Sync());
+  ASSERT_OK(writer->Close());
+  ASSERT_OK(env_.SyncDir("/d"));
+  env_.SimulatePowerLossDropUnsynced();
+  EXPECT_EQ(env_.FileContents("/d/f"), "abc");
+}
+
+TEST_F(FaultEnvTest, AFailedSyncOnlyFreezesItsOwnFile) {
+  std::unique_ptr<WritableFile> failing;
+  std::unique_ptr<WritableFile> other;
+  ASSERT_OK(env_.NewWritableFile("/d/f", &failing));
+  ASSERT_OK(env_.NewWritableFile("/d/g", &other));
+  ASSERT_OK(failing->Append("abc"));
+  ASSERT_OK(other->Append("xyz"));
+  env_.FailOpAfter(Op::kSync, 0);
+  EXPECT_FALSE(failing->Sync().ok());
+  ASSERT_OK(other->Sync());
+  ASSERT_OK(failing->Close());
+  ASSERT_OK(other->Close());
+  ASSERT_OK(env_.SyncDir("/d"));
+  env_.SimulatePowerLossDropUnsynced();
+  EXPECT_EQ(env_.FileContents("/d/f"), "");
+  EXPECT_EQ(env_.FileContents("/d/g"), "xyz");
+}
+
+TEST_F(FaultEnvTest, ReopeningAFileAfterAFailedSyncStartsAFreshFile) {
+  // Writing the bytes again to a new file is what the documentation tells a caller to do. A file
+  // that is reopened for write is empty, so it is a new file in this respect too.
+  std::unique_ptr<WritableFile> writer;
+  ASSERT_OK(env_.NewWritableFile("/d/f", &writer));
+  ASSERT_OK(writer->Append("abc"));
+  env_.FailOpAfter(Op::kSync, 0);
+  EXPECT_FALSE(writer->Sync().ok());
+  ASSERT_OK(writer->Close());
+
+  ASSERT_OK(env_.NewWritableFile("/d/f", &writer));
+  ASSERT_OK(writer->Append("new"));
+  ASSERT_OK(writer->Sync());
+  ASSERT_OK(writer->Close());
+  ASSERT_OK(env_.SyncDir("/d"));
+  env_.SimulatePowerLossDropUnsynced();
+  EXPECT_EQ(env_.FileContents("/d/f"), "new");
+}
+
+TEST_F(FaultEnvTest, AFailedFlushPushesNothing) {
+  std::unique_ptr<WritableFile> writer;
+  ASSERT_OK(env_.NewWritableFile("/d/f", &writer));
+  ASSERT_OK(writer->Append("abc"));
+  env_.FailOpAfter(Op::kFlush, 0);
+  EXPECT_TRUE(IsInjected(writer->Flush(), "/d/f"));
+  EXPECT_EQ(env_.FileContents("/d/f"), "");
+  uint64_t size = 99;
+  ASSERT_OK(env_.GetFileSize("/d/f", &size));
+  EXPECT_EQ(size, 0u);
+  env_.SimulateProcessCrash();
+  EXPECT_EQ(env_.FileContents("/d/f"), "") << "what the failed Flush did not push is lost";
+}
+
+TEST_F(FaultEnvTest, AFlushAfterAFailedOneStillHandsOverTheBytesThatWereWaiting) {
+  // The Env's documentation says a caller must not go on after a failed Flush, and this Env does
+  // not stop it, so that a test can see what the caller does. The failed call changed nothing, so
+  // the bytes it did not push are still in the handle.
+  std::unique_ptr<WritableFile> writer;
+  ASSERT_OK(env_.NewWritableFile("/d/f", &writer));
+  ASSERT_OK(writer->Append("abc"));
+  env_.FailOpAfter(Op::kFlush, 0);
+  EXPECT_FALSE(writer->Flush().ok());
+  ASSERT_OK(writer->Append("def"));
+  EXPECT_OK(writer->Flush());
+  EXPECT_EQ(env_.FileContents("/d/f"), "abcdef");
+  ASSERT_OK(writer->Close());
+}
+
+TEST_F(FaultEnvTest, FlushIsNotSyncAndSyncIsNotFlush) {
+  // kFlush counts Flush calls only: the flush inside Sync and Close is theirs.
+  std::unique_ptr<WritableFile> writer;
+  ASSERT_OK(env_.NewWritableFile("/d/f", &writer));
+  env_.FailOpAfter(Op::kFlush, 0);
+  ASSERT_OK(writer->Append("abc"));
+  EXPECT_OK(writer->Sync());
+  EXPECT_OK(writer->Close());
+  EXPECT_EQ(env_.injected_errors(), 0u);
+  EXPECT_EQ(env_.FileContents("/d/f"), "abc");
+}
+
+TEST_F(FaultEnvTest, AFailedCloseLosesWhatTheHandleBuffered) {
+  std::unique_ptr<WritableFile> writer;
+  ASSERT_OK(env_.NewWritableFile("/d/f", &writer));
+  ASSERT_OK(writer->Append("abc"));
+  env_.FailOpAfter(Op::kClose, 0);
+  EXPECT_FALSE(writer->Close().ok());
+  EXPECT_EQ(env_.FileContents("/d/f"), "");
 }
 
 TEST_F(FaultEnvTest, AFailedCloseStillClosesTheHandle) {
@@ -509,8 +875,14 @@ TEST_F(FaultEnvTest, EveryOpCanBeFailedAndAFailedOpHasNoEffect) {
   ASSERT_OK(env_.NewWritableFile("/d/c", &writable));
   ASSERT_OK(writable->Close());
   EXPECT_TRUE(IsInjected(env_.SyncDir("/d"), "/d"));
-  env_.SimulatePowerLoss();
+  env_.SimulatePowerLossDropUnsynced();
   EXPECT_FALSE(env_.FileExists("/d/c")) << "a failed SyncDir must not make anything durable";
+
+  ASSERT_OK(env_.NewWritableFile("/d/h", &writable));
+  ASSERT_OK(writable->Append("x"));
+  env_.FailOpAfter(Op::kFlush, 0);
+  EXPECT_TRUE(IsInjected(writable->Flush(), "/d/h"));
+  EXPECT_EQ(env_.FileContents("/d/h"), "");
 
   ASSERT_OK(env_.NewSequentialFile("/d/a", &sequential));
   ASSERT_OK(env_.NewRandomAccessFile("/d/a", &random_access));
@@ -518,7 +890,7 @@ TEST_F(FaultEnvTest, EveryOpCanBeFailedAndAFailedOpHasNoEffect) {
   EXPECT_TRUE(IsInjected(sequential->Read(1, &result, scratch), "/d/a"));
   env_.FailOpAfter(Op::kRead, 0);
   EXPECT_TRUE(IsInjected(random_access->Read(0, 1, &result, scratch), "/d/a"));
-  EXPECT_EQ(env_.injected_errors(), 8u);
+  EXPECT_EQ(env_.injected_errors(), 9u);
 }
 
 TEST_F(FaultEnvTest, OpsAreCountedSeparately) {
@@ -601,8 +973,8 @@ TEST_F(FaultEnvTest, FailureProbabilityExtremes) {
     failed += writer->Append("x").ok() ? 0 : 1;
   }
   EXPECT_EQ(failed, 0);
-  EXPECT_EQ(env_.FileContents("/d/f"), std::string(100, 'x')) << "failed appends wrote nothing";
   ASSERT_OK(writer->Close());
+  EXPECT_EQ(env_.FileContents("/d/f"), std::string(100, 'x')) << "failed appends wrote nothing";
 }
 
 TEST_F(FaultEnvTest, FailureProbabilityBetweenTheExtremesFailsSometimes) {
@@ -892,7 +1264,11 @@ TEST_F(FaultEnvTest, NoFaultsConfiguredMeansNoFaults) {
   ASSERT_OK(mem->CreateDir("/d"));
 
   const std::vector<std::string> names = {"/d/a", "/d/b", "/d/c", "/d/e"};
+  // What each file holds, as the plain Env shows it (everything appended) and as the fault Env
+  // shows it (what was flushed: it buffers in the handle). A close hands the buffer over, so the
+  // two meet at every Flush, Sync and Close.
   std::map<std::string, std::string> shadow;
+  std::map<std::string, std::string> flushed;
   struct Handles {
     std::unique_ptr<WritableFile> fault;
     std::unique_ptr<WritableFile> mem;
@@ -907,6 +1283,7 @@ TEST_F(FaultEnvTest, NoFaultsConfiguredMeansNoFaults) {
     EXPECT_OK(it->second.fault->Close());
     EXPECT_OK(it->second.mem->Close());
     open.erase(it);
+    flushed[name] = shadow[name];
   };
   // Both Envs must agree on whether a call succeeds, and on nothing else needing a check here.
   auto same = [](const Status& from_fault, const Status& from_mem, const std::string& what) {
@@ -926,6 +1303,7 @@ TEST_F(FaultEnvTest, NoFaultsConfiguredMeansNoFaults) {
                          mem->NewWritableFile(name, &handles.mem), "create " + name));
         open[name] = std::move(handles);
         shadow[name] = "";
+        flushed[name] = "";
         break;
       }
       case 1: {  // Append to an open file.
@@ -949,6 +1327,7 @@ TEST_F(FaultEnvTest, NoFaultsConfiguredMeansNoFaults) {
         } else {
           ASSERT_TRUE(same(it->second.fault->Sync(), it->second.mem->Sync(), "sync " + name));
         }
+        flushed[name] = shadow[name];
         break;
       }
       case 3:  // Close.
@@ -964,6 +1343,8 @@ TEST_F(FaultEnvTest, NoFaultsConfiguredMeansNoFaults) {
         if (ok && name != target) {
           shadow[target] = std::move(shadow[name]);
           shadow.erase(name);
+          flushed[target] = std::move(flushed[name]);
+          flushed.erase(name);
         }
         break;
       }
@@ -972,6 +1353,7 @@ TEST_F(FaultEnvTest, NoFaultsConfiguredMeansNoFaults) {
         const bool ok = same(fault.RemoveFile(name), mem->RemoveFile(name), "remove " + name);
         EXPECT_EQ(ok, shadow.count(name) != 0);
         shadow.erase(name);
+        flushed.erase(name);
         break;
       }
       case 6: {  // Read the whole file.
@@ -981,7 +1363,7 @@ TEST_F(FaultEnvTest, NoFaultsConfiguredMeansNoFaults) {
                              ReadFileToString(mem.get(), name, &from_mem), "read " + name);
         EXPECT_EQ(ok, shadow.count(name) != 0);
         if (ok) {
-          EXPECT_TRUE(from_fault == shadow[name]) << "the fault Env differs from the shadow model";
+          EXPECT_TRUE(from_fault == flushed[name]) << "the fault Env differs from the shadow model";
           EXPECT_TRUE(from_mem == shadow[name]) << "the model itself is wrong";
         }
         break;
@@ -999,7 +1381,8 @@ TEST_F(FaultEnvTest, NoFaultsConfiguredMeansNoFaults) {
         uint64_t size_in_mem = 2;
         if (same(fault.GetFileSize(name, &size_in_fault), mem->GetFileSize(name, &size_in_mem),
                  "size " + name)) {
-          EXPECT_EQ(size_in_fault, size_in_mem);
+          EXPECT_EQ(size_in_fault, flushed[name].size());
+          EXPECT_EQ(size_in_mem, shadow[name].size());
         }
         break;
       }

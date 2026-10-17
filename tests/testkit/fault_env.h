@@ -21,36 +21,66 @@ class FaultState;
 /// An in-memory Env that can lose power, kill the process, fail calls and flip bits in what it
 /// reads, all of it driven by one seed so that a failing run can be replayed exactly.
 ///
-/// Without a fault configured it behaves like NewMemEnv(): the same files, the same errors, a
-/// virtual clock that moves only when someone sleeps, and any number of threads. What it adds is
-/// the gap between what a program has written and what a disk has kept.
+/// Without a fault configured it behaves like NewMemEnv() as far as the Env's contract goes: the
+/// same files, the same errors, a virtual clock that moves only when someone sleeps, and any number
+/// of threads. What it adds is the gap between what a program has written and what a disk has
+/// kept, in three layers.
 ///
-/// How it models a disk:
-/// - Every file has a live content, which readers see at once, and a count of leading bytes that
-///   were made durable by Sync().
+/// Bytes:
+/// - A writable handle buffers what is appended to it, without a limit. Flush(), Sync() and Close()
+///   hand the buffer to the file, where readers see it; nothing else does. A handle that is dropped
+///   without Close(), or that a crash invalidates, takes its buffer with it.
+/// - What was handed over is what the operating system holds, and survives the death of the
+///   process. A file also has a count of leading bytes that Sync() made durable. A power loss keeps
+///   those and a prefix of the rest, and what it keeps is durable from then on.
+/// - A Sync() that fails marks its file. From then on every Sync() of it reports success and makes
+///   nothing durable, whatever it is asked: the Env's documentation says a Sync() that succeeds
+///   after a failed one proves nothing, and a caller that trusts it loses its bytes here, where a
+///   test can see it. Opening the file for write again gives it a fresh start.
+///
+/// Names:
 /// - The namespace has two views: the live one, which every call sees, and the durable one, which
-///   is what a power loss brings back. SyncDir(d) copies what the live view holds under `d`, and
-///   what it no longer holds, into the durable view. The parent of a path is everything before its
-///   last '/', so `/d/f` is under `/d`, `/d/sub/g` is under `/d/sub` and `/f` is under `/`.
-/// - Directories themselves are not rolled back: CreateDir() and RemoveDir() are durable at once,
-///   and SyncDir() applies to the files in them. Opening a file for write empties it, and that is
-///   durable at once too: a power loss does not bring the old bytes back, although a real disk
-///   might. The engine never reopens a file it has written.
-/// - A handle has no buffer of its own, so Append() reaches the file at once and a process crash
-///   keeps every appended byte. Flush() has nothing to do and cannot be made to fail.
-/// - A crash invalidates every handle and every lock taken before it. The restarted process opens
-///   its own.
+///   is what a power loss starts from. Each change to a directory (a creation, a removal, a
+///   rename, an open for write that empties an existing file) is kept in an ordered log for that
+///   directory until SyncDir() makes the whole log durable and clears it. The parent of a path is
+///   everything before its last '/', so `/d/f` is under `/d`, `/d/sub/g` is under `/d/sub` and
+///   `/f` is under `/`.
+/// - A power loss keeps, for each directory, a prefix of its log, from none of it to all of it:
+///   never a change without the ones made before it in that directory. A rename inside one
+///   directory is one entry, kept whole or not at all. A rename across directories is two entries,
+///   one in each log, and each half may be kept without the other. Opening a file for write is a
+///   new empty file under the name, so a power loss that keeps none of it brings the old file back.
 ///
-/// What an injected fault does: a failed call has no effect. A failed Append() appends nothing, a
-/// failed Sync() makes nothing durable, a failed NewWritableFile() does not empty the file, a
-/// failed Close() still closes the handle. The Env's documentation says that after a failed write
-/// only Close() is valid and what the file holds is unspecified; this Env holds exactly what was
-/// there before, which is one of the outcomes the documentation allows, and does not stop a caller
-/// from going on, so that a test can check what the caller does next.
+/// Crashes:
+/// - Every crash invalidates every handle and every lock taken before it. The restarted process
+///   opens its own. A process crash releases the locks, as the death of a process does.
+/// - A process crash keeps every flushed byte and every directory change, because the machine
+///   survives; it makes nothing durable, so a later power loss can still take them.
+///
+/// What an injected fault does: a failed call has no effect. A failed Append() adds nothing to the
+/// buffer, a failed Flush() hands nothing over, a failed Sync() makes nothing durable (and marks
+/// the file, as above), a failed NewWritableFile() does not empty the file, a failed Close() hands
+/// nothing over and still closes the handle. The Env's documentation says that after a failed
+/// write only Close() is valid and what the file holds is unspecified; this Env does not stop a
+/// caller from going on, so that a test can check what the caller does next, and after a failed
+/// Flush() a later Flush() still hands over the bytes that were waiting.
 ///
 /// Two independent streams of random numbers come from the seed: one decides what a power loss
 /// keeps, the other decides which calls fail and which reads are corrupted. Configuring read
 /// corruption in a run therefore does not change what a given seed loses to a power loss.
+///
+/// What it does not model, so that a test does not trust it for these:
+/// - Directories themselves: CreateDir() and RemoveDir() are durable at once and no crash rolls
+///   them back. Only the entries for files are subject to SyncDir().
+/// - Torn, zero-filled or garbage tails: what a power loss leaves of a file is a clean prefix of
+///   what was written, never a prefix followed by junk, and never a hole.
+/// - Partial effects of a failure: a failed call does nothing, not half of what it was asked.
+/// - A limit on a handle's buffer, which a real writer flushes when it is full: here a crash loses
+///   every byte that was not flushed, which is never fewer than a real writer would lose.
+/// - Faults that a crash clears: the countdowns, the probabilities and the corruption stay armed
+///   across a crash, until ClearFaults(). A failure injected into the restart is a feature.
+/// - Corruption of the bytes at rest: a read may come back with a flipped bit, but the stored
+///   bytes never change by themselves.
 class FaultInjectionEnv final : public Env {
  public:
   /// Creates an Env with no files, a clock at zero and no fault configured.
@@ -62,8 +92,9 @@ class FaultInjectionEnv final : public Env {
 
   /// The calls that can be made to fail.
   ///
-  /// kRead covers the Read() of a sequential and of a random-access file; Skip() and Flush() are
-  /// not faultable. The others name the Env or file method they are called after.
+  /// kRead covers the Read() of a sequential and of a random-access file, and Skip() is not
+  /// faultable. kFlush is the Flush() call alone: the flush inside Sync() and Close() belongs to
+  /// them. The others name the Env or file method they are called after.
   enum class Op {
     kNewWritable,
     kAppend,
@@ -75,6 +106,7 @@ class FaultInjectionEnv final : public Env {
     kRead,
     kNewSequential,
     kNewRandomAccess,
+    kFlush,
   };
 
   // The Env interface. NewSequentialFile() and the rest are documented on Env.
@@ -96,19 +128,23 @@ class FaultInjectionEnv final : public Env {
   uint64_t NowMicros() override;
   void SleepForMicroseconds(uint64_t micros) override;
 
-  /// Simulates a power loss. Each file keeps the bytes that were synced plus a prefix of the ones
-  /// that were not, of a length drawn uniformly from none to all of them. Every creation, removal
-  /// and rename that no SyncDir() of its directory made durable is undone. What survives is
-  /// durable from then on. Invalidates every handle and lock opened before the call.
+  /// Simulates a power loss. Each directory keeps a prefix of the changes made to it since it was
+  /// last synced, of a length drawn uniformly from none to all of them, and undoes the rest. Each
+  /// file keeps the bytes that were synced plus a prefix of the ones that were handed over and not
+  /// synced, of a length drawn the same way. Bytes that were still in a handle are gone. What
+  /// survives is durable from then on. Invalidates every handle and lock opened before the call.
   void SimulatePowerLoss();
 
-  /// Like SimulatePowerLoss(), but every file keeps exactly its synced bytes: the worst case.
+  /// Like SimulatePowerLoss(), but nothing that was not made durable survives: every directory
+  /// keeps none of its unsynced changes and every file keeps exactly its synced bytes. The worst
+  /// case.
   void SimulatePowerLossDropUnsynced();
 
-  /// Simulates the death of the process while the machine stays up: every appended byte and every
-  /// directory change is kept, since the operating system still has them. Nothing becomes durable,
-  /// so a later power loss can still take what is unsynced. Invalidates every handle and lock
-  /// opened before the call, and releases the locks, as the death of a process does.
+  /// Simulates the death of the process while the machine stays up: every byte that was flushed
+  /// and every directory change is kept, since the operating system still has them, and the bytes
+  /// still in a handle are lost. Nothing becomes durable, so a later power loss can still take what
+  /// is unsynced. Invalidates every handle and lock opened before the call, and releases the
+  /// locks, as the death of a process does.
   void SimulateProcessCrash();
 
   /// Makes one call of `op` fail: the first `successes` calls of `op` from now on that succeed are
@@ -147,8 +183,9 @@ class FaultInjectionEnv final : public Env {
 
   /// Test helper: makes `fname` hold exactly `data`, creating it if need be, and marks the bytes
   /// synced and the directory entry durable, as if the file had been written, synced and its
-  /// directory synced before the test began. A handle already open on the file sees the new bytes.
-  /// It is not a call of any Op and cannot fail.
+  /// directory synced before the test began. It is a new file: a handle already open on the name
+  /// stays on the file it had. Changes to the name that were waiting for a SyncDir() are dropped,
+  /// because they would only undo it. It is not a call of any Op and cannot fail.
   /// @param fname the path of the file.
   /// @param data the new contents.
   void SetFileContents(const std::string& fname, std::string data);
