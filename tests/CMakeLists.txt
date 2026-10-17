@@ -23,6 +23,27 @@ foreach(dependency gtest gtest_main gmock gmock_main)
 endforeach()
 
 shale_add_test(status SOURCES util/status_test.cc LIBS shale_util)
+shale_add_test(arena SOURCES util/arena_test.cc LIBS shale_util)
+shale_add_test(random SOURCES util/random_test.cc LIBS shale_util)
+shale_add_test(check SOURCES util/check_test.cc LIBS shale_util)
+shale_add_test(mutex SOURCES util/mutex_test.cc LIBS shale_util)
+
+# Clang's thread-safety analysis is what makes SHALE_GUARDED_BY more than a comment, and nothing
+# else would notice if it silently stopped working. So the build itself is tested: one translation
+# unit that reads a guarded member without the lock must be rejected, and the same unit with the
+# lock must be accepted. GCC has no such analysis, and the annotations expand to nothing there.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  set(_thread_safety_command
+    "${CMAKE_CXX_COMPILER}" -std=c++20 -fsyntax-only -Wthread-safety -Werror
+    -I${PROJECT_SOURCE_DIR}/src)
+  add_test(NAME thread_safety_rejects_unguarded_access
+    COMMAND ${_thread_safety_command}
+            "${CMAKE_CURRENT_SOURCE_DIR}/compile_fail/guarded_access_bad.cc")
+  set_tests_properties(thread_safety_rejects_unguarded_access PROPERTIES WILL_FAIL TRUE)
+  add_test(NAME thread_safety_accepts_guarded_access
+    COMMAND ${_thread_safety_command}
+            "${CMAKE_CURRENT_SOURCE_DIR}/compile_fail/guarded_access_good.cc")
+endif()
 
 add_test(NAME layering_check_alarms_and_passes
          COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/layering_test.sh")
