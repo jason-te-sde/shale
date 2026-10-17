@@ -126,6 +126,47 @@ TEST(VersionEditTest, LevelOutOfRange) {
   EXPECT_EQ(ErrorOf(wide), "Corruption: VersionEdit: level 1099511627776 out of range");
 }
 
+TEST(VersionEditTest, VarintWiderThan64BitsIsTruncated) {
+  // A varint that does not fit 64 bits cannot be told from one that was cut off, and is reported
+  // the same way: 10 bytes whose last is above 1, and 11 bytes.
+  std::string tenth_byte_too_big(9, '\xff');
+  tenth_byte_too_big.push_back('\x02');
+  EXPECT_EQ(ErrorOf(tenth_byte_too_big), "Corruption: VersionEdit: truncated tag");
+
+  std::string eleven_bytes(10, '\x80');
+  eleven_bytes.push_back('\x00');
+  EXPECT_EQ(ErrorOf(eleven_bytes), "Corruption: VersionEdit: truncated tag");
+
+  // The widest value that does fit is a tag, an unknown one.
+  std::string widest(9, '\xff');
+  widest.push_back('\x01');
+  EXPECT_EQ(ErrorOf(widest), "Corruption: VersionEdit: unknown tag 18446744073709551615");
+
+  // The same in the fields: a level, a number and a length that are too wide are truncated records.
+  std::string wide_level = std::string(1, '\x05') + tenth_byte_too_big;
+  EXPECT_EQ(ErrorOf(wide_level), "Corruption: VersionEdit: truncated deleted_file");
+  std::string wide_number = std::string(1, '\x01') + eleven_bytes;
+  EXPECT_EQ(ErrorOf(wide_number), "Corruption: VersionEdit: truncated log_number");
+  std::string wide_length = std::string("\x04\x01", 2) + tenth_byte_too_big;
+  EXPECT_EQ(ErrorOf(wide_length), "Corruption: VersionEdit: truncated compact_pointer");
+}
+
+TEST(VersionEditTest, OverlongEncodingsOfSmallValuesAreAccepted) {
+  // Tag 1 written with a redundant zero byte (0x81 0x00), then the value 5 the same way.
+  const std::string bytes = std::string("\x81\x00\x85\x00", 4);
+  VersionEdit e;
+  const Status s = e.DecodeFrom(bytes);
+  ASSERT_TRUE(s.ok()) << s.ToString();
+  EXPECT_EQ(e.log_number, std::optional<uint64_t>(5));
+
+  // A level written the long way is read as the level it is, and range-checked as one.
+  EXPECT_EQ(ErrorOf(std::string("\x05\x87\x00", 3)),
+            "Corruption: VersionEdit: level 7 out of range");
+  VersionEdit level_six;
+  ASSERT_TRUE(level_six.DecodeFrom(std::string("\x05\x86\x00\x09", 4)).ok());
+  EXPECT_EQ(level_six.deleted_files, (std::set<std::pair<int, uint64_t>>{{6, 9}}));
+}
+
 TEST(VersionEditTest, LastLevelIsInRange) {
   VersionEdit e;
   e.deleted_files = {{kNumLevels - 1, 3}};
@@ -265,6 +306,29 @@ TEST(VersionEditTest, DebugStringNamesFields) {
   // A field that is not set is not mentioned.
   const std::string empty = VersionEdit{}.DebugString();
   EXPECT_EQ(empty.find("log_number"), std::string::npos) << empty;
+}
+
+TEST(VersionEditTest, DebugStringEscapesKeysThatDoNotParse) {
+  // A damaged key is what DebugString is most needed for, so its bytes are shown, escaped, and the
+  // quote and backslash that would make the output ambiguous are escaped too.
+  VersionEdit e;
+  e.compact_pointers = {{1, std::string("a\x01'\\\xff", 5)}};
+  const std::string s = e.DebugString();
+  EXPECT_NE(s.find("compact_pointer L1 bad:'a\\x01\\x27\\x5c\\xff'"), std::string::npos) << s;
+
+  // A key that parses shows its user key, escaped the same way, with the sequence and the type.
+  VersionEdit parsed;
+  parsed.new_files = {{2, File(7, 9, std::string("a\0b", 3), "z'")}};
+  const std::string t = parsed.DebugString();
+  EXPECT_NE(t.find("smallest='a\\x00b'@100:value"), std::string::npos) << t;
+  EXPECT_NE(t.find("largest='z\\x27'@1:value"), std::string::npos) << t;
+
+  // A deletion is named as one, and a key shorter than its tag is not mistaken for a key.
+  VersionEdit deletion;
+  deletion.compact_pointers = {{0, Key("k", 3, ValueType::kDeletion)}, {0, "short"}};
+  const std::string u = deletion.DebugString();
+  EXPECT_NE(u.find("'k'@3:deletion"), std::string::npos) << u;
+  EXPECT_NE(u.find("bad:'short'"), std::string::npos) << u;
 }
 
 }  // namespace

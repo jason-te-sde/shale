@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <initializer_list>
+#include <limits>
 #include <optional>
 #include <set>
 #include <string>
@@ -166,6 +167,119 @@ TEST(VersionStateTest, MovingAFileDownIsOneEdit) {
   EXPECT_EQ(Numbers(s.files[2]), (NumberList{5}));
 }
 
+TEST(VersionStateTest, ReAddedFileMustCarryTheSameMetadata) {
+  // A file that moves is the same file, so its number must still mean the same bytes and the same
+  // keys. A number reused for a different range would make reads look in the wrong file.
+  const FileMetaData original = F(5, "a", "c", 100);
+  const VersionState base =
+      Applied(VersionState{}, EditAdding({{1, original}, {1, F(6, "m", "p")}}));
+  const auto reuse = [](int level, const FileMetaData& f) {
+    VersionEdit e;
+    e.deleted_files = {{1, 5}};
+    e.new_files = {{level, f}};
+    return e;
+  };
+
+  // Identical, at another level and at the same one.
+  const VersionState moved = Applied(base, reuse(2, original));
+  EXPECT_EQ(moved.files[2], (std::vector<FileMetaData>{original}));
+  EXPECT_EQ(Numbers(moved.files[1]), (NumberList{6}));
+  EXPECT_EQ(Applied(base, reuse(1, original)), base);
+
+  FileMetaData bigger = original;
+  bigger.file_size = 101;
+  FileMetaData smaller = original;
+  smaller.file_size = 0;
+  FileMetaData wider = original;
+  wider.largest = IKey("d", 1);
+  FileMetaData later_start = original;
+  later_start.smallest = IKey("b", 100);
+  FileMetaData same_user_key = original;  // the same user keys, another sequence number
+  same_user_key.largest = IKey("c", 2);
+  const std::pair<const char*, const FileMetaData*> changes[] = {{"bigger", &bigger},
+                                                                 {"smaller", &smaller},
+                                                                 {"wider", &wider},
+                                                                 {"later start", &later_start},
+                                                                 {"same user key", &same_user_key}};
+  for (const int level : {1, 2}) {
+    for (const auto& [name, changed] : changes) {
+      EXPECT_EQ(ApplyError(base, reuse(level, *changed)),
+                "Corruption: file 5 re-added with different metadata")
+          << name << " at level " << level;
+    }
+  }
+
+  // The rule is about a number the edit deleted: a file with a number of its own may have any
+  // range.
+  FileMetaData another = wider;
+  another.number = 7;
+  const VersionState added = Applied(base, EditAdding({{2, another}}, 100));
+  EXPECT_EQ(added.files[2], (std::vector<FileMetaData>{another}));
+}
+
+TEST(VersionStateTest, LogNumberMustBeBelowNextFileNumber) {
+  VersionEdit e;
+  e.log_number = 5;
+  e.next_file_number = 5;
+  EXPECT_EQ(ApplyError(VersionState{}, e), "Corruption: log_number 5 not below next_file_number 5");
+  e.next_file_number = 4;
+  EXPECT_EQ(ApplyError(VersionState{}, e), "Corruption: log_number 5 not below next_file_number 4");
+  e.next_file_number = 6;
+  const VersionState ok = Applied(VersionState{}, e);
+  EXPECT_EQ(ok.log_number, 5u);
+  EXPECT_EQ(ok.next_file_number, 6u);
+
+  // An edit that sets only one of the two is held to the other as the state has it.
+  VersionEdit only_log;
+  only_log.log_number = 6;
+  EXPECT_EQ(ApplyError(ok, only_log), "Corruption: log_number 6 not below next_file_number 6");
+  only_log.log_number = 2;  // a decrease, which is its own rule and reported first
+  EXPECT_EQ(ApplyError(ok, only_log), "Corruption: log_number decreases from 5 to 2");
+  VersionEdit log_on_a_new_state;
+  log_on_a_new_state.log_number = 2;
+  EXPECT_EQ(ApplyError(VersionState{}, log_on_a_new_state),
+            "Corruption: log_number 2 not below next_file_number 2");
+  log_on_a_new_state.log_number = 1;
+  EXPECT_EQ(Applied(VersionState{}, log_on_a_new_state).log_number, 1u);
+
+  // The other way: raising next_file_number never breaks it, and may be what lets a log number in.
+  VersionEdit both;
+  both.log_number = 9;
+  both.next_file_number = 10;
+  EXPECT_EQ(Applied(ok, both).log_number, 9u);
+}
+
+TEST(VersionStateTest, CompactionShapedEditIsAccepted) {
+  // A compaction of level-1 file #2 into level 2: it deletes #2 and the level-2 file #4 that it
+  // overlaps, and adds the two files that replace them, whose ranges overlap the files they
+  // replace. Deletions are applied before additions, so that overlap is never seen.
+  const VersionState base = Applied(VersionState{}, EditAdding({{1, F(1, "a", "c")},
+                                                                {1, F(2, "e", "g")},
+                                                                {1, F(3, "i", "k")},
+                                                                {2, F(4, "d", "h")},
+                                                                {2, F(5, "m", "p")}}));
+  VersionEdit compaction = EditAdding({{2, F(10, "d", "f")}, {2, F(11, "g", "h")}}, 100);
+  compaction.deleted_files = {{1, 2}, {2, 4}};
+  const VersionState s = Applied(base, compaction);
+  EXPECT_EQ(Numbers(s.files[1]), (NumberList{1, 3}));
+  EXPECT_EQ(Numbers(s.files[2]), (NumberList{10, 11, 5}));
+
+  // Without the deletions the same additions overlap the files that are still there.
+  VersionEdit without_deletions = EditAdding({{2, F(10, "d", "f")}, {2, F(11, "g", "h")}}, 100);
+  EXPECT_EQ(ApplyError(base, without_deletions), "Corruption: files 4 and 10 overlap at level 2");
+
+  // Deleting only one of the two overlapped files is not enough either.
+  VersionEdit half = without_deletions;
+  half.deleted_files = {{1, 2}};
+  EXPECT_EQ(ApplyError(base, half), "Corruption: files 4 and 10 overlap at level 2");
+
+  // A level-1 rewrite: two files replaced by two others that split the range somewhere else.
+  VersionEdit rewrite = EditAdding({{1, F(20, "a", "b")}, {1, F(21, "bb", "g")}}, 100);
+  rewrite.deleted_files = {{1, 1}, {1, 2}};
+  const VersionState rewritten = Applied(base, rewrite);
+  EXPECT_EQ(Numbers(rewritten.files[1]), (NumberList{20, 21, 3}));
+}
+
 TEST(VersionStateTest, OverlapAtLevel1IsRejected) {
   // [a,c] and [c,d] share the user key c, whatever the sequence numbers say.
   EXPECT_EQ(ApplyError(VersionState{}, EditAdding({{1, F(1, "a", "c")}, {1, F(2, "c", "d")}})),
@@ -317,19 +431,30 @@ TEST(VersionStateTest, MalformedKeysAreRefusedNotAborted) {
   EXPECT_EQ(Applied(VersionState{}, pointer), VersionState{});
 }
 
-TEST(VersionStateTest, LevelOutsideTheRangeIsRefusedNotIndexed) {
+TEST(VersionStateDeathTest, EditLevelOutsideTheRangeAborts) {
+  // A decoded edit cannot have such a level, because DecodeFrom() range-checks, so one that does
+  // was built wrongly in memory. That is a bug in the caller, and it aborts as EncodeTo() does,
+  // whatever else the edit holds.
+  VersionState out;
   for (const int level : {-1, kNumLevels, 1000}) {
-    const std::string want =
-        "Corruption: VersionEdit: level " + std::to_string(level) + " out of range";
-    VersionEdit added = EditAdding({{level, F(3, "a", "b")}});
-    EXPECT_EQ(ApplyError(VersionState{}, added), want);
+    const VersionEdit added = EditAdding({{level, F(3, "a", "b")}});
+    EXPECT_DEATH((void)ApplyEdit(VersionState{}, added, &out), "out of range") << level;
     VersionEdit deleted;
     deleted.deleted_files = {{level, 3}};
-    EXPECT_EQ(ApplyError(VersionState{}, deleted), want);
+    EXPECT_DEATH((void)ApplyEdit(VersionState{}, deleted, &out), "out of range") << level;
     VersionEdit pointer;
     pointer.compact_pointers = {{level, IKey("a", 1)}};
-    EXPECT_EQ(ApplyError(VersionState{}, pointer), want);
+    EXPECT_DEATH((void)ApplyEdit(VersionState{}, pointer, &out), "out of range") << level;
   }
+  // Even when the edit breaks a rule that is reported before any file is looked at: the levels are
+  // checked before anything.
+  VersionEdit counters;
+  counters.log_number = 10;
+  counters.next_file_number = 20;
+  const VersionState base = Applied(VersionState{}, counters);
+  VersionEdit both = EditAdding({{kNumLevels, F(3, "a", "b")}});
+  both.log_number = 9;  // a decrease
+  EXPECT_DEATH((void)ApplyEdit(base, both, &out), "out of range");
 }
 
 TEST(VersionStateTest, OutputMayBeTheBase) {
@@ -495,6 +620,21 @@ TEST(VersionStateTest, TotalFileSizeAddsUp) {
   EXPECT_EQ(TotalFileSize({F(1, "a", "b", 10), F(2, "c", "d", 0), F(3, "e", "f", 5)}), 15u);
   EXPECT_EQ(TotalFileSize({F(1, "a", "b", uint64_t{1} << 40), F(2, "c", "d", uint64_t{1} << 40)}),
             uint64_t{1} << 41);
+}
+
+TEST(VersionStateTest, TotalFileSizeSaturatesInsteadOfWrapping) {
+  // Sizes come out of a MANIFEST, and a forged one can sum past 2^64. A wrapped total would be a
+  // small number that compaction scoring and the trivial-move bound then trust.
+  constexpr uint64_t kMax = std::numeric_limits<uint64_t>::max();
+  EXPECT_EQ(TotalFileSize({F(1, "a", "b", kMax), F(2, "c", "d", 1)}), kMax);
+  EXPECT_EQ(TotalFileSize({F(1, "a", "b", uint64_t{1} << 63), F(2, "c", "d", uint64_t{1} << 63)}),
+            kMax);
+  EXPECT_EQ(TotalFileSize({F(1, "a", "b", kMax), F(2, "c", "d", kMax)}), kMax);
+  // Reaching the maximum exactly is not saturation, and past it stays at it, whatever follows.
+  EXPECT_EQ(TotalFileSize({F(1, "a", "b", kMax - 1), F(2, "c", "d", 1)}), kMax);
+  EXPECT_EQ(TotalFileSize({F(1, "a", "b", kMax - 1), F(2, "c", "d", 2), F(3, "e", "f", 0)}), kMax);
+  EXPECT_EQ(TotalFileSize({F(1, "a", "b", kMax - 1), F(2, "c", "d", 2), F(3, "e", "f", 5)}), kMax);
+  EXPECT_EQ(TotalFileSize({F(1, "a", "b", 3), F(2, "c", "d", kMax - 1)}), kMax);
 }
 
 std::vector<uint64_t> OverlapNumbers(const VersionState& s, int level,
@@ -719,6 +859,12 @@ TEST(VersionStateTest, CheckInvariantsAlarmsAndPasses) {
   const Status ok = CheckInvariants(valid);
   EXPECT_TRUE(ok.ok()) << ok.ToString();
 
+  // One below next_file_number is the largest log number a state may have.
+  VersionState last_log = valid;
+  last_log.log_number = last_log.next_file_number - 1;
+  const Status last_ok = CheckInvariants(last_log);
+  EXPECT_TRUE(last_ok.ok()) << last_ok.ToString();
+
   // The overlapping level-2 files the hand-built state of the task asks for.
   VersionState overlapping = valid;
   overlapping.files[2] = {F(16, "a", "c"), F(17, "b", "d")};
@@ -737,6 +883,10 @@ TEST(VersionStateTest, CheckInvariantsAlarmsAndPasses) {
        "Corruption: file 5 appears twice"},
       {"number not below next_file_number", [](VersionState* s) { s->next_file_number = 9; },
        "Corruption: file 9 not below next_file_number 9"},
+      {"log_number not below next_file_number", [](VersionState* s) { s->log_number = 20; },
+       "Corruption: log_number 20 not below next_file_number 20"},
+      {"log_number above next_file_number", [](VersionState* s) { s->log_number = 21; },
+       "Corruption: log_number 21 not below next_file_number 20"},
       {"smallest above largest", [](VersionState* s) { s->files[1][0] = F(3, "c", "a"); },
        "Corruption: file 3 has smallest > largest"},
       {"overlap", [](VersionState* s) { s->files[2] = {F(16, "a", "c"), F(17, "b", "d")}; },
@@ -759,6 +909,64 @@ TEST(VersionStateTest, CheckInvariantsAlarmsAndPasses) {
     EXPECT_TRUE(s.IsCorruption()) << c.name << ": " << s.ToString();
     EXPECT_EQ(s.ToString(), c.message) << c.name;
   }
+}
+
+TEST(VersionStateTest, RulesAreReportedInTheDocumentedOrder) {
+  // Each edit below breaks two rules, and the one listed first in ApplyEdit's documentation is the
+  // one reported. A test that only broke each rule alone would pass if two were swapped.
+  VersionEdit counters;
+  counters.log_number = 10;
+  counters.next_file_number = 20;
+  const VersionState base = Applied(VersionState{}, [&] {
+    VersionEdit e = counters;
+    e.new_files = {{1, F(5, "a", "c")}};
+    return e;
+  }());
+
+  const auto bad_key = [] {
+    FileMetaData f = F(30, "x", "y");
+    f.smallest = "x";
+    return f;
+  };
+
+  // A counter that decreases, before a deletion that finds nothing.
+  VersionEdit e;
+  e.log_number = 9;
+  e.deleted_files = {{1, 99}};
+  EXPECT_EQ(ApplyError(base, e), "Corruption: log_number decreases from 10 to 9");
+
+  // A deletion that finds nothing, before a malformed key.
+  e = EditAdding({{2, bad_key()}});
+  e.deleted_files = {{1, 99}};
+  EXPECT_EQ(ApplyError(base, e), "Corruption: VersionEdit deletes file 99 not at level 1");
+
+  // A re-added file that changed, before a malformed key.
+  FileMetaData changed = F(5, "a", "d");
+  e = EditAdding({{1, changed}, {2, bad_key()}});
+  e.deleted_files = {{1, 5}};
+  EXPECT_EQ(ApplyError(base, e), "Corruption: file 5 re-added with different metadata");
+
+  // A malformed key, before a log number that is not below next_file_number.
+  e = EditAdding({{2, bad_key()}}, 100);
+  e.log_number = 100;
+  EXPECT_EQ(ApplyError(base, e), "Corruption: file 30 has a malformed internal key");
+
+  // A log number that is not below next_file_number, before a file that is not.
+  e = EditAdding({{2, F(500, "a", "b")}}, 100);
+  e.log_number = 100;
+  EXPECT_EQ(ApplyError(base, e), "Corruption: log_number 100 not below next_file_number 100");
+
+  // Within one file, a number not below next_file_number, before smallest > largest.
+  e = EditAdding({{2, F(500, "z", "a")}}, 100);
+  EXPECT_EQ(ApplyError(base, e), "Corruption: file 500 not below next_file_number 100");
+
+  // A file that is backwards, before a number that appears twice, though it comes later.
+  e = EditAdding({{2, F(40, "a", "b")}, {3, F(40, "c", "d")}, {4, F(41, "z", "a")}}, 100);
+  EXPECT_EQ(ApplyError(base, e), "Corruption: file 41 has smallest > largest");
+
+  // A number that appears twice, before files that overlap.
+  e = EditAdding({{2, F(40, "a", "c")}, {2, F(40, "b", "d")}}, 100);
+  EXPECT_EQ(ApplyError(base, e), "Corruption: file 40 appears twice");
 }
 
 TEST(VersionStateTest, AcceptedEditsAlwaysLeaveAValidState) {

@@ -35,10 +35,11 @@ struct VersionState {
   /// Where the next compaction of each level starts, as an internal key; the empty string means
   /// the level has no pointer yet.
   std::array<std::string, kNumLevels> compact_pointers;
-  /// The number of the oldest write-ahead log that still holds writes not yet in a table.
+  /// The number of the oldest write-ahead log that still holds writes not yet in a table. Always
+  /// below next_file_number.
   uint64_t log_number = 0;
-  /// The next number to give a file; every file in the state is numbered below it. A new
-  /// database starts it at 2.
+  /// The next number to give a file; every file in the state, and the log, is numbered below it.
+  /// A new database starts it at 2.
   uint64_t next_file_number = 2;
   /// The sequence number of the newest write that the tables hold.
   SequenceNumber last_sequence = 0;
@@ -50,34 +51,46 @@ struct VersionState {
 /// Applies `edit` to `base`. On success `*out` is the new state; on failure `*out` is untouched and
 /// the Corruption message names the rule that failed. `out` may be `&base`.
 ///
-/// The edit's deletions are applied first, against `base`, then its additions, then the counters
-/// and compact pointers it sets (a level named twice takes the later pointer). The result is then
-/// held to these rules, and the first one broken is reported:
-///  - a level in the edit is in [0, kNumLevels): "VersionEdit: level <n> out of range"
-///  - log_number, next_file_number and last_sequence never decrease:
-///    "<field> decreases from <x> to <y>"
-///  - every deleted file is in `base` at that level:
-///    "VersionEdit deletes file <n> not at level <l>"
-///  - every key is a well-formed internal key: "file <n> has a malformed internal key" and
-///    "compact pointer at level <l> is not an internal key". This is a rule because comparing a
-///    malformed key aborts, and an edit read from a MANIFEST must not be able to do that.
-///  - a file number is below the resulting next_file_number:
-///    "file <n> not below next_file_number <m>"
-///  - no file number appears twice, at one level or two: "file <n> appears twice". A file that
-///    moves down a level, deleted from one and added to the next under the same number, appears
-///    once, so a trivial move is one edit.
-///  - every file has smallest <= largest in internal-key order: "file <n> has smallest > largest"
-///  - below level 0, user-key ranges are disjoint, so that two files that share even one user key
-///    are refused: "files <a> and <b> overlap at level <l>"
+/// Aborts if a level in the edit is outside [0, kNumLevels), before looking at anything else. A
+/// decoded edit never has one, because VersionEdit::DecodeFrom() range-checks, so it is a bug in
+/// whatever built the edit, as for VersionEdit::EncodeTo().
 ///
-/// `base` is expected to satisfy CheckInvariants(), as every state ApplyEdit returns does. A `base`
-/// that does not is refused with the rule it breaks.
+/// The rules are checked in the order below and the first one broken is reported. The counters
+/// the edit sets and the compact pointers it names are written first (a level named twice takes
+/// the later pointer, and an empty key clears the pointer), then the deletions, then the additions
+/// and then the result is held to the rest:
+///  1. log_number, next_file_number and last_sequence never decrease:
+///     "<field> decreases from <x> to <y>"
+///  2. every deleted file is in `base` at that level, and a file the same edit adds is not:
+///     "VersionEdit deletes file <n> not at level <l>"
+///  3. a file added under the number of one the edit deleted, a file that moved, has the same
+///     size and keys: "file <n> re-added with different metadata". A number that came to mean
+///     other keys would make a read look in the wrong file and miss.
+///  4. every key is a well-formed internal key: "file <n> has a malformed internal key" and
+///     "compact pointer at level <l> is not an internal key". This is a rule because comparing a
+///     malformed key aborts, and an edit read from a MANIFEST must not be able to do that.
+///  5. the log number is below next_file_number:
+///     "log_number <x> not below next_file_number <y>"
+///  6. file by file, in level order and the order each level holds them, a number below
+///     next_file_number ("file <n> not below next_file_number <m>") and smallest <= largest in
+///     internal-key order ("file <n> has smallest > largest")
+///  7. no file number appears twice, at one level or two: "file <n> appears twice", naming the
+///     smallest that does. A file that moves down a level, deleted from one and added to the
+///     next under the same number, appears once, so a trivial move is one edit.
+///  8. each level is in order, and below level 0 the user-key ranges are disjoint, so that two
+///     files that share even one user key are refused: "files <a> and <b> overlap at level <l>"
+///
+/// Levels the edit adds to are sorted before the check, so that the order in which an edit lists
+/// its files does not matter. `base` is expected to satisfy CheckInvariants(), as every state
+/// ApplyEdit returns does. One that does not is refused with the rule it breaks only if the defect
+/// is still there in the result: an edit that deletes the offending file removes it, and a level
+/// that is only out of order is put in order if the edit adds to it.
 Status ApplyEdit(const VersionState& base, const VersionEdit& edit, VersionState* out);
 
-/// Checks the rules ApplyEdit() holds its result to, on a whole state: the key, number, range and
-/// overlap rules above, plus that level 0 is sorted by number ("files <a> and <b> out of order at
-/// level 0") and the other levels by smallest key (the same message with their level). For tests
-/// and the simulator, which build states by hand.
+/// Checks the rules ApplyEdit() holds its result to, rules 4 to 8 above, on a whole state: the
+/// key, log number, number, range and overlap rules, plus that level 0 is sorted by number and the
+/// other levels by smallest key ("files <a> and <b> out of order at level <l>"). For tests and the
+/// simulator, which build states by hand.
 Status CheckInvariants(const VersionState& state);
 
 /// Returns one edit that rebuilds `state` when applied to VersionState{}: it sets all three
@@ -85,7 +98,9 @@ Status CheckInvariants(const VersionState& state);
 /// MANIFEST. `state` must be one ApplyEdit() could have produced.
 VersionEdit SnapshotEdit(const VersionState& state);
 
-/// Returns the sum of the sizes of `files`, in bytes.
+/// Returns the sum of the sizes of `files`, in bytes. The sum stops at the largest uint64_t instead
+/// of wrapping: the sizes may have been read from a damaged or forged MANIFEST, and a total that
+/// wrapped would look small to the code that scores levels for compaction.
 uint64_t TotalFileSize(const std::vector<FileMetaData>& files);
 
 /// Returns the files at `level` whose user-key range intersects [begin_user_key, end_user_key],

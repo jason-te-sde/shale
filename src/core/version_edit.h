@@ -42,17 +42,24 @@ struct FileMetaData {
 /// A change to the table set: which files appear, which disappear, and how far the counters have
 /// moved. A field that is not set leaves the matching part of the state as it was.
 ///
-/// The encoding is a sequence of records, each a varint32 tag followed by the record's fields, and
-/// nothing else: an edit with no field set encodes to the empty string. The tags are
+/// The encoding is a sequence of records, each a tag followed by the record's fields, and nothing
+/// else: an edit with no field set encodes to the empty string. The tags are
 ///  1  log_number          varint64
 ///  2  next_file_number    varint64
 ///  3  last_sequence       varint64
-///  4  compact pointer     varint32 level, length-prefixed internal key
-///  5  deleted file        varint32 level, varint64 number
-///  6  new file            varint32 level, varint64 number, varint64 size,
+///  4  compact pointer     level, length-prefixed internal key
+///  5  deleted file        level, varint64 number
+///  6  new file            level, varint64 number, varint64 size,
 ///                         length-prefixed smallest key, length-prefixed largest key
-/// EncodeTo() writes them in that order, so one edit has one encoding. A level is always below
-/// kNumLevels.
+/// EncodeTo() writes them in that order, so one edit has one encoding, and writes a tag and a level
+/// as a varint32. A level is always below kNumLevels.
+///
+/// DecodeFrom() reads a tag and a level as a varint64 and range-checks the value, so a tag of 2^32
+/// or more is an unknown tag and a level of 2^32 or more is a level out of range, and not a
+/// truncation, as a 32-bit read would call them. A varint of more than 64 bits is reported as
+/// truncated, since it cannot be told from one that was cut off. An over-long encoding of a small
+/// value, a continuation byte followed by a zero byte, is accepted, as the varint readers accept
+/// it, and means the value it spells.
 struct VersionEdit {
   /// The number of the oldest write-ahead log that still holds data not in a table.
   std::optional<uint64_t> log_number;
@@ -61,7 +68,8 @@ struct VersionEdit {
   /// The sequence number of the newest write the tables hold.
   std::optional<SequenceNumber> last_sequence;
   /// Where the next compaction of each level starts: (level, internal key). When one level is
-  /// named twice, the later entry wins.
+  /// named twice, the later entry wins. An empty key means no pointer: applied to a state, it
+  /// clears the level's.
   std::vector<std::pair<int, std::string>> compact_pointers;
   /// The files that leave the set: (level, file number).
   std::set<std::pair<int, uint64_t>> deleted_files;

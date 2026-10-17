@@ -4,10 +4,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -33,30 +34,21 @@ bool IsInternalKey(std::string_view key) {
   return ParseInternalKey(key, &unused);
 }
 
-Status LevelOutOfRange(int level) {
-  return Status::Corruption("VersionEdit: level " + std::to_string(level) + " out of range");
-}
-
-// An edit can be built in memory as well as decoded, and a level the decoder would have refused
-// must not index an array here.
-Status CheckEditLevels(const VersionEdit& edit) {
+// An edit built in memory can name a level outside the range, and a level that is used to index an
+// array must not be one. A decoded edit never has one, since DecodeFrom() range-checks, so this is
+// a bug in whatever built the edit, and it aborts, as VersionEdit::EncodeTo() does. It is checked
+// before any rule, so that what an edit with a bad level also gets wrong does not matter.
+void CheckEditLevels(const VersionEdit& edit) {
   const auto in_range = [](int level) { return level >= 0 && level < kNumLevels; };
   for (const auto& entry : edit.compact_pointers) {
-    if (!in_range(entry.first)) {
-      return LevelOutOfRange(entry.first);
-    }
+    SHALE_CHECK(in_range(entry.first), "ApplyEdit: a compact pointer's level is out of range");
   }
   for (const auto& entry : edit.deleted_files) {
-    if (!in_range(entry.first)) {
-      return LevelOutOfRange(entry.first);
-    }
+    SHALE_CHECK(in_range(entry.first), "ApplyEdit: a deleted file's level is out of range");
   }
   for (const auto& entry : edit.new_files) {
-    if (!in_range(entry.first)) {
-      return LevelOutOfRange(entry.first);
-    }
+    SHALE_CHECK(in_range(entry.first), "ApplyEdit: a new file's level is out of range");
   }
-  return Status::OK();
 }
 
 Status CheckNotDecreasing(std::string_view field, uint64_t before,
@@ -98,9 +90,27 @@ bool InLevelOrder(size_t level, const FileMetaData& a, const FileMetaData& b) {
   return by_key != 0 ? by_key < 0 : a.number < b.number;
 }
 
-// Every rule except the form of the keys, which CheckKeys() has already seen to.
+// "files <a> and <b>", the start of the messages about two neighbours. Built where it is reported
+// and nowhere else: the checks that need it run on every edit.
+std::string PairText(const FileMetaData& before, const FileMetaData& after) {
+  return "files " + std::to_string(before.number) + " and " + std::to_string(after.number);
+}
+
+// Every rule except the form of the keys, which CheckKeys() has already seen to, in the order
+// ApplyEdit() documents them.
 Status CheckStructure(const VersionState& state) {
-  std::unordered_set<uint64_t> seen;
+  if (state.log_number >= state.next_file_number) {
+    return Status::Corruption("log_number " + std::to_string(state.log_number) +
+                              " not below next_file_number " +
+                              std::to_string(state.next_file_number));
+  }
+
+  size_t count = 0;
+  for (const auto& level : state.files) {
+    count += level.size();
+  }
+  std::vector<uint64_t> numbers;
+  numbers.reserve(count);
   for (const auto& level : state.files) {
     for (const FileMetaData& f : level) {
       if (f.number >= state.next_file_number) {
@@ -108,31 +118,37 @@ Status CheckStructure(const VersionState& state) {
                                   " not below next_file_number " +
                                   std::to_string(state.next_file_number));
       }
-      if (!seen.insert(f.number).second) {
-        return Status::Corruption("file " + std::to_string(f.number) + " appears twice");
-      }
       if (CompareInternalKey(f.smallest, f.largest) > 0) {
         return Status::Corruption("file " + std::to_string(f.number) + " has smallest > largest");
       }
+      numbers.push_back(f.number);
     }
   }
+
+  // One sorted run of the numbers finds a repeat without a table of them. The number reported is
+  // the smallest that appears twice.
+  std::sort(numbers.begin(), numbers.end());
+  const auto repeated = std::adjacent_find(numbers.begin(), numbers.end());
+  if (repeated != numbers.end()) {
+    return Status::Corruption("file " + std::to_string(*repeated) + " appears twice");
+  }
+
   for (size_t level = 0; level < state.files.size(); level++) {
     const std::vector<FileMetaData>& files = state.files[level];
     for (size_t i = 1; i < files.size(); i++) {
       const FileMetaData& before = files[i - 1];
       const FileMetaData& after = files[i];
-      const std::string pair =
-          "files " + std::to_string(before.number) + " and " + std::to_string(after.number);
       // Numbers are unique by now, so the order is strict at level 0.
       if (!InLevelOrder(level, before, after)) {
-        return Status::Corruption(pair + " out of order at level " +
+        return Status::Corruption(PairText(before, after) + " out of order at level " +
                                   std::to_string(LevelOf(level)));
       }
       // Sorted by smallest key, two files overlap if and only if neighbours do: a file that
       // reaches past a later one reaches the one between.
       if (level > 0 &&
           BytewiseCompare(ExtractUserKey(before.largest), ExtractUserKey(after.smallest)) >= 0) {
-        return Status::Corruption(pair + " overlap at level " + std::to_string(LevelOf(level)));
+        return Status::Corruption(PairText(before, after) + " overlap at level " +
+                                  std::to_string(LevelOf(level)));
       }
     }
   }
@@ -144,9 +160,7 @@ Status CheckStructure(const VersionState& state) {
 Status ApplyEdit(const VersionState& base, const VersionEdit& edit, VersionState* out) {
   SHALE_CHECK(out != nullptr, "ApplyEdit needs somewhere to put the new state");
 
-  if (Status s = CheckEditLevels(edit); !s.ok()) {
-    return s;
-  }
+  CheckEditLevels(edit);
   if (Status s = CheckNotDecreasing("log_number", base.log_number, edit.log_number); !s.ok()) {
     return s;
   }
@@ -171,11 +185,14 @@ Status ApplyEdit(const VersionState& base, const VersionEdit& edit, VersionState
   }
 
   // Deletions come first and are checked against `base`: a file the edit adds is not there to
-  // delete, and one that moves down a level is deleted from the old level before it is added.
+  // delete, and one that moves down a level is deleted from the old level before it is added. What
+  // is deleted is kept, so that a file added under the number of one deleted can be compared with
+  // it.
   std::array<bool, kNumLevels> touched{};
-  for (const auto& deleted : edit.deleted_files) {
-    const int level = deleted.first;
-    const uint64_t number = deleted.second;
+  std::map<uint64_t, FileMetaData> deleted;
+  for (const auto& entry : edit.deleted_files) {
+    const int level = entry.first;
+    const uint64_t number = entry.second;
     std::vector<FileMetaData>& files = next.files[Index(level)];
     const auto it = std::find_if(files.begin(), files.end(),
                                  [number](const FileMetaData& f) { return f.number == number; });
@@ -183,9 +200,18 @@ Status ApplyEdit(const VersionState& base, const VersionEdit& edit, VersionState
       return Status::Corruption("VersionEdit deletes file " + std::to_string(number) +
                                 " not at level " + std::to_string(level));
     }
+    deleted.emplace(number, std::move(*it));
     files.erase(it);
   }
   for (const auto& [level, file] : edit.new_files) {
+    // A file that leaves one level and joins another under one number is the same file moving, and
+    // it must still be the same: a number that came to mean other keys would make a read look in
+    // the wrong place, and miss.
+    const auto was = deleted.find(file.number);
+    if (was != deleted.end() && !(was->second == file)) {
+      return Status::Corruption("file " + std::to_string(file.number) +
+                                " re-added with different metadata");
+    }
     next.files[Index(level)].push_back(file);
     touched[Index(level)] = true;
   }
@@ -232,9 +258,12 @@ VersionEdit SnapshotEdit(const VersionState& state) {
 }
 
 uint64_t TotalFileSize(const std::vector<FileMetaData>& files) {
+  constexpr uint64_t kMax = std::numeric_limits<uint64_t>::max();
   uint64_t total = 0;
   for (const FileMetaData& f : files) {
-    total += f.file_size;
+    // A size comes out of a MANIFEST, so the sum can pass 2^64. It stops at the maximum: a wrapped
+    // total is a small number that compaction scoring would trust.
+    total = f.file_size > kMax - total ? kMax : total + f.file_size;
   }
   return total;
 }
