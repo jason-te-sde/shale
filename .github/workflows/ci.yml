@@ -1,0 +1,172 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build-test (${{ matrix.os }}, ${{ matrix.compiler }}, ${{ matrix.build_type }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04]
+        compiler: [gcc-13, gcc-14, clang-18]
+        build_type: [Debug, Release]
+        include:
+          - os: macos-14
+            compiler: appleclang
+            build_type: Release
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the toolchain
+        env:
+          OS: ${{ matrix.os }}
+          COMPILER: ${{ matrix.compiler }}
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          case "$COMPILER" in
+            gcc-*)
+              package="g++-${COMPILER#gcc-}"
+              echo "CC=$COMPILER" >> "$GITHUB_ENV"
+              echo "CXX=g++-${COMPILER#gcc-}" >> "$GITHUB_ENV"
+              ;;
+            clang-*)
+              package="$COMPILER"
+              echo "CC=$COMPILER" >> "$GITHUB_ENV"
+              echo "CXX=clang++-${COMPILER#clang-}" >> "$GITHUB_ENV"
+              ;;
+            *)
+              package=""
+              ;;
+          esac
+          if [ "$OS" = macos-14 ]; then
+            brew install ninja
+          else
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends ninja-build "$package"
+          fi
+
+      - name: Configure
+        run: cmake -S . -B build/ci -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Build
+        run: cmake --build build/ci
+
+      - name: Test
+        run: ctest --test-dir build/ci --output-on-failure --no-tests=error
+
+      - name: Upload the test log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-log-${{ matrix.os }}-${{ matrix.compiler }}-${{ matrix.build_type }}
+          path: build/**/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
+  sanitize:
+    name: sanitize (${{ matrix.sanitizer }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sanitizer: address,undefined
+            ctest_args: ""
+          - sanitizer: thread
+            ctest_args: --repeat until-fail:3
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang-18
+
+      # ThreadSanitizer aborts with "unexpected memory mapping" under the runner's default ASLR
+      # entropy.
+      - name: Lower the address-space randomisation
+        if: matrix.sanitizer == 'thread'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Configure
+        run: >
+          cmake -S . -B build/sanitize -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DSHALE_SANITIZE=${{ matrix.sanitizer }}
+
+      - name: Build
+        run: cmake --build build/sanitize
+
+      - name: Test
+        env:
+          CTEST_ARGS: ${{ matrix.ctest_args }}
+        # CTEST_ARGS is deliberately unquoted: it is a list of words, and empty for the first entry.
+        run: ctest --test-dir build/sanitize --output-on-failure --no-tests=error $CTEST_ARGS
+
+      - name: Upload the test log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-log-sanitize-${{ matrix.sanitizer }}
+          path: build/**/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      # The whole history, so that check-hygiene.sh scans every commit message.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang-18 doxygen
+
+      # Keep these versions in step with scripts/preflight.sh.
+      - name: Install the pinned clang-format and clang-tidy
+        run: |
+          python3 -m venv "$RUNNER_TEMP/lint-tools"
+          "$RUNNER_TEMP/lint-tools/bin/pip" install clang-format==23.1.3 clang-tidy==22.1.8
+          echo "$RUNNER_TEMP/lint-tools/bin" >> "$GITHUB_PATH"
+
+      - name: clang-format
+        run: git ls-files -z -- '*.h' '*.cc' | xargs -0 -r clang-format --dry-run --Werror
+
+      - name: Layering
+        run: bash scripts/check-layering.sh
+
+      - name: Hygiene
+        run: bash scripts/check-hygiene.sh
+
+      - name: Configure
+        env:
+          CC: clang-18
+          CXX: clang++-18
+        run: >
+          cmake -S . -B build/lint -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DSHALE_BUILD_TESTS=OFF
+
+      - name: clang-tidy
+        run: git ls-files -z -- 'src/*.cc' 'tools/*.cc' | xargs -0 -r clang-tidy -p build/lint --quiet
+
+      - name: Doxygen
+        run: cmake --build build/lint --target docs

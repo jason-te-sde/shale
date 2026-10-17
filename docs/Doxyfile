@@ -1,0 +1,43 @@
+# Doxygen configuration for the public API. Run from the repository root:
+#   cmake --build --preset dev --target docs
+# Every public type, function and member under include/shale/ needs a `///` comment, and a
+# missing or malformed one fails the build.
+
+PROJECT_NAME           = "shale"
+OUTPUT_DIRECTORY       = build/docs
+
+INPUT                  = include/shale
+FILE_PATTERNS          = *.h
+RECURSIVE              = YES
+
+# What counts as documented: the first sentence of a `///` comment is the brief description.
+JAVADOC_AUTOBRIEF      = YES
+EXTRACT_ALL            = NO
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = NO
+
+WARN_IF_UNDOCUMENTED   = YES
+WARN_IF_DOC_ERROR      = YES
+WARN_IF_INCOMPLETE_DOC = YES
+WARN_AS_ERROR          = YES
+
+QUIET                  = YES
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+
+# No Graphviz. Without this line the default for HAVE_DOT depends on how the installed Doxygen was
+# built, and the Ubuntu package runs `dot` and aborts when it is not installed. The graph tags are
+# switched off as well so that nothing asks for it.
+HAVE_DOT               = NO
+CLASS_GRAPH            = NO
+COLLABORATION_GRAPH    = NO
+GROUP_GRAPHS           = NO
+UML_LOOK               = NO
+TEMPLATE_RELATIONS     = NO
+INCLUDE_GRAPH          = NO
+INCLUDED_BY_GRAPH      = NO
+CALL_GRAPH             = NO
+CALLER_GRAPH           = NO
+GRAPHICAL_HIERARCHY    = NO
+DIRECTORY_GRAPH        = NO
+GENERATE_LEGEND        = NO
