@@ -44,15 +44,16 @@ struct Expected {
 TEST(FileNameTest, ParseAccepts) {
   const Expected cases[] = {
       {"000007.log", 7, FileType::kLogFile},
-      {"123.sst", 123, FileType::kTableFile},
+      {"000123.sst", 123, FileType::kTableFile},
       {"MANIFEST-000003", 3, FileType::kDescriptorFile},
       {"CURRENT", 0, FileType::kCurrentFile},
       {"LOCK", 0, FileType::kLockFile},
       {"LOG", 0, FileType::kInfoLogFile},
       {"LOG.old", 0, FileType::kInfoLogFile},
-      {"9.dbtmp", 9, FileType::kTempFile},
+      {"000009.dbtmp", 9, FileType::kTempFile},
       {"18446744073709551615.log", std::numeric_limits<uint64_t>::max(), FileType::kLogFile},
-      {"0.sst", 0, FileType::kTableFile},
+      {"000000.sst", 0, FileType::kTableFile},
+      {"999999.log", 999999, FileType::kLogFile},
       {"1234567.sst", 1234567, FileType::kTableFile},
       {"MANIFEST-18446744073709551615", std::numeric_limits<uint64_t>::max(),
        FileType::kDescriptorFile},
@@ -94,6 +95,22 @@ TEST(FileNameTest, ParseRejects) {
       "7",
       "7.tmp",
       "7.ldb",
+      // Only what the constructors print is a name: six digits, or more without leading zeros.
+      "9.log",
+      "0009.log",
+      "00009.log",
+      "0000009.log",
+      "0.sst",
+      "7.sst",
+      "123.sst",
+      "9.dbtmp",
+      "09.dbtmp",
+      "00000000000000000001.log",
+      "018446744073709551615.log",
+      "MANIFEST-3",
+      "MANIFEST-0003",
+      "MANIFEST-0000003",
+      "MANIFEST-0",
       std::string_view("7.log\0", 6),
       std::string_view("CURRENT\0", 8),
   };
@@ -143,6 +160,44 @@ TEST(FileNameTest, ConstructedNamesParseBackToTheirNumberAndType) {
     ASSERT_TRUE(ParseFileName(basename(c.path), &number, &type)) << c.path;
     EXPECT_EQ(number, 0u) << c.path;
     EXPECT_EQ(static_cast<int>(type), static_cast<int>(c.type)) << c.path;
+  }
+}
+
+TEST(FileNameTest, ANumberSpelledAnyOtherWayThanTheConstructorsPrintItIsNotAName) {
+  // Recovery opens the file that LogFileName() names for the number it parses, so a spelling that
+  // parses to a number but is not that file's name sends it to a file that is not there.
+  const uint64_t numbers[] = {0, 1, 7, 99999, 100000, 999999, 1000000, 1234567};
+  const auto basename = [](const std::string& path) { return path.substr(path.find('/') + 1); };
+  for (uint64_t n : numbers) {
+    const struct {
+      std::string path;
+      std::string_view prefix;
+    } cases[] = {
+        {LogFileName("db", n), ""},
+        {TableFileName("db", n), ""},
+        {TempFileName("db", n), ""},
+        {DescriptorFileName("db", n), "MANIFEST-"},
+    };
+    for (const auto& c : cases) {
+      const std::string name = basename(c.path);
+      uint64_t number = 0;
+      FileType type = FileType::kCurrentFile;
+      ASSERT_TRUE(ParseFileName(name, &number, &type)) << name;
+      EXPECT_EQ(number, n) << name;
+
+      // One more zero in front of the digits.
+      std::string wider = name;
+      wider.insert(c.prefix.size(), "0");
+      EXPECT_FALSE(ParseFileName(wider, &number, &type)) << wider;
+
+      // One digit fewer where the number has leading zeros to give up: the name of a smaller
+      // padding is not a name either.
+      if (name.size() > c.prefix.size() && name[c.prefix.size()] == '0') {
+        std::string narrower = name;
+        narrower.erase(c.prefix.size(), 1);
+        EXPECT_FALSE(ParseFileName(narrower, &number, &type)) << narrower;
+      }
+    }
   }
 }
 

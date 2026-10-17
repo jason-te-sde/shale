@@ -34,8 +34,11 @@ std::string NumberedName(uint64_t number, std::string_view suffix) {
 }
 
 // Reads the decimal digits at the front of `*input` into `*value` and removes them. Returns false
-// if there is no digit at the front or the number does not fit in 64 bits.
-bool ConsumeDecimalNumber(std::string_view* input, uint64_t* value) {
+// if there is no digit at the front, the number does not fit in 64 bits, or the digits are not the
+// way PaddedNumber() prints the number: with a zero too many in front, or too few digits for a
+// number below 100000. A name that parses to a number must be the name that number is printed as,
+// since recovery opens the file that the constructors name for the number it read.
+bool ConsumeCanonicalNumber(std::string_view* input, uint64_t* value) {
   constexpr uint64_t kMax = std::numeric_limits<uint64_t>::max();
   uint64_t result = 0;
   size_t digits = 0;
@@ -47,7 +50,7 @@ bool ConsumeDecimalNumber(std::string_view* input, uint64_t* value) {
     result = result * 10 + digit;
     digits++;
   }
-  if (digits == 0) {
+  if (digits == 0 || digits != PaddedNumber(result).size()) {
     return false;
   }
   input->remove_prefix(digits);
@@ -102,7 +105,7 @@ bool ParseFileName(std::string_view filename, uint64_t* number, FileType* type) 
   if (filename.starts_with(kManifestPrefix)) {
     std::string_view rest = filename.substr(kManifestPrefix.size());
     uint64_t parsed = 0;
-    if (!ConsumeDecimalNumber(&rest, &parsed) || !rest.empty()) {
+    if (!ConsumeCanonicalNumber(&rest, &parsed) || !rest.empty()) {
       return false;
     }
     *number = parsed;
@@ -112,7 +115,7 @@ bool ParseFileName(std::string_view filename, uint64_t* number, FileType* type) 
 
   std::string_view rest = filename;
   uint64_t parsed = 0;
-  if (!ConsumeDecimalNumber(&rest, &parsed)) {
+  if (!ConsumeCanonicalNumber(&rest, &parsed)) {
     return false;
   }
   FileType parsed_type;
