@@ -10,13 +10,16 @@
 #   src/core/*       util/*, core/*, shale/status.h, standard headers, and none of the headers
 #                    that bring in threads, clocks, files, streams or randomness
 #   src/db/*         anything
+#   src/<other>/*    not allowed: a directory that is not one of the four layers has no include
+#                    rule, so the check would silently skip it
 #
 # "Standard" means a C++ library header (no extension) or a C library header such as <stdint.h>.
 # Any other angle-bracket header, <unistd.h> and <sys/stat.h> among them, is a POSIX header.
 #
 # The output rule bans std::cout, std::cerr, printf(, fprintf( and puts( under include/ and src/,
 # except in src/util/check.cc, which prints its message right before aborting. snprintf( is fine,
-# and so is a line that is only a comment. A violation is printed as `path:line: rule`.
+# and so is a line that is only a comment (//, /* ... */, or the lines in between). A violation is
+# printed as `path:line: rule`.
 #
 # Exit status: 0 clean, 1 violations found, 2 nothing to check (a checker that checks nothing must
 # not say "ok").
@@ -50,7 +53,7 @@ layer_of() {
     src/io/*) echo io ;;
     src/core/*) echo core ;;
     src/db/*) echo db ;;
-    *) echo none ;;
+    *) echo unknown ;;
   esac
 }
 
@@ -103,8 +106,17 @@ core_banned_header() {
 include_re='^[[:space:]]*#[[:space:]]*include[[:space:]]*(["<])([^">]+)[">]'
 
 check_includes() {
-  local file=$1 layer=$2 lineno text kind spec shown
-  case "$layer" in db | none) return ;; esac
+  local file=$1 layer=$2 lineno text kind spec shown top
+  case "$layer" in
+    db) return ;;
+    unknown)
+      top="${file#src/}"
+      top="${top%%/*}"
+      report "$file" 1 \
+        "unknown layer '$top': src/ may contain only util, io, core and db; add the layer and its include rules to scripts/check-layering.sh"
+      return
+      ;;
+  esac
   while IFS=: read -r lineno text; do
     [[ $text =~ $include_re ]] || continue
     kind="${BASH_REMATCH[1]}"
@@ -127,6 +139,28 @@ check_includes() {
   done < <(grep -nE '^[[:space:]]*#[[:space:]]*include' "$file")
 }
 
+# is_comment_line <line, without its leading whitespace>: true if nothing on the line can run. A
+# line that opens a block comment is one only while the comment stays open or closes at the very
+# end; "/* x */ printf(" and "*/ puts(" have code after the close. A line that starts with "*"
+# followed by anything but a space, such as "*out = printf(", is a dereference, not a comment.
+# The check reads one line at a time, so the lines inside a block comment count as comment only
+# when they start with "*", as in Doxygen and Google style. An unstarred continuation line that
+# names a banned call is reported, which is the safe way to be wrong.
+is_comment_line() {
+  case "$1" in
+    //*) return 0 ;;
+    '/*'*)
+      case "$1" in
+        *'*/') return 0 ;;
+        *'*/'*) return 1 ;;
+        *) return 0 ;;
+      esac
+      ;;
+    '*' | '* '* | '*/') return 0 ;;
+  esac
+  return 1
+}
+
 output_re='std::(cout|cerr)([^[:alnum:]_]|$)|(^|[^[:alnum:]_])(printf|fprintf|puts)[[:space:]]*\('
 
 check_output() {
@@ -134,7 +168,8 @@ check_output() {
   [ "$file" = src/util/check.cc ] && return
   while IFS=: read -r lineno text; do
     trimmed="${text#"${text%%[![:space:]]*}"}"
-    case "$trimmed" in //*) continue ;; esac
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    is_comment_line "$trimmed" && continue
     report "$file" "$lineno" "library code must not write to stdout or stderr"
   done < <(grep -nE "$output_re" "$file")
 }

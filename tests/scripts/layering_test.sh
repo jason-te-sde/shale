@@ -157,6 +157,48 @@ put src/util/a.cc 'int F(char* b) { return snprintf(b, 8, "%06d", 1); }' \
   'const char* kName = "printf";'
 expect "snprintf, a comment and a string that merely name the banned calls" 0
 
+# Comment lines do not run. A block comment may say what is banned; code after the comment may not.
+
+new_tree
+put src/util/a.cc '/* Never call printf( or puts( from here; std::cout is out too. */' \
+  '/**' \
+  ' * Writes through std::cerr, fprintf( and puts( are all banned in library code.' \
+  ' *' \
+  ' */' \
+  '/* A comment that goes on over' \
+  ' * several lines and mentions printf( on the second one. */' \
+  '// Also a line comment: std::cout.'
+expect "block and line comments that merely name the banned calls" 0
+
+new_tree
+put src/util/a.cc 'void F(int* out) {' '  *out = printf("x");' '}'
+expect "a line starting with a dereference is code, not a comment" 1 "src/util/a.cc:2:"
+
+new_tree
+put src/util/a.cc '/* a comment */ printf("x");'
+expect "code after a block comment closes on the same line" 1 "src/util/a.cc:1:"
+
+new_tree
+put src/util/a.cc '/*' ' * a comment' ' */ puts("x");'
+expect "code after the closing */ of a multi-line comment" 1 "src/util/a.cc:3:"
+
+# --- Only the four layers exist under src/. -------------------------------------------------------
+
+new_tree
+put src/sim/a.cc '#include <vector>'
+expect "a source file in a directory that is no layer" 1 "src/sim/a.cc:1:" "unknown layer"
+
+new_tree
+put src/util/a.cc '#include <vector>'
+put src/main.cc 'int main() { return 0; }'
+expect "a source file directly under src/" 1 "src/main.cc:1:" "unknown layer"
+
+new_tree
+put src/util/a.cc '#include <vector>'
+put src/CMakeLists.txt 'add_library(x a.cc)'
+put src/sim/CMakeLists.txt 'add_library(y b.cc)'
+expect "files under src/ that are not C++ sources" 0
+
 # --- Two violations in one file are both reported, in path:line: form. -------------------------
 
 new_tree
