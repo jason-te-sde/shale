@@ -42,6 +42,7 @@ shale_add_library(shale_io
 # a core source that reached for the I/O layer would fail to link, not just to pass review.
 shale_add_library(shale_core
   SOURCES
+    core/compaction_picker.cc
     core/version_edit.cc
     core/version_state.cc
   LIBS shale_util)
