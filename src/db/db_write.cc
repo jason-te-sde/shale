@@ -67,8 +67,14 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   // failed append or sync leaves the log in an unknown state, so it stops all writes: a later one
   // would be acknowledged into a log that may not hold it.
   s = log_->AddRecord(WriteBatchInternal::Contents(updates));
+  if (s.ok()) {
+    log_unsynced_ = true;
+  }
   if (s.ok() && options.sync) {
     s = logfile_->Sync();
+    if (s.ok()) {
+      log_unsynced_ = false;
+    }
   }
   if (!s.ok()) {
     RecordBackgroundError(s);

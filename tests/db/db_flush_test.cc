@@ -4,13 +4,18 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
+#include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -19,6 +24,7 @@
 #include "db/db_impl.h"
 #include "db/db_test_util.h"
 #include "db/handle_check_env.h"
+#include "db/hook_env.h"
 #include "db/version_set.h"
 #include "shale/db.h"
 #include "shale/options.h"
@@ -36,6 +42,9 @@ using Op = FaultInjectionEnv::Op;
 
 class DBFlushTest : public DBTestBase {
  protected:
+  // The database goes before the Env that wraps the one it was opened over.
+  ~DBFlushTest() override { Close(); }
+
   // The smallest write buffer there is, so that a few kilobytes of writes fill it.
   Options SmallBuffer() {
     Options options = CurrentOptions();
@@ -101,6 +110,8 @@ class DBFlushTest : public DBTestBase {
     env_ = std::make_unique<FaultInjectionEnv>(seed);
     Reopen();
   }
+
+  HookEnv hook_env_{env_.get()};
 };
 
 TEST_F(DBFlushTest, FlushCreatesLevel0File) {
@@ -370,6 +381,7 @@ TEST_F(DBFlushTest, FailureToSwitchTheLogClosesTheNewFile) {
   EXPECT_TRUE(db_->Flush().IsIOError());
   env_->ClearFaults();
   EXPECT_EQ(Get("a"), "1");
+  EXPECT_EQ(CountFiles(FileType::kLogFile), 1) << "the empty log that could not be used was left";
   Close();
   EXPECT_EQ(handle_env.leaked(), 0) << "a file was dropped without Close()";
   EXPECT_GT(handle_env.opened(), 0);
@@ -471,11 +483,14 @@ TEST_F(DBFlushTest, FlushWorksOnAThreadScheduler) {
   ASSERT_OK(Put("last", "1"));
   ASSERT_OK(db_->Flush());
   EXPECT_GE(NumTableFilesAtLevel(0), 1);
-  EXPECT_EQ(CountFiles(FileType::kLogFile), 1);
   ExpectPresent(0, 200);
   EXPECT_EQ(Get("last"), "1");
   ASSERT_OK(Put("after", "1"));
-  Reopen(options);  // closes with background work possibly still queued
+  // A flush returns when its memtable is a table, and the task goes on to delete the logs that
+  // this made obsolete: closing waits for it.
+  Close();
+  EXPECT_EQ(CountFiles(FileType::kLogFile), 1);
+  Reopen(options);
   ExpectPresent(0, 200);
   EXPECT_EQ(Get("after"), "1");
 }
@@ -525,6 +540,147 @@ TEST_F(DBFlushTest, TheSweepRemovesAStrayTemporaryFile) {
   env_->SetFileContents(TempFileName(kDb, 4), "half a CURRENT");
   Reopen();
   EXPECT_FALSE(env_->FileExists(TempFileName(kDb, 4)));
+}
+
+TEST_F(DBFlushTest, AKeyThatIsOnlyInATableIsFoundWhileAMemtableIsWaiting) {
+  // Reads look at `mem_`, then `imm_`, then the tables, and a read that stopped at `imm_` would
+  // miss what only a table has.
+  Reopen(SmallBuffer());
+  ASSERT_OK(Put("a", "1"));
+  ASSERT_OK(db_->Flush());
+  ASSERT_EQ(NumTableFilesAtLevel(0), 1);
+  const int written = PutUntilSwitched();
+  ASSERT_GT(written, 1);
+  ASSERT_EQ(NumTableFilesAtLevel(0), 1) << "the flush ran";
+  EXPECT_EQ(Get("a"), "1");
+  EXPECT_EQ(Get("b"), "NOT_FOUND");
+  ExpectPresent(0, written);
+}
+
+TEST_F(DBFlushTest, ASwitchDoesNotSyncALogThatIsAlreadySynced) {
+  // With every write synced, which is the default, the old log is whole when the memtable is
+  // switched, and a sync of it is a flush of the disk's cache that is paid under the mutex for
+  // nothing.
+  Options options = CurrentOptions();
+  options.env = &hook_env_;
+  Reopen(options);
+  int log_syncs = 0;
+  hook_env_.SetHook([&](std::string_view call, const std::string& path) {
+    if (call == "sync" && path.ends_with(".log")) {
+      log_syncs++;
+    }
+    return Status::OK();
+  });
+  ASSERT_OK(Put("a", "1"));  // one sync, its own
+  ASSERT_OK(db_->Flush());   // a switch
+  EXPECT_EQ(log_syncs, 1) << "the switch synced a log that was synced";
+
+  ASSERT_OK(Put("b", "2", /*sync=*/false));
+  ASSERT_OK(db_->Flush());
+  EXPECT_EQ(log_syncs, 2) << "the switch must sync a log that holds a write that was not synced";
+
+  ASSERT_OK(Put("c", "3", /*sync=*/false));
+  ASSERT_OK(Put("d", "4", /*sync=*/true));  // makes "c" durable too
+  ASSERT_OK(db_->Flush());
+  EXPECT_EQ(log_syncs, 3)
+      << "the sync of a later write covers the earlier, and the switch has none";
+
+  ASSERT_OK(db_->Flush());  // nothing in the memtable: no switch
+  EXPECT_EQ(log_syncs, 3);
+  hook_env_.SetHook(nullptr);
+  // And what was written is where a power loss leaves it.
+  env_->SimulatePowerLossDropUnsynced();
+  Reopen(options);
+  EXPECT_EQ(Get("a"), "1");
+  EXPECT_EQ(Get("b"), "2");
+  EXPECT_EQ(Get("c"), "3");
+  EXPECT_EQ(Get("d"), "4");
+}
+
+TEST_F(DBFlushTest, AFailureToListTheDirectoryIsLoggedAndTriedAgainLater) {
+  Options options = CurrentOptions();
+  options.env = &hook_env_;
+  Reopen(options);
+  hook_env_.SetHook([](std::string_view call, const std::string& /*path*/) {
+    return call == "get_children" ? Status::IOError("injected listing failure") : Status::OK();
+  });
+  ASSERT_OK(Put("a", "1"));
+  ASSERT_OK(db_->Flush());
+  hook_env_.SetHook(nullptr);
+  EXPECT_EQ(dbfull()->TEST_Counters().bg_errors, 0u) << "an obsolete file is not an error";
+  EXPECT_NE(env_->FileContents("/db/LOG").find("could not list"), std::string::npos)
+      << "the failed listing was not logged";
+  EXPECT_EQ(CountFiles(FileType::kLogFile), 2) << "the sweep that could not list deleted a log";
+  ASSERT_OK(Put("b", "2"));
+  ASSERT_OK(db_->Flush());
+  EXPECT_EQ(CountFiles(FileType::kLogFile), 1) << "the next sweep did not delete it";
+  EXPECT_EQ(Get("a"), "1");
+  EXPECT_EQ(Get("b"), "2");
+}
+
+TEST_F(DBFlushTest, AStalledWriterIsWokenBeforeTheSweepListsTheDirectory) {
+  // The memtable is full, a flush is under way, and a write is waiting for it. The flush clears
+  // `imm_` and then sweeps, listing and deleting files with the disk to wait for, and the write
+  // must not wait for that. The sweep here does not list until the write is through.
+  Options options = SmallBuffer();
+  options.env = &hook_env_;
+  options.scheduler = nullptr;  // the database runs its own: this needs a thread
+  Reopen(options);
+  std::mutex mu;
+  std::condition_variable cv;
+  bool table_may_be_built = false;  // guarded by mu
+  bool sweep_armed = false;         // guarded by mu
+  int puts_done = 0;                // guarded by mu
+  int puts_when_released = 0;       // guarded by mu
+  bool sweep_timed_out = false;     // guarded by mu
+  const auto patience = std::chrono::seconds(10);
+  hook_env_.SetHook([&](std::string_view call, const std::string& path) {
+    std::unique_lock<std::mutex> lock(mu);
+    if (call == "new_writable" && path.ends_with(".sst")) {
+      cv.wait_for(lock, patience, [&] { return table_may_be_built; });
+    } else if (call == "get_children" && sweep_armed) {
+      // The write that was stalled goes on once `imm_` is gone, and that is before this.
+      if (!cv.wait_for(lock, std::chrono::seconds(3),
+                       [&] { return puts_done > puts_when_released; })) {
+        sweep_timed_out = true;
+      }
+    }
+    return Status::OK();
+  });
+
+  constexpr int kPuts = 40;  // the memtable holds some sixteen: the second switch has to wait
+  std::thread writer([&] {
+    for (int i = 0; i < kPuts; i++) {
+      EXPECT_OK(Put(UserKey(i), KiB(i), /*sync=*/false));
+      const std::lock_guard<std::mutex> lock(mu);
+      puts_done++;
+      cv.notify_all();
+    }
+  });
+  // The writer stops when it has filled the memtable that follows the one being flushed, which is
+  // held up at its table: wait until it has not moved for a while.
+  int last = -1;
+  for (int stable = 0; stable < 20;) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    const std::lock_guard<std::mutex> lock(mu);
+    stable = puts_done == last ? stable + 1 : 0;
+    last = puts_done;
+  }
+  {
+    const std::lock_guard<std::mutex> lock(mu);
+    puts_when_released = puts_done;
+    sweep_armed = true;
+    table_may_be_built = true;
+  }
+  cv.notify_all();
+  writer.join();
+  hook_env_.SetHook(nullptr);
+  {
+    const std::lock_guard<std::mutex> lock(mu);
+    EXPECT_LT(puts_when_released, kPuts) << "the writer was never stalled";
+    EXPECT_FALSE(sweep_timed_out) << "the sweep waited for a write that was waiting for the sweep";
+  }
+  ExpectPresent(0, kPuts);
 }
 
 TEST_F(DBFlushTest, ExhaustedFileNumbersFailTheFlushInsteadOfAborting) {

@@ -32,12 +32,6 @@ class RecordingEnv final : public Env {
     return events_;
   }
 
-  /// Forgets the calls recorded so far.
-  void ClearEvents() {
-    const std::lock_guard<std::mutex> lock(mu_);
-    events_.clear();
-  }
-
   Status NewSequentialFile(const std::string& fname,
                            std::unique_ptr<SequentialFile>* result) override {
     return target_->NewSequentialFile(fname, result);

@@ -635,11 +635,6 @@ std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& /*options*/) {
   return NewErrorIterator(Status::NotSupported("NewIterator is not implemented yet"));
 }
 
-Status DBImpl::CompactRange(std::optional<std::string_view> /*begin*/,
-                            std::optional<std::string_view> /*end*/) {
-  return Status::NotSupported("CompactRange is not implemented yet");
-}
-
 bool DBImpl::GetProperty(std::string_view /*property*/, std::string* /*value*/) { return false; }
 
 VersionState DBImpl::TEST_VersionState() {
@@ -660,6 +655,11 @@ SequenceNumber DBImpl::TEST_LastSequence() {
 std::set<uint64_t> DBImpl::TEST_LiveFiles() {
   MutexLock lock(&mutex_);
   return versions_.LiveFiles();
+}
+
+std::shared_ptr<const Version> DBImpl::TEST_CurrentVersion() {
+  MutexLock lock(&mutex_);
+  return versions_.current();
 }
 
 }  // namespace shale

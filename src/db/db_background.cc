@@ -1,18 +1,23 @@
 // The work that happens beside the writes: switching to a new memtable when the one in use is full,
-// writing the one that is waiting out as a level 0 table, deleting the files that nothing needs
-// any more, and what happens when any of it fails.
+// writing the one that is waiting out as a level 0 table, compacting the levels, deleting the files
+// that nothing needs any more, and what happens when any of it fails.
 
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
+#include "core/compaction_picker.h"
 #include "core/version_edit.h"
+#include "core/version_state.h"
 #include "db/builder.h"
+#include "db/compaction_job.h"
 #include "db/db_impl.h"
 #include "db/filename_io.h"
 #include "db/version_set.h"
@@ -107,11 +112,18 @@ Status DBImpl::SwitchMemTable() {
   SHALE_CHECK(imm_ == nullptr, "the memtable is switched while another is waiting to be flushed");
   // The old log is made durable before any write can go into the new one. Otherwise a later write
   // that is synced, in the new log, could survive a power loss while earlier ones that were not, in
-  // the old, were lost: a hole in the sequence of writes, which only a suffix of it may be.
-  Status s = logfile_->Sync();
-  if (!s.ok()) {
-    RecordBackgroundError(s);
-    return s;
+  // the old, were lost: a hole in the sequence of writes, which only a suffix of it may be. When
+  // every record has been synced already, as with writes that are, there is nothing to make
+  // durable, and a sync that does nothing still costs a full flush of the disk's cache, here under
+  // the mutex.
+  Status s;
+  if (log_unsynced_) {
+    s = logfile_->Sync();
+    if (!s.ok()) {
+      RecordBackgroundError(s);
+      return s;
+    }
+    log_unsynced_ = false;
   }
   uint64_t number = 0;
   s = AllocateFileNumber(&number);
@@ -147,6 +159,7 @@ Status DBImpl::SwitchMemTable() {
   logfile_ = std::move(file);
   log_ = std::make_unique<log::Writer>(logfile_.get());
   logfile_number_ = number;
+  log_unsynced_ = false;  // the new log is empty
 
   imm_ = std::move(mem_);
   has_imm_.store(true, std::memory_order_release);
@@ -159,7 +172,8 @@ void DBImpl::MaybeScheduleBackgroundWork() {
   if (bg_scheduled_ || shutting_down_.load(std::memory_order_acquire) || !bg_error_.ok()) {
     return;
   }
-  if (imm_ == nullptr) {
+  // Only now, with no compaction running, is the version one that the picker may be asked about.
+  if (imm_ == nullptr && manual_ == nullptr && !PickAutomaticCompaction().has_value()) {
     return;
   }
   bg_scheduled_ = true;
@@ -169,8 +183,10 @@ void DBImpl::MaybeScheduleBackgroundWork() {
 void DBImpl::BackgroundCall() {
   MutexLock lock(&mutex_);
   SHALE_CHECK(bg_scheduled_, "a background task ran that was not scheduled");
-  if (!shutting_down_.load(std::memory_order_acquire) && bg_error_.ok() && imm_ != nullptr) {
-    const Status s = FlushImmutable();
+  if (!shutting_down_.load(std::memory_order_acquire) && bg_error_.ok()) {
+    // The most urgent first: the memtable that a write may be stalled for, and then a compaction,
+    // which a caller's request comes before.
+    const Status s = imm_ != nullptr ? FlushImmutable() : BackgroundCompaction();
     if (!s.ok()) {
       RecordBackgroundError(s);
     }
@@ -179,6 +195,214 @@ void DBImpl::BackgroundCall() {
   // What this task did, or what happened while it ran, may have made more work.
   MaybeScheduleBackgroundWork();
   background_cv_.SignalAll();
+}
+
+CompactionOptions DBImpl::PickerOptions() const {
+  CompactionOptions picker_options;
+  picker_options.l0_compaction_trigger = options_.l0_compaction_trigger;
+  picker_options.max_bytes_for_level_base = options_.max_bytes_for_level_base;
+  picker_options.level_size_multiplier = options_.level_size_multiplier;
+  picker_options.target_file_size = options_.target_file_size;
+  return picker_options;
+}
+
+std::optional<CompactionPlan> DBImpl::PickAutomaticCompaction() {
+  SHALE_CHECK(!compaction_running_,
+              "the picker is asked for a compaction while one is running: it would choose the "
+              "files that the running one is reading");
+  return PickCompaction(versions_.current()->state(), PickerOptions());
+}
+
+Status DBImpl::BackgroundCompaction() {
+  ManualCompaction* const manual = manual_;
+  std::shared_ptr<const Version> base = versions_.current();
+  std::optional<CompactionPlan> plan;
+  if (manual != nullptr) {
+    manual->running = true;
+    const auto view = [](const std::optional<std::string>& key) -> std::optional<std::string_view> {
+      return key.has_value() ? std::optional<std::string_view>(*key) : std::nullopt;
+    };
+    plan = PickRangeCompaction(base->state(), manual->level, view(manual->begin), view(manual->end),
+                               PickerOptions());
+  } else {
+    plan = PickAutomaticCompaction();
+  }
+  Status s;
+  if (plan.has_value()) {
+    s = RunCompaction(*plan, std::move(base));
+  }
+  if (manual != nullptr) {
+    // The caller may leave from here on: nothing below uses the request.
+    manual->running = false;
+    manual->done = true;
+    manual_ = nullptr;
+  }
+  return s;
+}
+
+Status DBImpl::RunCompaction(const CompactionPlan& plan, std::shared_ptr<const Version> base) {
+  if (plan.IsTrivialMove(PickerOptions())) {
+    base.reset();
+    return MoveFileDown(plan);
+  }
+  return CompactFiles(plan, std::move(base));
+}
+
+Status DBImpl::MoveFileDown(const CompactionPlan& plan) {
+  const FileMetaData& file = plan.inputs[0].front();
+  VersionEdit edit;
+  edit.deleted_files.emplace(plan.level, file.number);
+  edit.new_files.emplace_back(plan.level + 1, file);
+  edit.compact_pointers.emplace_back(plan.level, plan.next_compact_pointer);
+  // If this fails, the MANIFEST may hold the edit all the same: the file is the same one either
+  // way, and nothing is deleted.
+  const Status s = versions_.LogAndApply(std::move(edit));
+  if (s.ok()) {
+    counters_.trivial_moves++;
+    Log("moved table " + std::to_string(file.number) + " from level " + std::to_string(plan.level) +
+        " to level " + std::to_string(plan.level + 1));
+  }
+  return s;
+}
+
+Status DBImpl::CompactFiles(const CompactionPlan& plan, std::shared_ptr<const Version> base) {
+  // The numbers the job takes, which are the files it makes and must be told apart from the tables
+  // of every version until an edit names them. The job asks on this thread, with the mutex given
+  // up, so the vector is this thread's.
+  std::vector<uint64_t> allocated;
+  CompactionJobContext ctx;
+  ctx.dbname = dbname_;
+  ctx.env = env_;
+  ctx.table_options = TableOptions();
+  ctx.table_cache = &table_cache_;
+  ctx.target_file_size = options_.target_file_size;
+  ctx.allocate_file_number = [this, &allocated] {
+    MutexLock lock(&mutex_);
+    const uint64_t number = versions_.NewFileNumber();
+    pending_outputs_.insert(number);
+    allocated.push_back(number);
+    return number;
+  };
+  ctx.between_outputs = [this] { FlushBetweenOutputs(); };
+
+  // The job is the one thing that holds the version it reads, so that the files it reads are not
+  // deleted under it, and it is gone before the files it replaces are swept.
+  auto job = std::make_unique<CompactionJob>(std::move(ctx), plan, std::move(base),
+                                             snapshots_.Sequences());
+  compaction_running_ = true;
+  mutex_.Unlock();
+  Status s = job->Run();
+  mutex_.Lock();
+  compaction_running_ = false;
+
+  if (s.ok() && !bg_error_.ok()) {
+    // A flush between two outputs failed, or a write did: the database has stopped. Nothing names
+    // the outputs, so they are no use to anyone, and nothing more is installed.
+    job->RemoveOutputs();
+    s = bg_error_;
+  }
+  if (s.ok()) {
+    // If this fails, the MANIFEST may hold the edit all the same, and the outputs are then tables
+    // that the next open finds in the version: they stay, and nothing is deleted.
+    s = versions_.LogAndApply(job->MakeEdit());
+  }
+  for (const uint64_t number : allocated) {
+    pending_outputs_.erase(number);
+  }
+  if (!s.ok()) {
+    return s;
+  }
+
+  const CompactionJobStats& stats = job->stats();
+  counters_.compactions++;
+  counters_.compaction_bytes_read += stats.bytes_read;
+  counters_.compaction_bytes_written += stats.bytes_written;
+  counters_.tombstones_dropped += stats.tombstones_dropped;
+  counters_.shadowed_dropped += stats.shadowed_dropped;
+  Log("compacted " + std::to_string(plan.inputs[0].size()) + " table(s) of level " +
+      std::to_string(plan.level) + " and " + std::to_string(plan.inputs[1].size()) + " of level " +
+      std::to_string(plan.level + 1) + " into " + std::to_string(job->outputs().size()) +
+      " table(s) of level " + std::to_string(plan.level + 1) + ": " +
+      std::to_string(stats.bytes_read) + " byte(s) read, " + std::to_string(stats.bytes_written) +
+      " written, " + std::to_string(stats.shadowed_dropped) + " shadowed and " +
+      std::to_string(stats.tombstones_dropped) + " deletion(s) dropped");
+  // The inputs are obsolete now, and are deleted unless a reader still holds a version that names
+  // them, which the job did until now.
+  job.reset();
+  DeleteObsoleteFiles();
+  return Status::OK();
+}
+
+void DBImpl::FlushBetweenOutputs() {
+  if (!has_imm_.load(std::memory_order_acquire)) {
+    return;
+  }
+  MutexLock lock(&mutex_);
+  if (imm_ == nullptr || !bg_error_.ok() || shutting_down_.load(std::memory_order_acquire)) {
+    return;
+  }
+  const Status s = FlushImmutable();
+  if (!s.ok()) {
+    RecordBackgroundError(s);
+  }
+}
+
+Status DBImpl::CompactRange(std::optional<std::string_view> begin,
+                            std::optional<std::string_view> end) {
+  Status s = Flush();
+  if (!s.ok()) {
+    return s;
+  }
+  MutexLock lock(&mutex_);
+  // Level 0 is always compacted: its files are what the flush just made, and they are to reach
+  // level 1 whether or not anything is below. Then each level down to the one before the deepest
+  // that holds part of the range, so that all of it ends in that deepest level.
+  int deepest = 1;
+  {
+    const std::shared_ptr<const Version> base = versions_.current();
+    for (int level = 1; level < kNumLevels; level++) {
+      if (!OverlappingFiles(base->state(), level, begin, end).empty()) {
+        deepest = level;
+      }
+    }
+  }
+  for (int level = 0; level < deepest; level++) {
+    s = CompactLevel(level, begin, end);
+    if (!s.ok()) {
+      return s;
+    }
+  }
+  return bg_error_;
+}
+
+Status DBImpl::CompactLevel(int level, std::optional<std::string_view> begin,
+                            std::optional<std::string_view> end) {
+  ManualCompaction request;
+  request.level = level;
+  if (begin.has_value()) {
+    request.begin = std::string(*begin);
+  }
+  if (end.has_value()) {
+    request.end = std::string(*end);
+  }
+  // One request at a time. A caller that comes while another's is there waits for it to be done.
+  while (manual_ != nullptr && bg_error_.ok()) {
+    WaitForBackgroundWork();
+  }
+  if (!bg_error_.ok()) {
+    return bg_error_;
+  }
+  manual_ = &request;
+  MaybeScheduleBackgroundWork();
+  // The task that has taken the request is using it, so a caller leaves only when it is done, even
+  // when an error has already stopped the database: the error is returned all the same.
+  while (!request.done && (bg_error_.ok() || request.running)) {
+    WaitForBackgroundWork();
+  }
+  if (manual_ == &request) {
+    manual_ = nullptr;  // an error stopped the database before the task took it
+  }
+  return bg_error_;
 }
 
 Status DBImpl::FlushImmutable() {
@@ -196,6 +420,8 @@ Status DBImpl::FlushImmutable() {
   const std::unique_ptr<Iterator> iter = imm->NewIterator();
   s = BuildTable(dbname_, env_, TableOptions(), &table_cache_, iter.get(), &meta);
   mutex_.Lock();
+  SHALE_CHECK(imm_ == imm,
+              "the memtable that was being flushed was replaced while its table was built");
 
   if (s.ok()) {
     VersionEdit edit;
@@ -217,6 +443,9 @@ Status DBImpl::FlushImmutable() {
 
   imm_.reset();
   has_imm_.store(false, std::memory_order_release);
+  // A write that waits for `imm_` to go can go on now, and not when the sweep below is done: it
+  // lists and deletes files, with the mutex given up and the disk to wait for.
+  background_cv_.SignalAll();
   if (meta.file_size > 0) {
     counters_.flushes++;
     counters_.flush_bytes_written += meta.file_size;
@@ -232,15 +461,19 @@ void DBImpl::DeleteObsoleteFiles() {
     return;
   }
   // What decides which files are obsolete is read here, with the mutex held.
+  const std::set<uint64_t> pending = pending_outputs_;
   std::set<uint64_t> needed = versions_.LiveFiles();
-  needed.insert(pending_outputs_.begin(), pending_outputs_.end());
+  needed.insert(pending.begin(), pending.end());
   const uint64_t log_number = versions_.LogNumber();
   const uint64_t current_log = logfile_number_;
   const uint64_t manifest_number = versions_.ManifestFileNumber();
 
   mutex_.Unlock();
   std::vector<std::string> names;
-  if (env_->GetChildren(dbname_, &names).ok()) {
+  const Status listed = env_->GetChildren(dbname_, &names);
+  if (!listed.ok()) {
+    Log("could not list " + dbname_ + " to delete obsolete files: " + listed.ToString());
+  } else {
     for (const std::string& name : names) {
       uint64_t number = 0;
       FileType type = FileType::kCurrentFile;
@@ -285,6 +518,10 @@ void DBImpl::DeleteObsoleteFiles() {
     }
   }
   mutex_.Lock();
+  // A table made while the files were being listed is one that `needed` does not have, and that
+  // the loop above would have taken. Only the task that runs this makes them, and it was here.
+  SHALE_CHECK(pending_outputs_ == pending,
+              "a file was being made while the obsolete files were swept");
 }
 
 }  // namespace shale

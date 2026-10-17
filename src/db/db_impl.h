@@ -14,6 +14,7 @@
 #include <string_view>
 #include <vector>
 
+#include "core/compaction_picker.h"
 #include "core/version_edit.h"
 #include "core/version_state.h"
 #include "db/info_log.h"
@@ -65,10 +66,15 @@ struct DBCounters {
 ///
 /// Background work is one task at a time on the Scheduler: a full memtable becomes the immutable
 /// one, `imm_`, and a task writes it out as a level 0 table while writes go on into a new `mem_`.
-/// `bg_scheduled_` says a task is queued or running, and it takes the mutex, which it gives up only
-/// to write files. Whoever must wait for background work, a write that finds the memtable full and
-/// `imm_` still there among them, does it in WaitForBackgroundWork(): on a scheduler that runs
-/// tasks on the caller's thread, it runs them itself.
+/// What a task does when it runs is the most urgent of what there is: the flush of `imm_`, which
+/// stalls writes, then the compaction that a CompactRange() is waiting for, then the compaction
+/// that the size of a level asks for. A compaction is the task for as long as it takes, which is
+/// why it writes out `imm_` itself between two of its output files, and why only one is ever
+/// running: the picker cannot see a compaction that is in flight, and would choose the same files
+/// again. `bg_scheduled_` says a task is queued or running, and it takes the mutex, which it gives
+/// up only to write files. Whoever must wait for background work, a write that finds the memtable
+/// full and `imm_` still there among them, does it in WaitForBackgroundWork(): on a scheduler that
+/// runs tasks on the caller's thread, it runs them itself.
 class DBImpl final : public DB {
  public:
   /// Creates a database that is not open: DB::Open() calls OpenImpl() on it. `options` has been
@@ -90,10 +96,19 @@ class DBImpl final : public DB {
   /// writes, if there is one, and then the memtable may not have been written.
   Status Flush() override;
 
-  // These return NotSupported, or nothing, until they are written.
-  std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) override;
+  /// Compacts the range as DB::CompactRange() says: writes out the memtable, then, level by level
+  /// from 0 down to the level just above the deepest one that holds a file overlapping the range,
+  /// compacts the files of the level that overlap it, with the ones they overlap in the level
+  /// below, into that level below. Level 0 is always compacted, so that what the flush just wrote
+  /// reaches level 1. Every such compaction rewrites its files, a lone file that could move down
+  /// whole included, so that what they hold that is dead is given back. Each is a request that the
+  /// background task takes before any compaction it would have chosen itself, and this waits for
+  /// each in turn. Returns the error that stops writes, if there is one.
   Status CompactRange(std::optional<std::string_view> begin,
                       std::optional<std::string_view> end) override;
+
+  // These return NotSupported, or nothing, until they are written.
+  std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) override;
   bool GetProperty(std::string_view property, std::string* value) override;
 
   const Snapshot* GetSnapshot() override;
@@ -119,6 +134,13 @@ class DBImpl final : public DB {
 
   /// Returns the numbers of the files of every version that is still alive.
   std::set<uint64_t> TEST_LiveFiles() SHALE_EXCLUDES(mutex_);
+
+  /// Returns the current version, which the caller then holds: a table that it names is not
+  /// deleted for as long as the caller does, as for a read that began now.
+  std::shared_ptr<const Version> TEST_CurrentVersion() SHALE_EXCLUDES(mutex_);
+
+  /// Returns the cache of open tables, for a test to ask whether a table is in it.
+  TableCache* TEST_TableCache() { return &table_cache_; }
 
  private:
   // The work of OpenImpl(), with the mutex held.
@@ -178,12 +200,57 @@ class DBImpl final : public DB {
   // Any failure is a background error: the state of the log is not known after it.
   Status SwitchMemTable() SHALE_REQUIRES(mutex_);
 
-  // Queues a background task if there is work and none is queued or running: there is none once
-  // the database is closing or an error has stopped writes.
+  // Queues a background task if there is work and none is queued or running: the work is a memtable
+  // to flush, a request of CompactRange() or a level that is due for compaction, and there is none
+  // once the database is closing or an error has stopped writes.
   void MaybeScheduleBackgroundWork() SHALE_REQUIRES(mutex_);
 
   // The task that the scheduler runs. Takes the mutex.
   void BackgroundCall() SHALE_EXCLUDES(mutex_);
+
+  // The size limits the picker chooses by, from the options.
+  CompactionOptions PickerOptions() const;
+
+  // Returns the compaction that the sizes of the levels ask for, or nothing. Aborts if a compaction
+  // is running: the picker reads the version, which does not show the files a running compaction
+  // is reading, and would choose them again.
+  std::optional<CompactionPlan> PickAutomaticCompaction() SHALE_REQUIRES(mutex_);
+
+  // What a background task does when there is no memtable to flush: the compaction that a request
+  // of CompactRange() is waiting for if there is one, else the one that a level is due for, if
+  // any. Returns OK if there was nothing to do. On an error, whatever the compaction left is left:
+  // see CompactFiles().
+  Status BackgroundCompaction() SHALE_REQUIRES(mutex_);
+
+  // Runs `plan`, which was picked from `base`: moves its file to the next level if it is a lone
+  // one that can go as it is, and else merges the files into new ones. Gives up the mutex while it
+  // merges.
+  Status RunCompaction(const CompactionPlan& plan, std::shared_ptr<const Version> base)
+      SHALE_REQUIRES(mutex_);
+
+  // Installs the move of the one file of `plan` to the next level, which reads nothing, so that
+  // none of it goes through the filter: it is the one edit that deletes the file at its level and
+  // adds it at the next.
+  Status MoveFileDown(const CompactionPlan& plan) SHALE_REQUIRES(mutex_);
+
+  // Merges the files of `plan` with a CompactionJob and installs the result, with the mutex given
+  // up while the job runs. A failed job has removed its outputs. A failure to install the edit
+  // leaves them, since the MANIFEST may hold the edit all the same and name them: they are left for
+  // the next open to find, with the inputs that the edit may or may not have deleted. After a
+  // background error the outputs of a job that succeeded are removed without being installed, for
+  // the work of the database is over.
+  Status CompactFiles(const CompactionPlan& plan, std::shared_ptr<const Version> base)
+      SHALE_REQUIRES(mutex_);
+
+  // The hook of a compaction between two of its output files: writes `imm_` out, if there is one,
+  // so that a write that waits for it does not wait for the end of the compaction. Takes the mutex.
+  // A failure is a background error, which the compaction finds when it is done.
+  void FlushBetweenOutputs() SHALE_EXCLUDES(mutex_);
+
+  // Compacts the files of `level` that overlap the range, as a request that the background task
+  // takes, and waits for it. Returns the error that stops writes, if there is one.
+  Status CompactLevel(int level, std::optional<std::string_view> begin,
+                      std::optional<std::string_view> end) SHALE_REQUIRES(mutex_);
 
   // Writes `imm_` as a level 0 table and installs it, with the mutex given up while the table is
   // built. Returns the error of whichever step failed; then `imm_` is still there, a table that the
@@ -198,7 +265,10 @@ class DBImpl final : public DB {
   // the table cache. Does nothing after an error has stopped writes, since whether the version
   // that a failed edit would have installed is the one that a restart finds is not known. Gives up
   // the mutex while it lists and deletes: what it decides is obsolete never becomes needed, since a
-  // file number is not used twice, and the one task at a time that makes files is the caller.
+  // file number is not used twice, and the one task at a time that makes files is the caller, a
+  // compaction that flushes between its outputs included. A table being made while the files are
+  // listed would be taken for one that nothing needs, so the sweep aborts if `pending_outputs_`
+  // changed while it was away.
   void DeleteObsoleteFiles() SHALE_REQUIRES(mutex_);
 
   // Waits for the background work to make progress, and returns so that the caller can look at
@@ -206,6 +276,16 @@ class DBImpl final : public DB {
   // them: the mutex is given up while they do, and it is a bug to be here with nothing queued,
   // since no one else will ever run a task. On any other it waits for the end of a task.
   void WaitForBackgroundWork() SHALE_REQUIRES(mutex_);
+
+  // What a caller of CompactRange() asks the background task for, for one level: a request that
+  // lives on the caller's stack from the time it is made until the caller has seen it done.
+  struct ManualCompaction {
+    int level = 0;                     // the level whose files are compacted
+    std::optional<std::string> begin;  // the range of user keys, inclusive, or unbounded
+    std::optional<std::string> end;
+    bool running = false;  // the task has taken it, and the caller must not leave until it is done
+    bool done = false;     // the task is finished with it, however it ended
+  };
 
   std::shared_ptr<MemTable> NewMemTable() SHALE_REQUIRES(mutex_);
 
@@ -241,6 +321,10 @@ class DBImpl final : public DB {
   std::unique_ptr<WritableFile> logfile_ SHALE_GUARDED_BY(mutex_);
   std::unique_ptr<log::Writer> log_ SHALE_GUARDED_BY(mutex_);
   uint64_t logfile_number_ SHALE_GUARDED_BY(mutex_) = 0;
+  // Whether a record was appended to the log since it was last synced: the switch to a new
+  // memtable syncs the old log, and does not when there is nothing to sync, which with every write
+  // synced, as they are by default, is every time.
+  bool log_unsynced_ SHALE_GUARDED_BY(mutex_) = false;
   SnapshotList snapshots_ SHALE_GUARDED_BY(mutex_);
   Status bg_error_ SHALE_GUARDED_BY(mutex_);  // the first error of the write path, or OK
   DBCounters counters_ SHALE_GUARDED_BY(mutex_);
@@ -249,8 +333,14 @@ class DBImpl final : public DB {
   // tables, so a table that is being made is also here, in `pending_outputs_`.
   bool bg_scheduled_ SHALE_GUARDED_BY(mutex_) = false;
   // The numbers of the tables that are being written and are in no version yet, which the deletion
-  // of obsolete files must not take.
+  // of obsolete files must not take: the table of a flush, and the outputs of a compaction from the
+  // moment each is numbered until the edit that names them has been tried.
   std::set<uint64_t> pending_outputs_ SHALE_GUARDED_BY(mutex_);
+  // The request of a CompactRange() that the background task has not yet finished with, or null.
+  // One at a time: a second caller waits for the first.
+  ManualCompaction* manual_ SHALE_GUARDED_BY(mutex_) = nullptr;
+  // Whether a compaction is running, which is for as long as the background task is merging files.
+  bool compaction_running_ SHALE_GUARDED_BY(mutex_) = false;
   // Set when the database is closing: a task that has not started returns at once, and no more are
   // scheduled.
   std::atomic<bool> shutting_down_{false};
