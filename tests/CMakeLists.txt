@@ -67,6 +67,7 @@ shale_add_test(merging_iterator SOURCES io/merging_iterator_test.cc LIBS shale_t
 # The core's tests link shale_core and nothing else, so that the core cannot grow a dependency on the
 # I/O layer or the test kit without the link failing.
 shale_add_test(version_edit SOURCES core/version_edit_test.cc LIBS shale_core)
+shale_add_test(version_state SOURCES core/version_state_test.cc LIBS shale_core)
 
 # Clang's thread-safety analysis is what makes SHALE_GUARDED_BY more than a comment, and nothing
 # else would notice if it silently stopped working. So the build itself is tested: one translation

@@ -43,4 +43,5 @@ shale_add_library(shale_io
 shale_add_library(shale_core
   SOURCES
     core/version_edit.cc
+    core/version_state.cc
   LIBS shale_util)
