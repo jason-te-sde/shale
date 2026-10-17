@@ -13,6 +13,7 @@
 #include "core/version_edit.h"
 #include "core/version_state.h"
 #include "db/filename_io.h"
+#include "db/named_status.h"
 #include "db/table_cache.h"
 #include "io/env_util.h"
 #include "io/iterator_util.h"
@@ -237,6 +238,13 @@ Status VersionSet::OpenNewManifest(uint64_t number, const VersionEdit& snapshot)
   if (s.ok()) {
     s = file->Sync();
   }
+  if (s.ok()) {
+    // The file's bytes are durable, and its directory entry is not until now. CURRENT must not
+    // name a MANIFEST whose entry a crash could still take back, and that is not a promise to be
+    // had from the order the directory's changes are kept in: one sync for each is cheap, and a
+    // MANIFEST is started when a database is opened.
+    s = SyncDirectory(env_, dbname_);
+  }
   if (!s.ok()) {
     // CURRENT has not been touched, so nothing names this file and it is of no use to anyone.
     writer.reset();
@@ -297,6 +305,12 @@ void VersionSet::Install(VersionState state) {
 
 Status VersionSet::CreateNew() {
   SHALE_CHECK(!loaded_, "VersionSet::CreateNew: this version set is already loaded");
+  if (!manifest_error_.ok()) {
+    // An earlier CreateNew() failed after CURRENT may have come to name MANIFEST-000001, and
+    // writing it again would empty a file that CURRENT names. The database is whole or it is not
+    // there, and which is for a Recover() to find out.
+    return manifest_error_;
+  }
   const VersionState empty;
   constexpr uint64_t kFirstManifest = 1;
   Status s = OpenNewManifest(kFirstManifest, SnapshotEdit(empty));
@@ -329,8 +343,9 @@ Status VersionSet::Recover() {
     return Status::Corruption("CURRENT names an invalid file");
   }
 
+  const std::string manifest = DescriptorFileName(dbname_, number);
   std::unique_ptr<SequentialFile> file;
-  s = env_->NewSequentialFile(DescriptorFileName(dbname_, number), &file);
+  s = env_->NewSequentialFile(manifest, &file);
   if (!s.ok()) {
     return s;
   }
@@ -341,13 +356,19 @@ Status VersionSet::Recover() {
   std::string_view record;
   std::string scratch;
   while (reader.ReadRecord(&record, &scratch)) {
+    // A defect is reported before the record that follows it is returned, and what follows a gap
+    // is not what the history said. Applying it could fail for the gap's sake, with an error about
+    // an edit that is intact, so the defect is what is reported.
+    if (!report.status().ok()) {
+      break;
+    }
     VersionEdit edit;
     s = edit.DecodeFrom(record);
     if (s.ok()) {
       s = ApplyEdit(state, edit, &state);
     }
     if (!s.ok()) {
-      return s;
+      return WithFileName(s, manifest);
     }
     records++;
   }
@@ -355,21 +376,31 @@ Status VersionSet::Recover() {
   // a defect, and the records after it were dropped with the rest of its block, so a recovery that
   // carried on from here would have lost edits without saying so.
   if (!report.status().ok()) {
-    return report.status();
+    return WithFileName(report.status(), manifest);
   }
   if (records == 0) {
     // Nothing recovered from an empty file is not "an empty database": it is a database whose
     // tables are all there and not named, and the first flush would write over their numbers.
-    return Status::Corruption("the MANIFEST holds no record");
+    return WithFileName(Status::Corruption("the MANIFEST holds no record"), manifest);
   }
   if (state.last_sequence > kMaxSequenceNumber) {
-    return Status::Corruption("last_sequence is above the largest sequence number");
+    return WithFileName(Status::Corruption("last_sequence is above the largest sequence number"),
+                        manifest);
   }
 
   // ApplyEdit() has seen to it that every file and the log are numbered below next_file_number. The
-  // MANIFEST that was read is the one number it knows nothing of.
-  next_file_number_ = state.next_file_number;
-  MarkFileNumberUsed(number);
+  // MANIFEST that was read is the one number it knows nothing of. Numbers that are given out from
+  // here on must be above it, and there must be one left to give: a forged MANIFEST that leaves
+  // none would make the first file the database makes abort the process.
+  constexpr uint64_t kMax = std::numeric_limits<uint64_t>::max();
+  uint64_t next = state.next_file_number;
+  if (number >= next) {
+    next = number == kMax ? kMax : number + 1;
+  }
+  if (next == kMax) {
+    return WithFileName(Status::Corruption("no file number is left above those in use"), manifest);
+  }
+  next_file_number_ = next;
   last_sequence_ = state.last_sequence;
   manifest_file_number_ = number;
   loaded_ = true;
@@ -379,6 +410,11 @@ Status VersionSet::Recover() {
 
 Status VersionSet::WriteNewManifest(VersionEdit edit) {
   SHALE_CHECK(loaded_, "VersionSet::WriteNewManifest needs CreateNew() or Recover() first");
+  if (next_file_number_ == std::numeric_limits<uint64_t>::max()) {
+    // The number of a file found in the directory can be anything, and Open passes each to
+    // MarkFileNumberUsed(). That is data, not a bug, and it is no reason to abort.
+    return Status::Corruption("no file number is left above those in use");
+  }
   // The number is taken first, so that the counter the snapshot carries is above it.
   const uint64_t number = NewFileNumber();
   edit.next_file_number = next_file_number_;

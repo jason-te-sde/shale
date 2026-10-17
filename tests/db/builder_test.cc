@@ -10,11 +10,14 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -31,6 +34,7 @@
 #include "testkit/test_util.h"
 #include "util/dbformat.h"
 #include "util/filename.h"
+#include "util/random.h"
 
 namespace shale {
 namespace {
@@ -63,14 +67,14 @@ class DbFixture : public testing::Test {
     return mem;
   }
 
-  // Builds table `number` from `mem`; the test stops if that fails.
-  FileMetaData Build(uint64_t number, const MemTable& mem,
-                     const TableBuilderOptions& options = {}) {
-    FileMetaData meta;
-    meta.number = number;
+  // Builds table `number` from `mem` into `*meta`. A failure is fatal to the caller: call it as
+  // ASSERT_NO_FATAL_FAILURE(Build(...)), so that nothing runs on a description of a table that was
+  // not built.
+  void Build(uint64_t number, const MemTable& mem, FileMetaData* meta,
+             const TableBuilderOptions& options = {}) {
+    meta->number = number;
     const std::unique_ptr<Iterator> iter = mem.NewIterator();
-    EXPECT_OK(BuildTable(kDb, &checked_env_, options, &table_cache_, iter.get(), &meta));
-    return meta;
+    ASSERT_OK(BuildTable(kDb, &checked_env_, options, &table_cache_, iter.get(), meta));
   }
 
   // The bare names in the database directory, in the order the Env lists them.
@@ -108,7 +112,8 @@ TEST_F(BuilderTest, BuildsTableWithBounds) {
     const auto mem = NumberedMemTable(100);
     TableBuilderOptions options;
     options.block_size = block_size;
-    const FileMetaData meta = Build(number, *mem, options);
+    FileMetaData meta;
+    ASSERT_NO_FATAL_FAILURE(Build(number, *mem, &meta, options));
 
     const std::string path = TableFileName(kDb, number);
     ASSERT_TRUE(env_.FileExists(path));
@@ -138,7 +143,8 @@ TEST_F(BuilderTest, BuildLeavesTheTableOpenInTheCache) {
   // The table is verified by opening it through the cache, which keeps it, so the first read of a
   // table that was just built does not open it again. Deleting the file shows where it is served
   // from.
-  const FileMetaData meta = Build(7, *NumberedMemTable(10));
+  FileMetaData meta;
+  ASSERT_NO_FATAL_FAILURE(Build(7, *NumberedMemTable(10), &meta));
   ASSERT_OK(env_.RemoveFile(TableFileName(kDb, 7)));
   std::shared_ptr<Table> table;
   EXPECT_OK(table_cache_.FindTable(7, meta.file_size, &table));
@@ -146,7 +152,8 @@ TEST_F(BuilderTest, BuildLeavesTheTableOpenInTheCache) {
 
 TEST_F(BuilderTest, OneEntryTableHasEqualBounds) {
   const auto mem = NumberedMemTable(1);
-  const FileMetaData meta = Build(3, *mem);
+  FileMetaData meta;
+  ASSERT_NO_FATAL_FAILURE(Build(3, *mem, &meta));
   EXPECT_EQ(meta.smallest, IKey(UserKey(0), 1));
   EXPECT_EQ(meta.largest, meta.smallest);
 }
@@ -269,7 +276,8 @@ TEST_F(BuilderTest, BuiltTableSurvivesPowerLoss) {
   // BuildTable is done when the table can no longer be lost: its bytes synced and its directory
   // entry too. The harshest power loss keeps only what was made durable.
   const auto mem = NumberedMemTable(100);
-  const FileMetaData meta = Build(8, *mem);
+  FileMetaData meta;
+  ASSERT_NO_FATAL_FAILURE(Build(8, *mem, &meta));
   env_.SimulatePowerLossDropUnsynced();
 
   // Every handle from before the loss is dead, the cache's among them.
@@ -285,7 +293,8 @@ TEST_F(BuilderTest, BuiltTableSurvivesPowerLoss) {
 class TableCacheTest : public DbFixture {};
 
 TEST_F(TableCacheTest, FindTableOpensOnceAndKeepsTheTable) {
-  const FileMetaData meta = Build(2, *NumberedMemTable(10));
+  FileMetaData meta;
+  ASSERT_NO_FATAL_FAILURE(Build(2, *NumberedMemTable(10), &meta));
   std::shared_ptr<Table> first;
   std::shared_ptr<Table> second;
   ASSERT_OK(table_cache_.FindTable(2, meta.file_size, &first));
@@ -304,18 +313,22 @@ TEST_F(TableCacheTest, FindTableOfAMissingFileIsAnIOError) {
 TEST_F(TableCacheTest, FindTableWithTheWrongSizeIsCorruption) {
   // BuildTable leaves its table in the cache that built it, and the cache serves by number alone,
   // so a cache of its own is what opens the file again.
-  const FileMetaData meta = Build(2, *NumberedMemTable(10));
+  FileMetaData meta;
+  ASSERT_NO_FATAL_FAILURE(Build(2, *NumberedMemTable(10), &meta));
   TableCache fresh(kDb, &env_, &block_cache_, 10);
   std::shared_ptr<Table> table;
   const Status s = fresh.FindTable(2, meta.file_size - 1, &table);
   EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+  EXPECT_NE(s.ToString().find(TableFileName(kDb, 2)), std::string::npos)
+      << "the message names the file: " << s.ToString();
   EXPECT_EQ(table, nullptr);
   // A table that did not open is not remembered: the next ask, with the right size, opens it.
   EXPECT_OK(fresh.FindTable(2, meta.file_size, &table));
 }
 
 TEST_F(TableCacheTest, EvictForcesAReopen) {
-  const FileMetaData meta = Build(2, *NumberedMemTable(10));
+  FileMetaData meta;
+  ASSERT_NO_FATAL_FAILURE(Build(2, *NumberedMemTable(10), &meta));
   std::shared_ptr<Table> before;
   ASSERT_OK(table_cache_.FindTable(2, meta.file_size, &before));
   table_cache_.Evict(2);
@@ -327,7 +340,8 @@ TEST_F(TableCacheTest, EvictForcesAReopen) {
 }
 
 TEST_F(TableCacheTest, EvictedAndDeletedFileIsGone) {
-  const FileMetaData meta = Build(2, *NumberedMemTable(10));
+  FileMetaData meta;
+  ASSERT_NO_FATAL_FAILURE(Build(2, *NumberedMemTable(10), &meta));
   std::shared_ptr<Table> table;
   ASSERT_OK(table_cache_.FindTable(2, meta.file_size, &table));
   table.reset();
@@ -345,7 +359,7 @@ TEST_F(TableCacheTest, CapacityCountsTablesNotBytes) {
   TableCache small(kDb, &env_, &block_cache_, 2);
   FileMetaData metas[3];
   for (uint64_t i = 0; i < 3; i++) {
-    metas[i] = Build(i + 1, *NumberedMemTable(10));
+    ASSERT_NO_FATAL_FAILURE(Build(i + 1, *NumberedMemTable(10), &metas[i]));
   }
   std::weak_ptr<Table> weak[3];
   for (size_t i = 0; i < 3; i++) {
@@ -360,9 +374,134 @@ TEST_F(TableCacheTest, CapacityCountsTablesNotBytes) {
   EXPECT_FALSE(weak[2].expired());
 }
 
+TEST_F(TableCacheTest, DamagedDataBlockIsCorruptionNamingTheFile) {
+  FileMetaData meta;
+  ASSERT_NO_FATAL_FAILURE(Build(2, *NumberedMemTable(30), &meta));
+  std::string contents = env_.FileContents(TableFileName(kDb, 2));
+  ASSERT_GT(contents.size(), 16u);
+  contents[10] ^= 0x01;  // in the first data block, which Open() does not read
+  env_.SetFileContents(TableFileName(kDb, 2), contents);
+
+  BlockCache blocks(size_t{1} << 20);
+  TableCache fresh(kDb, &env_, &blocks, 10);
+  TableGetResult result;
+  const LookupKey key(UserKey(0), kMaxSequenceNumber);
+  const Status s = fresh.Get(TableReadOptions{}, 2, meta.file_size, key.internal_key(), &result);
+  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+  EXPECT_NE(s.ToString().find(TableFileName(kDb, 2)), std::string::npos)
+      << "the message names the file: " << s.ToString();
+}
+
+TEST_F(TableCacheTest, NoShardHoldsFewerThanSixteenTables) {
+  // The cache is least recently used within a shard and not across them, so it is divided only as
+  // far as every shard can hold a useful number of tables.
+  EXPECT_EQ(TableCache::ShardBitsFor(0), 0);
+  EXPECT_EQ(TableCache::ShardBitsFor(1), 0);
+  EXPECT_EQ(TableCache::ShardBitsFor(20), 0) << "max_open_files at its minimum is one shard";
+  EXPECT_EQ(TableCache::ShardBitsFor(31), 0);
+  EXPECT_EQ(TableCache::ShardBitsFor(32), 1);
+  EXPECT_EQ(TableCache::ShardBitsFor(63), 1);
+  EXPECT_EQ(TableCache::ShardBitsFor(64), 2);
+  EXPECT_EQ(TableCache::ShardBitsFor(127), 2);
+  EXPECT_EQ(TableCache::ShardBitsFor(128), 3);
+  EXPECT_EQ(TableCache::ShardBitsFor(255), 3);
+  EXPECT_EQ(TableCache::ShardBitsFor(256), 4);
+  EXPECT_EQ(TableCache::ShardBitsFor(1000), 4) << "the default max_open_files";
+  EXPECT_EQ(TableCache::ShardBitsFor(std::numeric_limits<size_t>::max()), 4);
+}
+
+TEST_F(TableCacheTest, CacheOfTwentyHoldsTwentyTables) {
+  // The behaviour the shard count is for: twenty tables in a cache for twenty, one shard, are all
+  // kept. Sixteen shards of one or two would drop some of them whatever the hash.
+  constexpr uint64_t kTables = 20;
+  TableCache cache(kDb, &env_, &block_cache_, kTables);
+  std::vector<std::weak_ptr<Table>> weak;
+  for (uint64_t number = 1; number <= kTables; number++) {
+    FileMetaData meta;
+    ASSERT_NO_FATAL_FAILURE(Build(number, *NumberedMemTable(5), &meta));
+    std::shared_ptr<Table> table;
+    ASSERT_OK(cache.FindTable(number, meta.file_size, &table));
+    weak.push_back(table);
+  }
+  for (const std::weak_ptr<Table>& table : weak) {
+    EXPECT_FALSE(table.expired());
+  }
+}
+
+TEST_F(TableCacheTest, ConcurrentFindGetIterateAndEvictAgree) {
+  // Several threads work on a few tables through a cache that holds fewer than that, so the tables
+  // are evicted and opened again all the time, and Evict() takes them out from under the readers.
+  // Every answer must be the table's own, and ThreadSanitizer must find nothing.
+  constexpr uint64_t kTables = 8;
+  constexpr int kThreads = 4;
+  constexpr int kOperations = 1500;
+  FileMetaData metas[kTables];
+  for (uint64_t i = 0; i < kTables; i++) {
+    ASSERT_NO_FATAL_FAILURE(
+        Build(i + 1, *NumberedMemTable(10, "t" + std::to_string(i + 1) + "-"), &metas[i]));
+  }
+  TableCache cache(kDb, &env_, &block_cache_, 3);
+
+  std::atomic<int> wrong{0};
+  std::vector<std::thread> threads;
+  for (int t = 0; t < kThreads; t++) {
+    threads.emplace_back([&, t] {
+      Random rnd(static_cast<uint64_t>(t) + 100);
+      for (int op = 0; op < kOperations; op++) {
+        const uint64_t i = rnd.Uniform(static_cast<uint32_t>(kTables));
+        const uint64_t number = i + 1;
+        const std::string prefix = "t" + std::to_string(number) + "-";
+        switch (rnd.Uniform(4)) {
+          case 0: {
+            std::shared_ptr<Table> table;
+            if (!cache.FindTable(number, metas[i].file_size, &table).ok() || table == nullptr) {
+              wrong++;
+            }
+            break;
+          }
+          case 1: {
+            TableGetResult result;
+            const LookupKey key(UserKey(5), kMaxSequenceNumber);
+            const Status s = cache.Get(TableReadOptions{}, number, metas[i].file_size,
+                                       key.internal_key(), &result);
+            if (!s.ok() || result.kind != TableGetResult::Kind::kFound ||
+                result.value != prefix + ValueOf(5)) {
+              wrong++;
+            }
+            break;
+          }
+          case 2: {
+            const std::unique_ptr<Iterator> iter =
+                cache.NewIterator(TableReadOptions{}, number, metas[i].file_size);
+            int count = 0;
+            for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
+              if (iter->value() != prefix + ValueOf(count)) {
+                wrong++;
+              }
+              count++;
+            }
+            if (count != 10 || !iter->status().ok()) {
+              wrong++;
+            }
+            break;
+          }
+          default:
+            cache.Evict(number);
+            break;
+        }
+      }
+    });
+  }
+  for (std::thread& thread : threads) {
+    thread.join();
+  }
+  EXPECT_EQ(wrong.load(), 0);
+}
+
 TEST_F(TableCacheTest, ZeroCapacityStillServesReads) {
   TableCache none(kDb, &env_, &block_cache_, 0);
-  const FileMetaData meta = Build(2, *NumberedMemTable(10));
+  FileMetaData meta;
+  ASSERT_NO_FATAL_FAILURE(Build(2, *NumberedMemTable(10), &meta));
   std::shared_ptr<Table> table;
   ASSERT_OK(none.FindTable(2, meta.file_size, &table));
   TableGetResult result;
@@ -373,7 +512,8 @@ TEST_F(TableCacheTest, ZeroCapacityStillServesReads) {
 }
 
 TEST_F(TableCacheTest, GetFindsFoundAndAbsentKeys) {
-  const FileMetaData meta = Build(2, *NumberedMemTable(10));
+  FileMetaData meta;
+  ASSERT_NO_FATAL_FAILURE(Build(2, *NumberedMemTable(10), &meta));
   TableGetResult result;
   const LookupKey present(UserKey(4), kMaxSequenceNumber);
   ASSERT_OK(
@@ -404,8 +544,10 @@ TEST_F(TableCacheTest, BlockCacheIsKeyedByFileNumber) {
   // Two tables with the same keys, so with a data block at the same offset, and different values.
   // If their blocks went into the shared cache under one name, the second read would be served the
   // first table's block.
-  const FileMetaData a = Build(10, *NumberedMemTable(20, "a-"));
-  const FileMetaData b = Build(11, *NumberedMemTable(20, "b-"));
+  FileMetaData a;
+  ASSERT_NO_FATAL_FAILURE(Build(10, *NumberedMemTable(20, "a-"), &a));
+  FileMetaData b;
+  ASSERT_NO_FATAL_FAILURE(Build(11, *NumberedMemTable(20, "b-"), &b));
   const LookupKey key(UserKey(5), kMaxSequenceNumber);
   for (int round = 0; round < 2; round++) {
     TableGetResult from_a;
@@ -418,7 +560,8 @@ TEST_F(TableCacheTest, BlockCacheIsKeyedByFileNumber) {
 }
 
 TEST_F(TableCacheTest, NewIteratorReadsTheTable) {
-  const FileMetaData meta = Build(2, *NumberedMemTable(30));
+  FileMetaData meta;
+  ASSERT_NO_FATAL_FAILURE(Build(2, *NumberedMemTable(30), &meta));
   const std::unique_ptr<Iterator> iter =
       table_cache_.NewIterator(TableReadOptions{}, 2, meta.file_size);
   EXPECT_EQ(Drain(iter.get()), NumberedEntries(30));
@@ -433,7 +576,8 @@ TEST_F(TableCacheTest, NewIteratorOfAMissingTableReportsTheError) {
 }
 
 TEST_F(TableCacheTest, NewIteratorOfADamagedTableReportsCorruption) {
-  const FileMetaData meta = Build(2, *NumberedMemTable(30));
+  FileMetaData meta;
+  ASSERT_NO_FATAL_FAILURE(Build(2, *NumberedMemTable(30), &meta));
   TableCache fresh(kDb, &env_, &block_cache_, 10);
   const std::unique_ptr<Iterator> iter =
       fresh.NewIterator(TableReadOptions{}, 2, meta.file_size + 1);
@@ -443,7 +587,8 @@ TEST_F(TableCacheTest, NewIteratorOfADamagedTableReportsCorruption) {
 }
 
 TEST_F(TableCacheTest, IteratorKeepsItsTableAliveAcrossEviction) {
-  const FileMetaData meta = Build(2, *NumberedMemTable(30));
+  FileMetaData meta;
+  ASSERT_NO_FATAL_FAILURE(Build(2, *NumberedMemTable(30), &meta));
   std::unique_ptr<Iterator> iter = table_cache_.NewIterator(TableReadOptions{}, 2, meta.file_size);
   table_cache_.Evict(2);
   ASSERT_OK(env_.RemoveFile(TableFileName(kDb, 2)));

@@ -7,6 +7,7 @@
 #include <string_view>
 #include <utility>
 
+#include "db/named_status.h"
 #include "io/iterator_util.h"
 #include "io/table.h"
 #include "shale/env.h"
@@ -18,22 +19,20 @@ namespace shale {
 
 namespace {
 
-// The shards a cache of `capacity` tables is divided into, as a power of two. A shard is least
-// recently used within itself and not across the cache, so one with room for a handful of tables
-// would evict a table that is in use because three others happened to hash beside it. None gets
-// fewer than this many.
-constexpr size_t kMinTablesPerShard = 16;
+// The most shards a cache is divided into, as a power of two, and the fewest tables a shard may
+// have room for.
 constexpr int kMaxShardBits = 4;
+constexpr size_t kMinTablesPerShard = 16;
 
-int ShardBitsFor(size_t capacity) {
+}  // namespace
+
+int TableCache::ShardBitsFor(size_t capacity) {
   int bits = 0;
   while (bits < kMaxShardBits && (capacity >> (bits + 1)) >= kMinTablesPerShard) {
     bits++;
   }
   return bits;
 }
-
-}  // namespace
 
 TableCache::TableCache(std::string dbname, Env* env, BlockCache* block_cache, size_t capacity)
     : dbname_(std::move(dbname)),
@@ -52,15 +51,16 @@ Status TableCache::FindTable(uint64_t number, uint64_t file_size, std::shared_pt
   // Two threads that miss together both open the file, and the later insert replaces the earlier.
   // The earlier table stays alive for whoever got it, and both read the same bytes, so the only
   // cost is the opening, once.
+  const std::string fname = TableFileName(dbname_, number);
   std::unique_ptr<RandomAccessFile> file;
-  Status s = env_->NewRandomAccessFile(TableFileName(dbname_, number), &file);
+  Status s = env_->NewRandomAccessFile(fname, &file);
   if (!s.ok()) {
     return s;
   }
   std::shared_ptr<Table> opened;
   s = Table::Open(std::move(file), file_size, number, block_cache_, &opened);
   if (!s.ok()) {
-    return s;
+    return WithFileName(s, fname);
   }
   cache_.Insert(number, opened, 1);
   *table = std::move(opened);
@@ -85,7 +85,8 @@ Status TableCache::Get(const TableReadOptions& options, uint64_t number, uint64_
   if (!s.ok()) {
     return s;
   }
-  return table->Get(options, internal_key, result);
+  s = table->Get(options, internal_key, result);
+  return WithFileName(s, TableFileName(dbname_, number));
 }
 
 void TableCache::Evict(uint64_t number) { cache_.Erase(number); }

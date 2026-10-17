@@ -116,10 +116,15 @@ class VersionSet {
   VersionSet& operator=(const VersionSet&) = delete;
 
   /// Creates the files of a new database: MANIFEST-000001 holding SnapshotEdit(VersionState{}),
-  /// synced, and CURRENT naming it, as SetCurrentFile() writes it. The state is empty and
-  /// NextFileNumber() is 2. It replaces a CURRENT that is there; whether the database already
-  /// exists is the caller's to decide. On failure no CURRENT is made by this call, and the
-  /// MANIFEST it started is removed unless CURRENT may name it.
+  /// synced, its directory entry synced, and CURRENT naming it, as SetCurrentFile() writes it. The
+  /// state is empty and NextFileNumber() is 2. It replaces a CURRENT that is there; whether the
+  /// database already exists is the caller's to decide.
+  ///
+  /// On failure the database is either not there, with no CURRENT and the MANIFEST removed, or it
+  /// is whole, if the failure came after CURRENT was switched. In the first case a retry on this
+  /// version set goes through. In the second CURRENT may name MANIFEST-000001, and writing it again
+  /// would empty a file that CURRENT names, so a retry is refused with the error of the attempt
+  /// that failed: recover the database with a new version set.
   ///
   /// The MANIFEST stays open for LogAndApply(). Aborts if this version set was already loaded.
   Status CreateNew();
@@ -130,19 +135,25 @@ class VersionSet {
   ///
   /// Returns Corruption("CURRENT file does not end with newline"), Corruption("CURRENT names an
   /// invalid file") for one that is not a MANIFEST name as SetCurrentFile() writes it, the I/O
-  /// error of reading CURRENT or the MANIFEST, Corruption for any defect the log reader reports,
-  /// whether or not a valid record follows it (only the end of the file, cut short, is the end
-  /// of the log), for a record that does not decode, for an edit that ApplyEdit() refuses, for a
-  /// MANIFEST with no record at all, and for a last sequence number that no write could have.
-  /// On failure nothing is installed. Aborts if this version set was already loaded.
+  /// error of reading CURRENT or the MANIFEST, and Corruption for any defect the log reader
+  /// reports, whether or not a valid record follows it (only the end of the file, cut short, is
+  /// the end of the log), for a record that does not decode, for an edit that ApplyEdit() refuses,
+  /// for a MANIFEST with no record at all, for a last sequence number that no write could have, and
+  /// for a MANIFEST that leaves no file number above the ones in use, which the next file the
+  /// database made would abort on. A defect is reported in preference to the failure of a record
+  /// after it, which the gap may have caused. Every Corruption but the two about CURRENT names the
+  /// MANIFEST in its message. On failure nothing is installed.
+  ///
+  /// Aborts if this version set was already loaded.
   Status Recover();
 
   /// Applies `edit` and starts a new MANIFEST: puts NextFileNumber() and LastSequence() into the
   /// edit, applies it to the current state, writes MANIFEST-<n> for a number n it takes from
-  /// NewFileNumber(), holding SnapshotEdit of the new state as its one record, syncs it, makes
-  /// CURRENT name it with SetCurrentFile(), and then installs the new version. The MANIFEST stays
-  /// open for LogAndApply(), and the one before it is closed and left for the database to delete.
-  /// The database calls it once, when it is opened.
+  /// NewFileNumber(), holding SnapshotEdit of the new state as its one record, syncs it and its
+  /// directory entry, makes CURRENT name it with SetCurrentFile(), and then installs the new
+  /// version. The MANIFEST stays open for LogAndApply(), and the one before it is closed and left
+  /// for the database to delete. The database calls it once, when it is opened. It returns
+  /// Corruption, and writes nothing, if no file number is left to name the new MANIFEST with.
   ///
   /// On any failure nothing is installed. If the edit is refused, or the new MANIFEST could not be
   /// written, or switching CURRENT failed and CURRENT is seen to name the old MANIFEST still, the

@@ -42,17 +42,24 @@ class TableCache {
   /// @param env the Env to open files through.
   /// @param block_cache the cache of data blocks every table reads through; may be null for none.
   /// @param capacity how many tables to keep open; 0 keeps none, and every read opens its table.
-  ///   It is divided among up to 16 shards, each of which orders its tables by use, but none gets
-  ///   fewer than 16: a cache for 20 tables is not made of 16 shards of 1 that an uneven hash
-  ///   would thrash.
+  ///   It is divided among up to 16 shards by ShardBitsFor().
   TableCache(std::string dbname, Env* env, BlockCache* block_cache, size_t capacity);
 
   TableCache(const TableCache&) = delete;
   TableCache& operator=(const TableCache&) = delete;
 
+  /// Returns the base-2 logarithm of the number of shards a cache of `capacity` tables is divided
+  /// into: the most, up to 4, that leave every shard room for 16 tables. A shard is least recently
+  /// used within itself and not across the cache, so one with room for a handful of tables would
+  /// evict a table in use because three others hashed beside it. A public function so that the
+  /// rule is one a test can state.
+  /// @param capacity the number of tables the cache is to hold.
+  static int ShardBitsFor(size_t capacity);
+
   /// Finds table `number`, opening it if it is not in the cache. Returns what Table::Open() does
-  /// for a file that cannot be opened or read, and an IOError that names the file for one that is
-  /// not there. A table that failed to open is not remembered. On failure `*table` is null.
+  /// for a file that cannot be opened or read, with a Corruption naming the file, and an IOError
+  /// that names it for one that is not there. A table that failed to open is not remembered. On
+  /// failure `*table` is null.
   ///
   /// The cache is keyed by `number` alone and trusts that a number is one file: the size is used
   /// only when the table is opened.
@@ -71,7 +78,8 @@ class TableCache {
                                         uint64_t file_size);
 
   /// Looks `internal_key` up in table `number` as Table::Get() does. Returns an error if the table
-  /// cannot be opened or read; the answer is in `*result` only when the status is OK.
+  /// cannot be opened or read, a Corruption naming the file; the answer is in `*result` only when
+  /// the status is OK.
   /// @param options how to read.
   /// @param number the file number of the table.
   /// @param file_size the size of the file in bytes.

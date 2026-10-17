@@ -54,6 +54,7 @@ shale_add_library(shale_db
   SOURCES
     db/builder.cc
     db/filename_io.cc
+    db/named_status.cc
     db/table_cache.cc
     db/version_set.cc
   LIBS shale_core shale_io)
