@@ -156,8 +156,10 @@ class DB {
   ///   shadowed_dropped, user_bytes_written, wal_bytes_written, flush_bytes_written,
   ///   compaction_bytes_read, compaction_bytes_written, write_groups, wal_syncs, write_slowdowns,
   ///   write_stops, bg_errors.
-  /// - "shale.write-amplification": the bytes written to the log, by flushes and by compactions,
-  ///   over the key and value bytes the callers wrote, with two decimals; "0.00" before any write.
+  /// - "shale.write-amplification": the bytes written to disk by the log, by flushes and by
+  ///   compactions, over the key and value bytes the callers wrote, with two decimals; "0.00"
+  ///   before any write. The log's bytes are those of its file, headers and padding included, and
+  ///   they count when they were written, whether or not the sync that followed worked.
   /// - "shale.stats": the same, as text for a person: a header line, a line `Level <n>: <files>
   ///   files, <bytes> bytes` for each level, and the counters.
   /// - "shale.approximate-memory-usage": the bytes the memtables and the cache of table blocks
@@ -167,6 +169,8 @@ class DB {
   /// The figures of one property are taken together, at one moment.
   /// @param property the name of the property.
   /// @param value receives the property's value as text; left alone if there is no such property.
+  ///   It must not be null: a null `value` aborts the process, for every name, one that is not a
+  ///   property included.
   /// @return false if there is no property of that name.
   virtual bool GetProperty(std::string_view property, std::string* value) = 0;
 };

@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -108,6 +109,11 @@ class DBTestBase : public ::testing::Test {
  private:
   std::unique_ptr<HookEnv> hook_env_;  // declared last: destroyed before the Env it wraps
 };
+
+/// Polls `done` every 100 microseconds, and returns whether it came true within ten seconds. A test
+/// that waits for another thread to make progress waits with this and never for a fixed time: a
+/// slow machine only makes it slower.
+bool PollUntil(const std::function<bool()>& done);
 
 /// Creates the database `dbname` in `env` as an empty one whose MANIFEST records `last_sequence`
 /// and `next_file_number`, as a database that had been written to for a long time would. `dbname`

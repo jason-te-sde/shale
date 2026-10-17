@@ -407,6 +407,60 @@ TEST_F(LogTest, WriterFlushesOnceEveryRecord) {
   EXPECT_EQ(spy.syncs, 0) << "making records durable is the caller's decision";
 }
 
+TEST_F(LogTest, BytesWrittenIsWhatTheFileHoldsAfterEveryRecord) {
+  EXPECT_EQ(writer_->bytes_written(), 0u);
+  const Records records = {"foo",
+                           "",
+                           std::string(3 * kBlockSize, 'x'),
+                           BigString("foo", kBlockSize - 2 * kHeaderSize + 1),
+                           "bar",
+                           BigString("foo", kBlockSize - 2 * kHeaderSize),
+                           "baz"};
+  for (size_t i = 0; i < records.size(); i++) {
+    Write(records[i]);
+    EXPECT_EQ(writer_->bytes_written(), FileSize()) << "after record " << i;
+  }
+}
+
+TEST_F(LogTest, BytesWrittenOfARecordIsItsPayloadAndItsHeaders) {
+  const auto cost_of = [&](std::string_view record) {
+    const uint64_t before = writer_->bytes_written();
+    Write(record);
+    return writer_->bytes_written() - before;
+  };
+  EXPECT_EQ(cost_of("foo"), kHeaderSize + 3);
+  EXPECT_EQ(cost_of(""), kHeaderSize) << "an empty record is a header";
+  // Four fragments, one header each: the record starts 17 bytes into a block and ends in a fourth.
+  EXPECT_EQ(cost_of(std::string(3 * kBlockSize, 'x')), 3 * kBlockSize + 4 * kHeaderSize);
+}
+
+TEST_F(LogTest, TheZerosThatPadABlockAreCountedWithTheRecordThatFollows) {
+  Write(BigString("foo", kBlockSize - 2 * kHeaderSize + 1));  // leaves six bytes of the block
+  ASSERT_EQ(FileSize(), kBlockSize - 6);
+  const uint64_t before = writer_->bytes_written();
+  Write("bar");
+  EXPECT_EQ(writer_->bytes_written() - before, 6 + kHeaderSize + 3);
+  EXPECT_EQ(FileSize(), kBlockSize + kHeaderSize + 3);
+}
+
+TEST_F(LogTest, AnEmptyFragmentThatFillsTheEndOfABlockIsCounted) {
+  Write(BigString("foo", kBlockSize - 2 * kHeaderSize));  // leaves exactly one header
+  const uint64_t before = writer_->bytes_written();
+  Write("bar");
+  // The header with no payload that fills the block, and then "bar" in the next.
+  EXPECT_EQ(writer_->bytes_written() - before, kHeaderSize + kHeaderSize + 3);
+  EXPECT_EQ(writer_->bytes_written(), FileSize());
+}
+
+TEST_F(LogTest, AResumedWriterCountsOnlyWhatItWrites) {
+  Write("foo");
+  Resume();
+  EXPECT_EQ(writer_->bytes_written(), 0u) << "what the file held before is not this writer's";
+  Write("x");
+  EXPECT_EQ(writer_->bytes_written(), kHeaderSize + 1);
+  EXPECT_EQ(FileSize(), 2 * kHeaderSize + 4);
+}
+
 enum class FailOn { kAppend, kFlush };
 
 // A WritableFile that works until `fail_on` is called for the first time, fails that call, and
@@ -461,6 +515,53 @@ TEST_F(LogTest, AFailedWriteIsStickyAndTouchesTheFileNoMore) {
     EXPECT_TRUE(second.IsIOError());
     EXPECT_EQ(second.ToString(), first.ToString());
     EXPECT_EQ(file.calls_after_failure, 0) << "the Writer used the file after it failed";
+  }
+}
+
+// A WritableFile that accepts `accepted` calls to Append() and fails the one after them, and every
+// one after that.
+class FailAfterAppends : public WritableFile {
+ public:
+  explicit FailAfterAppends(int accepted) : accepted_(accepted) {}
+
+  Status Append(std::string_view) override {
+    if (accepted_ == 0) {
+      return Status::IOError("injected append failure");
+    }
+    accepted_--;
+    return Status::OK();
+  }
+  Status Flush() override { return Status::OK(); }
+  Status Sync() override { return Status::OK(); }
+  Status Close() override { return Status::OK(); }
+
+ private:
+  int accepted_;
+};
+
+TEST(LogWriterBytesTest, ARecordThatFailsPartWayCountsWhatTheFileAccepted) {
+  // "foo" is two appends, its header and its payload.
+  {
+    FailAfterAppends file(0);
+    Writer writer(&file);
+    EXPECT_TRUE(writer.AddRecord("foo").IsIOError());
+    EXPECT_EQ(writer.bytes_written(), 0u) << "the header was refused";
+  }
+  {
+    FailAfterAppends file(1);
+    Writer writer(&file);
+    EXPECT_TRUE(writer.AddRecord("foo").IsIOError());
+    EXPECT_EQ(writer.bytes_written(), kHeaderSize) << "the header went in and the payload did not";
+    EXPECT_TRUE(writer.AddRecord("bar").IsIOError());
+    EXPECT_EQ(writer.bytes_written(), kHeaderSize) << "nothing is counted after the failure";
+  }
+  {
+    FailAfterAppends file(2);
+    Writer writer(&file);
+    EXPECT_OK(writer.AddRecord("foo"));
+    EXPECT_EQ(writer.bytes_written(), kHeaderSize + 3);
+    EXPECT_TRUE(writer.AddRecord("bar").IsIOError());
+    EXPECT_EQ(writer.bytes_written(), kHeaderSize + 3);
   }
 }
 

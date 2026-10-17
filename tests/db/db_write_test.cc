@@ -22,6 +22,7 @@
 #include "db/db_impl.h"
 #include "db/db_test_util.h"
 #include "db/hook_env.h"
+#include "io/log_format.h"
 #include "io/write_batch_internal.h"
 #include "shale/db.h"
 #include "shale/options.h"
@@ -31,24 +32,13 @@
 #include "testkit/fault_env.h"
 #include "testkit/test_util.h"
 #include "util/dbformat.h"
+#include "util/filename.h"
+#include "util/random.h"
 
 namespace shale {
 namespace {
 
 using Op = FaultInjectionEnv::Op;
-
-// Polls `done` every 100 microseconds and returns whether it came true within ten seconds. A test
-// waits for progress with this and never for a fixed time: a slow machine only makes it slower.
-bool PollUntil(const std::function<bool()>& done) {
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-  while (!done()) {
-    if (std::chrono::steady_clock::now() >= deadline) {
-      return false;
-    }
-    std::this_thread::sleep_for(std::chrono::microseconds(100));
-  }
-  return true;
-}
 
 // What writer threads and the test share. The threads hold it, so it outlives a test that returns
 // early from a failed ASSERT while they run: a thread that wrote to the stack of a test that was
@@ -499,7 +489,9 @@ TEST_F(DBWriteTest, AWriterWaitsAtTheStopTriggerUntilACompactionRuns) {
   EXPECT_LE(most_files, options.l0_stop_trigger);
   EXPECT_GT(stopped_at_trigger, 0) << "the writer never stopped for level 0: it proves nothing";
   EXPECT_GT(tasks_run, 4);
-  EXPECT_GE(dbfull()->TEST_Counters().write_stops, stops_seen);
+  // No bound on write_stops against tasks_run is asserted: the loop above already implies a lower
+  // one, and one task can wake the stalled writer more than once (each installed version signals),
+  // so no upper one holds. The checks that matter are the two on level 0's size.
   EXPECT_LE(NumTableFilesAtLevel(0), options.l0_stop_trigger);
   gate_->Open();
   EXPECT_EQ(Get(UserKey(kPuts - 1)), KiB(kPuts - 1));
@@ -710,19 +702,214 @@ TEST_F(DBWriteTest, UserBytesCounted) {
   EXPECT_EQ(dbfull()->TEST_Counters().user_bytes_written, 12u) << "a refused write counts nothing";
 }
 
-TEST_F(DBWriteTest, WalBytesAreTheBytesOfTheRecordsAndOneGroupIsOneRecord) {
-  WriteBatch expected;
-  expected.Put("ab", "cde");
+// What the log file holds now: the bytes of the newest log, which the database writes to, as
+// readers of the Env see them.
+size_t LogFileSize(FaultInjectionEnv* env, const std::string& dbname) {
+  return env->FileContents(NewestLogFile(env, dbname)).size();
+}
+
+TEST_F(DBWriteTest, WalBytesAreTheBytesOfTheLogFileHeadersIncluded) {
+  // One put of "ab" and "cde" is a record of 12 bytes of header, 1 of type, and the lengths and
+  // bytes of the key and the value: 20, and the log gives it a header of 7.
+  WriteBatch record;
+  record.Put("ab", "cde");
+  ASSERT_EQ(record.ApproximateSize(), 20u);
   ASSERT_OK(Put("ab", "cde"));
   const DBCounters one = dbfull()->TEST_Counters();
-  EXPECT_EQ(one.wal_bytes_written, expected.ApproximateSize());
+  EXPECT_EQ(one.wal_bytes_written, 20u + log::kHeaderSize);
+  EXPECT_EQ(one.wal_bytes_written, LogFileSize(env_.get(), dbname_));
   EXPECT_EQ(one.write_groups, 1u);
   EXPECT_EQ(one.wal_syncs, 1u);
   ASSERT_OK(Put("ab", "cde", /*sync=*/false));
   const DBCounters two = dbfull()->TEST_Counters();
-  EXPECT_EQ(two.wal_bytes_written, 2 * expected.ApproximateSize());
+  EXPECT_EQ(two.wal_bytes_written, 2 * (20u + log::kHeaderSize));
   EXPECT_EQ(two.wal_syncs, 1u) << "a write that is not synced does not sync";
   EXPECT_EQ(two.write_groups, 2u);
+}
+
+TEST_F(DBWriteTest, WalBytesFollowTheLogFileThroughFragmentsAndBlockPadding) {
+  // Records of every size across the 32 KiB blocks of the log: a record that spans blocks takes a
+  // header for each fragment, and the end of a block too short for a header is zeros that the next
+  // record pays for. The counter is the size of the file at every step, whatever the sizes are.
+  Random rnd(41);
+  for (int i = 0; i < 60; i++) {
+    const size_t size = i % 7 == 0 ? 70000 + rnd.Uniform(100) : 1 + rnd.Uniform(9000);
+    ASSERT_OK(Put(UserKey(i), std::string(size, 'v'), /*sync=*/false)) << "write " << i;
+    ASSERT_EQ(dbfull()->TEST_Counters().wal_bytes_written, LogFileSize(env_.get(), dbname_))
+        << "after write " << i << " of " << size << " bytes";
+  }
+  EXPECT_GT(dbfull()->TEST_Counters().wal_bytes_written, 3u * log::kBlockSize);
+}
+
+TEST_F(DBWriteTest, OneGroupIsOneRecordWithOneHeader) {
+  Reopen(ThreadedOptions());
+  HoldLeaders();
+  StartPut("first", "1", /*sync=*/false);
+  ASSERT_TRUE(WaitForQueued(1));
+  StartPut("a", "2", /*sync=*/false);
+  ASSERT_TRUE(WaitForQueued(2));
+  StartPut("b", "3", /*sync=*/false);
+  ASSERT_TRUE(WaitForQueued(3));
+  StartPut("c", "4", /*sync=*/false);
+  ASSERT_TRUE(WaitForQueued(4));
+  ReleaseLeader();
+  JoinWriters();
+
+  WriteBatch first;
+  first.Put("first", "1");
+  WriteBatch group;  // what the three that queued became: their operations, under one header
+  group.Put("a", "2");
+  group.Put("b", "3");
+  group.Put("c", "4");
+  const DBCounters counters = dbfull()->TEST_Counters();
+  ASSERT_EQ(counters.write_groups, 2u);
+  EXPECT_EQ(counters.wal_bytes_written,
+            first.ApproximateSize() + group.ApproximateSize() + 2 * log::kHeaderSize)
+      << "the group is one record, with one header and not three";
+  EXPECT_EQ(counters.wal_bytes_written, LogFileSize(env_.get(), dbname_));
+}
+
+TEST_F(DBWriteTest, AGroupWhoseSyncFailedCountsItsBytesWhichAreInTheFile) {
+  // The bytes were written, and a reopen finds them: the counter says what the log took, and not
+  // what was acknowledged. The group is not counted as one that was made.
+  ASSERT_OK(Put("before", "1"));
+  const uint64_t before = dbfull()->TEST_Counters().wal_bytes_written;
+  env_->FailOpAfter(Op::kSync, 0);
+  ASSERT_TRUE(Put("lost", "2").IsIOError());
+  const DBCounters counters = dbfull()->TEST_Counters();
+  EXPECT_GT(counters.wal_bytes_written, before) << "the record of the failed group is in the file";
+  EXPECT_EQ(counters.wal_bytes_written, LogFileSize(env_.get(), dbname_));
+  EXPECT_EQ(counters.user_bytes_written, 6u + 1u) << "and the writes of it are not counted as made";
+  EXPECT_EQ(counters.wal_syncs, 1u) << "only the sync that worked";
+}
+
+TEST_F(DBWriteTest, AnAppendThatTheFileRefusedCountsNothing) {
+  env_->FailOpAfter(Op::kAppend, 0);
+  ASSERT_TRUE(Put("lost", "1", /*sync=*/false).IsIOError());
+  const DBCounters counters = dbfull()->TEST_Counters();
+  EXPECT_EQ(counters.wal_bytes_written, 0u) << "not even the header went in";
+  EXPECT_EQ(counters.write_groups, 0u) << "no record was appended";
+  EXPECT_EQ(counters.bg_errors, 1u);
+}
+
+TEST_F(DBWriteTest, AGroupOfWritersSharesOneSlowdownSleep) {
+  Options options = ThreadedOptions();
+  options.l0_compaction_trigger = 10;
+  options.l0_slowdown_trigger = 2;
+  options.l0_stop_trigger = 10;
+  Reopen(options);
+  ASSERT_OK(Put("a", "1"));
+  ASSERT_OK(db_->Flush());
+  ASSERT_OK(Put("b", "2"));
+  ASSERT_OK(db_->Flush());
+  ASSERT_EQ(NumTableFilesAtLevel(0), 2);
+  ASSERT_EQ(dbfull()->TEST_Counters().write_slowdowns, 0u);
+  const uint64_t groups_before = dbfull()->TEST_Counters().write_groups;
+
+  const uint64_t t0 = env_->NowMicros();
+  HoldLeaders();
+  StartPut("first", "1", /*sync=*/false);  // the first group: its leader has slept already
+  ASSERT_TRUE(WaitForQueued(1));
+  StartPut("w1", "1", /*sync=*/false);
+  ASSERT_TRUE(WaitForQueued(2));
+  StartPut("w2", "2", /*sync=*/false);
+  ASSERT_TRUE(WaitForQueued(3));
+  StartPut("w3", "3", /*sync=*/false);
+  ASSERT_TRUE(WaitForQueued(4));
+  ReleaseLeader();
+  JoinWriters();
+
+  const DBCounters counters = dbfull()->TEST_Counters();
+  ASSERT_EQ(counters.write_groups - groups_before, 2u);
+  EXPECT_EQ(counters.write_slowdowns, 2u) << "four writes, two groups, a sleep for each group";
+  EXPECT_EQ(env_->NowMicros() - t0, 2000u) << "the three that share a group slept once";
+}
+
+TEST_F(DBWriteTest, AWriteWithRoomInTheMemtableDoesNotWaitAtTheStopTrigger) {
+  // Two tables are in level 0, which is the stop trigger, and a compaction is queued and not run.
+  // The memtable has room, and a write that does not have to switch it has nothing to wait for:
+  // it goes through, and the compaction is still queued. The write that has to switch waits, and
+  // runs the compaction.
+  Options options = SmallBuffer();
+  options.l0_compaction_trigger = 100;  // taken to be the stop trigger
+  options.l0_slowdown_trigger = 2;
+  options.l0_stop_trigger = 2;
+  Reopen(options);
+  PutUntilSwitched();
+  ASSERT_TRUE(scheduler_.RunOne()) << "the flush";
+  ASSERT_EQ(NumTableFilesAtLevel(0), 1);
+  PutUntilSwitched();
+  ASSERT_TRUE(scheduler_.RunOne()) << "the flush";
+  ASSERT_EQ(NumTableFilesAtLevel(0), 2);
+  ASSERT_EQ(scheduler_.pending(), 1u) << "the compaction that level 0 is due for";
+
+  ASSERT_OK(Put("room", "1", /*sync=*/false));
+  EXPECT_EQ(dbfull()->TEST_Counters().write_stops, 0u);
+  EXPECT_EQ(NumTableFilesAtLevel(0), 2) << "the write waited for the compaction, or ran it";
+  EXPECT_EQ(scheduler_.pending(), 1u) << "the compaction was run by a write that needed no room";
+  EXPECT_EQ(Get("room"), "1");
+
+  for (int i = 0; dbfull()->TEST_Counters().write_stops == 0 && i < 100; i++) {
+    ASSERT_OK(Put(UserKey(i), KiB(i), /*sync=*/false));
+  }
+  EXPECT_GE(dbfull()->TEST_Counters().write_stops, 1u) << "the switch did not wait";
+  EXPECT_LT(NumTableFilesAtLevel(0), 2) << "and what it waited for was the compaction";
+  EXPECT_GE(dbfull()->TEST_Counters().compactions + dbfull()->TEST_Counters().trivial_moves, 1u);
+}
+
+TEST_F(DBWriteTest, ABackgroundErrorInTheMiddleOfAGroupLetsTheGroupFinish) {
+  // The group has been built and is waiting to be appended when a flush fails. The log is whole,
+  // so the group is written and acknowledged, and the next write returns the error.
+  Options options = SmallBuffer();
+  HookEnv* const hook_env = NewHookEnv();
+  const auto fail_tables = std::make_shared<std::atomic<bool>>(false);
+  hook_env->SetHook([fail_tables](std::string_view call, const std::string& path) {
+    if (fail_tables->load() && call == "new_writable" && path.ends_with(".sst")) {
+      return Status::IOError("injected: no table can be made");
+    }
+    return Status::OK();
+  });
+  options.env = hook_env;
+  options.scheduler = Gate();
+  Reopen(options);
+  PutUntilSwitched();  // the memtable is waiting for a flush that the gate holds
+  ASSERT_EQ(dbfull()->TEST_Counters().bg_errors, 0u);
+
+  HoldLeaders();
+  const size_t mid = StartPut("mid", "group", /*sync=*/false);
+  ASSERT_TRUE(WaitForQueued(1));
+  fail_tables->store(true);
+  ASSERT_TRUE(gate_->RunOne());  // the flush fails while the group waits for its turn at the log
+  ASSERT_EQ(dbfull()->TEST_Counters().bg_errors, 1u);
+  ReleaseLeader();
+  JoinWriters();
+
+  EXPECT_OK(statuses_[mid]) << "the group was built before the error and the log is whole";
+  EXPECT_EQ(Get("mid"), "group");
+  const Status next = Put("next", "1", /*sync=*/false);
+  EXPECT_TRUE(next.IsIOError()) << next.ToString();
+  std::string error;
+  ASSERT_TRUE(db_->GetProperty("shale.background-error", &error));
+  EXPECT_EQ(next.ToString(), error);
+  EXPECT_EQ(Get("next"), "NOT_FOUND");
+  EXPECT_EQ(dbfull()->TEST_Counters().bg_errors, 1u);
+  hook_env->SetHook(nullptr);
+}
+
+// Closing with a write in progress aborts, so this runs in a child process.
+class DBWriteDeathTest : public DBWriteTest {};
+
+TEST_F(DBWriteDeathTest, ClosingWithAWriteInProgressAborts) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(
+      {
+        Reopen(ThreadedOptions());
+        HoldLeaders();  // the leader waits in the hook, with its write in the queue
+        StartPut("k", "v");
+        static_cast<void>(WaitForQueued(1));
+        db_.reset();
+      },
+      "DB closed while a write or a flush is in progress");
 }
 
 }  // namespace
