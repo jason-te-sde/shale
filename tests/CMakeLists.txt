@@ -91,6 +91,8 @@ shale_add_test(db_basic SOURCES db/db_basic_test.cc LIBS shale_dbtest)
 shale_add_test(db_recovery SOURCES db/db_recovery_test.cc LIBS shale_dbtest)
 shale_add_test(db_flush SOURCES db/db_flush_test.cc LIBS shale_dbtest)
 shale_add_test(db_compaction SOURCES db/db_compaction_test.cc LIBS shale_dbtest)
+shale_add_test(db_iter SOURCES db/db_iter_test.cc LIBS shale_dbtest)
+shale_add_test(db_snapshot SOURCES db/db_snapshot_test.cc LIBS shale_dbtest)
 
 # Clang's thread-safety analysis is what makes SHALE_GUARDED_BY more than a comment, and nothing
 # else would notice if it silently stopped working. So the build itself is tested: one translation

@@ -1,9 +1,10 @@
 #ifndef SHALE_DB_DB_IMPL_H_
 #define SHALE_DB_DB_IMPL_H_
 
-// The database: opening it and recovering what a previous run left, the write path, and point
-// reads. The other files of src/db that belong to DBImpl are db_write.cc, the write path,
-// db_background.cc, the memtable switch and the background work, and, as they come, the iterators.
+// The database: opening it and recovering what a previous run left, the write path, point reads,
+// snapshots and iterators. The other files of src/db that belong to DBImpl are db_write.cc, the
+// write path, and db_background.cc, the memtable switch and the background work. The user view
+// that an iterator shows is made in db_iter.cc.
 
 #include <atomic>
 #include <cstdint>
@@ -83,7 +84,8 @@ class DBImpl final : public DB {
   /// @param dbname the database directory.
   DBImpl(const Options& options, std::string dbname);
 
-  /// Closes the database; see DB::~DB(). Aborts if a snapshot is still alive.
+  /// Closes the database; see DB::~DB(). Aborts if an iterator or a snapshot is still alive, the
+  /// iterator first: it points into what is about to be freed, and a snapshot is only a number.
   ~DBImpl() override;
 
   Status Put(const WriteOptions& options, std::string_view key, std::string_view value) override;
@@ -107,12 +109,37 @@ class DBImpl final : public DB {
   Status CompactRange(std::optional<std::string_view> begin,
                       std::optional<std::string_view> end) override;
 
-  // These return NotSupported, or nothing, until they are written.
-  std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) override;
+  /// Returns an iterator over the database as of one sequence number: `options.snapshot`'s if it
+  /// is set, and else the newest write that is done. It shows each key once, with the value of its
+  /// newest write at or below that number, and no key whose newest such write is a deletion. See
+  /// NewDBIterator() for what it does with a failure.
+  ///
+  /// It merges the memtable, the immutable memtable and every file of the current version, and
+  /// holds all of them, the Version and the memtables, for as long as it lives: that is what makes
+  /// it a snapshot of its own, with no snapshot taken, whatever is written, flushed or compacted
+  /// after it was made. A table it holds is kept by LiveFiles() and is deleted by the first sweep
+  /// of obsolete files after the iterator is gone. Releasing the iterator does not run a sweep, so
+  /// that is the next flush or compaction. The tables of level 0 are opened here and those of the
+  /// deeper levels as the iterator comes to them, and a table that cannot be opened or read ends
+  /// the iteration with its error.
+  ///
+  /// An iterator at a snapshot holds what the current version has, and the snapshot only chooses
+  /// what of it is seen: the snapshot may be released while the iterator is in use, and the files
+  /// it reads stay as they were. The snapshot must be open when the iterator is made. The count of
+  /// iterators that the destructor checks goes up here and down when the iterator is destroyed,
+  /// from any thread.
+  /// @param options how to read; `options.snapshot` is checked as in Get().
+  std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) override SHALE_EXCLUDES(mutex_);
+
+  /// Returns false for every property: there are none yet.
   bool GetProperty(std::string_view property, std::string* value) override;
 
-  const Snapshot* GetSnapshot() override;
-  void ReleaseSnapshot(const Snapshot* snapshot) override;
+  /// Returns a snapshot at the newest write that is done.
+  const Snapshot* GetSnapshot() override SHALE_EXCLUDES(mutex_);
+
+  /// Gives back `snapshot`. Aborts if it is not open in this database: one that another database
+  /// made, and one that was released already, whose memory is only compared with the open ones.
+  void ReleaseSnapshot(const Snapshot* snapshot) override SHALE_EXCLUDES(mutex_);
 
   /// Opens the database: the work of DB::Open() after the options are checked. The sequence is
   /// the directory, the lock, CURRENT and the MANIFEST, the replay of the write-ahead logs that
@@ -331,6 +358,10 @@ class DBImpl final : public DB {
   // synced, as they are by default, is every time.
   bool log_unsynced_ SHALE_GUARDED_BY(mutex_) = false;
   SnapshotList snapshots_ SHALE_GUARDED_BY(mutex_);
+  // How many iterators from NewIterator() are alive. Counted up under the mutex and down by the
+  // iterator, which is destroyed on any thread and must not take the mutex for it, so atomic.
+  // The destructor aborts if it is not zero.
+  std::atomic<int> live_iterators_{0};
   Status bg_error_ SHALE_GUARDED_BY(mutex_);  // the first error of the write path, or OK
   DBCounters counters_ SHALE_GUARDED_BY(mutex_);
   uint64_t memtable_seed_ SHALE_GUARDED_BY(mutex_) = 0;  // the seed of the next memtable

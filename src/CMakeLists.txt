@@ -56,6 +56,7 @@ shale_add_library(shale_db
     db/compaction_job.cc
     db/db_background.cc
     db/db_impl.cc
+    db/db_iter.cc
     db/db_write.cc
     db/filename_io.cc
     db/info_log.cc

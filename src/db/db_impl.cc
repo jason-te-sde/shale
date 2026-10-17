@@ -16,6 +16,7 @@
 #include "core/version_edit.h"
 #include "core/version_state.h"
 #include "db/builder.h"
+#include "db/db_iter.h"
 #include "db/filename_io.h"
 #include "db/info_log.h"
 #include "db/snapshot_list.h"
@@ -24,6 +25,7 @@
 #include "io/log_reader.h"
 #include "io/log_writer.h"
 #include "io/memtable.h"
+#include "io/merging_iterator.h"
 #include "io/table.h"
 #include "io/write_batch_internal.h"
 #include "shale/db.h"
@@ -157,9 +159,17 @@ DBImpl::DBImpl(const Options& options, std::string dbname)
 // better answer than the end of the process, which is what an exception leaving it is.
 // NOLINTNEXTLINE(bugprone-exception-escape)
 DBImpl::~DBImpl() {
+  // First, and before the mutex: an iterator reads what the database is about to free, which makes
+  // it worse than a snapshot, and it is counted without the mutex. The messages are built without
+  // allocating: a destructor does not throw, and they are for the abort.
+  const int live_iterators = live_iterators_.load(std::memory_order_acquire);
+  if (live_iterators != 0) {
+    char message[96];
+    std::snprintf(message, sizeof message, "DB closed with %d live iterator(s)", live_iterators);
+    SHALE_CHECK(false, message);
+  }
   MutexLock lock(&mutex_);
   if (snapshots_.size() != 0) {
-    // Built without allocating: a destructor does not throw, and the message is for the abort.
     char message[96];
     std::snprintf(message, sizeof message, "DB closed with %zu unreleased snapshot(s)",
                   snapshots_.size());
@@ -641,8 +651,55 @@ void DBImpl::ReleaseSnapshot(const Snapshot* snapshot) {
   snapshots_.Delete(FindOpenSnapshot(snapshots_, snapshot, this, "ReleaseSnapshot"));
 }
 
-std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& /*options*/) {
-  return NewErrorIterator(Status::NotSupported("NewIterator is not implemented yet"));
+namespace {
+
+// What an iterator holds on to so that the sources it reads from stay as they were: the
+// memtables, which its iterators share the ownership of already, and the version, which the
+// iterators of its tables do not hold and whose files a sweep of obsolete files would delete.
+struct IteratorPin {
+  std::shared_ptr<MemTable> mem;
+  std::shared_ptr<MemTable> imm;
+  std::shared_ptr<const Version> version;
+};
+
+}  // namespace
+
+std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& options) {
+  SequenceNumber sequence = 0;
+  auto pin = std::make_shared<IteratorPin>();
+  {
+    // The three under one hold of the mutex, as in Get(): a flush that finishes in between would
+    // leave an `imm_` that is gone with a version that does not have its table yet.
+    MutexLock lock(&mutex_);
+    sequence = options.snapshot != nullptr
+                   ? FindOpenSnapshot(snapshots_, options.snapshot, this, "NewIterator")->sequence()
+                   : versions_.LastSequence();
+    pin->mem = mem_;
+    pin->imm = imm_;
+    pin->version = versions_.current();
+    // Counted here, with the checks that can abort behind it, so that the count is of iterators
+    // that are made: from this point the one that is returned gives it back when it is destroyed.
+    live_iterators_.fetch_add(1, std::memory_order_acq_rel);
+  }
+
+  // The newest source first, so that of equal keys, which two sources never have, it would be
+  // the one that is met first.
+  std::vector<std::unique_ptr<Iterator>> children;
+  children.push_back(pin->mem->NewIterator());
+  if (pin->imm != nullptr) {
+    children.push_back(pin->imm->NewIterator());
+  }
+  TableReadOptions read_options;
+  read_options.verify_checksums = options.verify_checksums;
+  read_options.fill_cache = options.fill_cache;
+  pin->version->AddIterators(read_options, &children);
+
+  std::unique_ptr<Iterator> iter =
+      NewDBIterator(NewMergingIterator(std::move(children), CompareInternalKey), sequence);
+  iter = NewPinningIterator(std::move(iter), std::move(pin));
+  // Outermost, so that the count goes down after the iterator and what it pins are released.
+  return NewCleanupIterator(std::move(iter),
+                            [this] { live_iterators_.fetch_sub(1, std::memory_order_acq_rel); });
 }
 
 bool DBImpl::GetProperty(std::string_view /*property*/, std::string* /*value*/) { return false; }

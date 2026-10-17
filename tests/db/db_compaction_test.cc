@@ -270,15 +270,19 @@ TEST_F(DBCompactionTest, CompactRangeAllPushesDataDown) {
     expected[static_cast<size_t>(key)] = "v" + std::to_string(i) + std::string(100, 'x');
     ASSERT_OK(Put(UserKey(key), expected[static_cast<size_t>(key)], /*sync=*/false));
   }
-  // NOT YET A CHECK: Contents() needs NewIterator, which returns NotSupported until iterators are
-  // written, so the comparison below is of one error text with itself. It is here for when they
-  // are, and the reads of every key with Get() are what checks the data today.
-  const std::string contents_before = Contents();
+  // What a scan returns, which is what was written and which no compaction may change.
+  std::string expected_contents;
+  for (int key = 0; key < 1000; key++) {
+    if (key > 0) {
+      expected_contents.push_back(',');
+    }
+    expected_contents.append(UserKey(key)).append("=").append(expected[static_cast<size_t>(key)]);
+  }
+  ASSERT_EQ(Contents(), expected_contents) << "the scan before the compaction";
   ASSERT_OK(db_->CompactRange(std::nullopt, std::nullopt));
   EXPECT_EQ(NumTableFilesAtLevel(0), 0);
   EXPECT_GE(DeepestLevel(), 1);
-  EXPECT_EQ(Contents(), contents_before)  // NOT YET A CHECK: see above
-      << "a compaction must not change what a scan returns";
+  EXPECT_EQ(Contents(), expected_contents) << "a compaction must not change what a scan returns";
   for (int key = 0; key < 1000; key++) {
     // Every key was written: i * 7 mod 1000 reaches each of the 1000 keys, three times over.
     EXPECT_EQ(Get(UserKey(key)), expected[static_cast<size_t>(key)]) << "key " << key;
