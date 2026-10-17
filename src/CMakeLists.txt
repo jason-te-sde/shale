@@ -37,3 +37,10 @@ shale_add_library(shale_io
     io/two_level_iterator.cc
     io/write_batch.cc
   LIBS shale_util Threads::Threads)
+
+# The pure kernel: no files, no clock, no threads, no locks. It links shale_util and nothing else, so
+# a core source that reached for the I/O layer would fail to link, not just to pass review.
+shale_add_library(shale_core
+  SOURCES
+    core/version_edit.cc
+  LIBS shale_util)
