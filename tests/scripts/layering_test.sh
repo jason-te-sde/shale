@@ -201,6 +201,91 @@ new_tree
 put src/util/a.cc '/*' ' * a comment' ' */ puts("x");'
 expect "code after the closing */ of a multi-line comment" 1 "src/util/a.cc:3:"
 
+# --- No `throw` under src/. ---------------------------------------------------------------------
+
+for token in 'throw std::runtime_error("x");' 'if (bad) throw 1;' '} catch (...) { throw; }'; do
+  new_tree
+  put src/db/a.cc '#include <string>' "void F(bool bad) { $token }"
+  expect "db containing '$token'" 1 "src/db/a.cc:2:" "may throw"
+done
+
+new_tree
+put src/util/a.cc 'void F() { throw 1; }'
+expect "util throwing" 1 "src/util/a.cc:1:"
+
+new_tree
+put src/core/a.cc 'void F() { throw 1; }'
+expect "core throwing" 1 "src/core/a.cc:1:"
+
+new_tree
+put src/io/a.cc '// It must not throw, and nothing here throws.' \
+  '/// An iterator that does not throw.' \
+  '/* a block comment that says throw */' \
+  'int F() { return 1; }  // never throw from here' \
+  'const char* kName = "rethrow_exception";' \
+  'void G() noexcept {}' \
+  'void Rethrown() {}' \
+  'void RunsThrowawayTask() {}'
+expect "comments, a trailing comment and names that merely contain the word throw" 0
+
+new_tree
+put tests/a_test.cc '#include <string>' 'void F() { throw 1; }'
+put src/util/a.cc '#include <vector>'
+expect "throw in a test, which this ban does not cover" 0
+
+# --- No unseeded randomness under include/, src/, tests/ or tools/. -------------------------------
+
+for token in 'int x = std::rand();' 'std::srand(1);' 'std::random_device rd;' 'int x = rand();' \
+  'srand(7);' 'unsigned x = ::rand ();'; do
+  for dir in src/db src/util include/shale tests/db tools; do
+    new_tree
+    ext=cc
+    [ "$dir" = include/shale ] && ext=h
+    put "$dir/a.$ext" '#include <string>' "void F() { $token }"
+    [ -d "$root/src" ] || put src/util/ok.cc '#include <vector>'
+    expect "$dir containing '$token'" 1 "$dir/a.$ext:2:" "shale::Random"
+  done
+done
+
+for dir in src/db src/util src/io include/shale tests/db tools; do
+  new_tree
+  ext=cc
+  [ "$dir" = include/shale ] && ext=h
+  put "$dir/a.$ext" '#include <random>'
+  [ -d "$root/src" ] || put src/util/ok.cc '#include <vector>'
+  expect "$dir including <random>" 1 "$dir/a.$ext:1:" "<random> is banned"
+done
+
+new_tree
+put tests/a_test.cc '  #  include   <random>'
+put src/util/a.cc '#include <vector>'
+expect "an #include <random> spelled with extra spaces" 1 "tests/a_test.cc:1:"
+
+new_tree
+put src/util/a.cc '#include <vector>'
+put tests/a_test.cc '#include "util/random.h"' '// std::rand() and std::random_device are banned; use shale::Random.' \
+  'int operand(int x) { return x; }' 'int y = operand(1);' 'shale::Random rnd(301);' \
+  'int z = rnd.Uniform(5); int w = rnd.rand();' 'int strand(int);' 'int Rand(int) { return 0; }' \
+  'int v = 1;  // std::rand and <random> in a trailing comment'
+put tools/a.cc '// #include <random>' '/// Not <random>: a Random has a seed.'
+expect "Random, comments and names that merely contain rand" 0
+
+new_tree
+put src/core/a.cc '#include <vector>' '#include <random>'
+expect "<random> in src/core is reported once, by the include rule" 1 "src/core/a.cc:2:" \
+  "src/core must not include <random>" "1 violation(s) in 1 files"
+
+new_tree
+put src/util/a.cc '#include <vector>'
+put fuzz/a.cc '#include <random>'
+put bench/a.cc 'int x = rand();'
+expect "fuzz/ and bench/ are not scanned" 0
+
+new_tree
+put tests/a_test.cc '#include "util/coding.h"' '#include <thread>' 'void F() { printf("x"); }'
+put src/util/a.cc '#include <vector>'
+expect "tests and tools are held to the randomness ban only, not to the include and output rules" 0
+
 # --- Only the four layers exist under src/. -------------------------------------------------------
 
 new_tree

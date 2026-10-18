@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # scripts/check-layering.sh [root]
 #
-# Enforces the layering rules on the #include lines under include/ and src/, and the rule that
-# library code never writes to stdout or stderr. `root` defaults to the repository root.
+# Enforces the layering rules on the #include lines under include/ and src/, the rule that library
+# code never writes to stdout or stderr, and two bans on what code says: no `throw` under src/, and no
+# unseeded randomness anywhere in the C++ of the project. `root` defaults to the repository root.
 #
 #   include/shale/*  shale/*, standard headers
 #   src/util/*       util/*, shale/*, standard headers, <arm_acle.h>
@@ -24,6 +25,17 @@
 # and so is a line that is only a comment (//, /* ... */, or the lines in between). A violation is
 # printed as `path:line: rule`.
 #
+# The throw ban: nothing under src/ may contain the word `throw` in code, since errors are returned as
+# a Status. A comment line, and the part of a line after `//`, do not count.
+#
+# The randomness ban, under include/, src/, tests/ and tools/: std::rand, std::srand, rand(, srand(,
+# std::random_device and `#include <random>` (whose distributions are implementation-defined, so a
+# seed would not reproduce across standard libraries). All randomness is shale::Random with an
+# explicit seed. src/core's own ban on <random> is reported by the include rule above, and not twice.
+# tests/ and tools/ are scanned for this ban only: their includes and their output are theirs.
+# Both bans read one line at a time and know nothing of string literals, so a banned name inside a
+# string is reported too, which is the safe way to be wrong.
+#
 # Exit status: 0 clean, 1 violations found, 2 nothing to check (a checker that checks nothing must
 # not say "ok").
 set -uo pipefail
@@ -42,6 +54,9 @@ if [ "${#dirs[@]}" -eq 0 ]; then
   echo "check-layering: neither include/ nor src/ exists under $root" >&2
   exit 2
 fi
+# Scanned for the randomness ban only.
+[ -d tests ] && dirs+=(tests)
+[ -d tools ] && dirs+=(tools)
 
 violations=0
 report() {
@@ -190,11 +205,50 @@ check_output() {
   done < <(grep -nE "$output_re" "$file")
 }
 
+# The bans on what code says. `throw` is banned under src/ only; the randomness bans hold wherever
+# C++ is scanned. A match in a comment line, or after `//` on a code line, is not code.
+throw_re='(^|[^[:alnum:]_])throw([^[:alnum:]_]|$)'
+random_re='std::(rand|srand|random_device)([^[:alnum:]_]|$)|(^|[^[:alnum:]_.>])s?rand[[:space:]]*\('
+random_include_re='^[[:space:]]*#[[:space:]]*include[[:space:]]*<random>'
+
+# scan_banned <file> <regex> <what is wrong>: reports each line of the file whose code matches.
+scan_banned() {
+  local file=$1 re=$2 message=$3 lineno text trimmed code
+  while IFS=: read -r lineno text; do
+    trimmed="${text#"${text%%[![:space:]]*}"}"
+    is_comment_line "$trimmed" && continue
+    code="${text%%//*}"
+    [[ $code =~ $re ]] || continue
+    report "$file" "$lineno" "$message"
+  done < <(grep -nE "$re" "$file")
+}
+
+check_banned() {
+  local file=$1
+  case "$file" in
+    src/*) scan_banned "$file" "$throw_re" "nothing under src/ may throw: errors are returned as a Status" ;;
+  esac
+  scan_banned "$file" "$random_re" \
+    "std::rand, srand and std::random_device are banned: all randomness is shale::Random with an explicit seed"
+  case "$file" in
+    src/core/*) ;; # check_includes has reported <random> here already
+    *)
+      scan_banned "$file" "$random_include_re" \
+        "<random> is banned: its distributions are implementation-defined, so a seed would not reproduce across standard libraries"
+      ;;
+  esac
+}
+
 checked=0
 while IFS= read -r file; do
   checked=$((checked + 1))
-  check_includes "$file" "$(layer_of "$file")"
-  check_output "$file"
+  case "$file" in
+    include/* | src/*)
+      check_includes "$file" "$(layer_of "$file")"
+      check_output "$file"
+      ;;
+  esac
+  check_banned "$file"
 done < <(find "${dirs[@]}" -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.cc' -o -name '*.cpp' \) | sort)
 
 if [ "$checked" -eq 0 ]; then
