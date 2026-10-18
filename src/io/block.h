@@ -4,8 +4,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <string>
+#include <string_view>
 
+#include "io/table_format.h"
 #include "shale/iterator.h"
 #include "util/dbformat.h"
 
@@ -28,20 +29,24 @@ class Block {
   /// than the 4-byte restart count, if the restart array the count describes does not fit in the
   /// block, if there are no restart points, or if the first one is not at the start of the entries.
   /// Damage inside the entries is found as they are read.
-  explicit Block(std::string contents);
+  explicit Block(BlockContents contents);
+
+  /// Copies `contents` and makes a block of the copy, as the constructor above does: for a block
+  /// that was built in memory, by a test, a fuzz target or a benchmark, rather than read.
+  explicit Block(std::string_view contents) : Block(BlockContents::CopyOf(contents)) {}
 
   Block(const Block&) = delete;
   Block& operator=(const Block&) = delete;
 
   /// Returns the size of the block in bytes, as it was given.
-  size_t size() const { return data_.size(); }
+  size_t size() const { return contents_.size(); }
 
  private:
   friend std::unique_ptr<Iterator> NewBlockIterator(std::shared_ptr<const Block> block,
                                                     KeyCompareFn cmp, size_t min_key_size);
   class Iter;
 
-  const std::string data_;
+  const BlockContents contents_;
   // Where the entries end and the restart array begins. Zero, with no restart points, for a block
   // whose structure is damaged, which then has no entries to read.
   size_t restart_offset_ = 0;

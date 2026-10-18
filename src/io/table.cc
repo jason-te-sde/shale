@@ -246,7 +246,7 @@ size_t BlockCacheKeyHash::operator()(const BlockCacheKey& key) const {
 
 Table::Table(PrivateTag /*tag*/, std::unique_ptr<RandomAccessFile> file, uint64_t cache_id,
              BlockCache* cache, uint64_t data_end, std::shared_ptr<const Block> index_block,
-             std::string filter)
+             BlockContents filter)
     : file_(std::move(file)),
       cache_id_(cache_id),
       cache_(cache),
@@ -288,12 +288,12 @@ Status Table::Open(std::unique_ptr<RandomAccessFile> file, uint64_t file_size, u
 
   // The index and the filter are read once and kept, so they are always checked, whatever a later
   // read does about the checksums of data blocks.
-  std::string index_contents;
+  BlockContents index_contents;
   s = ReadBlock(file.get(), footer.index, true, &index_contents);
   if (!s.ok()) {
     return s;
   }
-  std::string filter;
+  BlockContents filter;
   s = ReadBlock(file.get(), footer.filter, true, &filter);
   if (!s.ok()) {
     return s;
@@ -325,7 +325,7 @@ Status Table::ReadDataBlock(const TableReadOptions& options, std::string_view in
   }
 
   data_block_reads_.fetch_add(1, std::memory_order_relaxed);
-  std::string contents;
+  BlockContents contents;
   s = ReadBlock(file_.get(), handle, options.verify_checksums, &contents);
   if (!s.ok()) {
     return s;
@@ -374,7 +374,7 @@ Status Table::Get(const TableReadOptions& options, std::string_view internal_key
   result->value.clear();
 
   const std::string_view user_key = ExtractUserKey(internal_key);
-  if (!BloomFilterMayMatch(filter_, user_key)) {
+  if (!BloomFilterMayMatch(filter_.view(), user_key)) {
     return Status::OK();
   }
 

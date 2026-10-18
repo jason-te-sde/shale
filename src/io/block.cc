@@ -7,6 +7,7 @@
 #include <string_view>
 #include <utility>
 
+#include "io/table_format.h"
 #include "shale/iterator.h"
 #include "shale/status.h"
 #include "util/check.h"
@@ -45,23 +46,24 @@ const char* DecodeEntry(const char* p, const char* limit, uint32_t* shared, uint
 
 }  // namespace
 
-Block::Block(std::string contents) : data_(std::move(contents)) {
-  if (data_.size() < kFixed32Size) {
+Block::Block(BlockContents contents) : contents_(std::move(contents)) {
+  const std::string_view data = contents_.view();
+  if (data.size() < kFixed32Size) {
     malformed_ = true;
     return;
   }
-  const uint32_t count = DecodeFixed32(data_.data() + data_.size() - kFixed32Size);
+  const uint32_t count = DecodeFixed32(data.data() + data.size() - kFixed32Size);
   // The restart array and the count after it take 4 * (count + 1) bytes, which must leave room for
   // nothing or for entries. Written as a bound on `count`, it cannot overflow.
-  const size_t room_for_restarts = (data_.size() - kFixed32Size) / kFixed32Size;
+  const size_t room_for_restarts = (data.size() - kFixed32Size) / kFixed32Size;
   if (count == 0 || count > room_for_restarts) {
     malformed_ = true;
     return;
   }
-  const size_t restart_offset = data_.size() - (size_t{count} + 1) * kFixed32Size;
+  const size_t restart_offset = data.size() - (size_t{count} + 1) * kFixed32Size;
   // The first entry is at the start of the entries. The iterator starts there, so a restart array
   // that says otherwise would have it skip whatever comes before the point the array names.
-  if (DecodeFixed32(data_.data() + restart_offset) != 0) {
+  if (DecodeFixed32(data.data() + restart_offset) != 0) {
     malformed_ = true;
     return;
   }
@@ -78,7 +80,7 @@ class Block::Iter final : public Iterator {
       : block_(std::move(block)),
         cmp_(cmp),
         min_key_size_(min_key_size),
-        data_(block_->data_.data()),
+        data_(block_->contents_.view().data()),
         entries_end_(block_->restart_offset_),
         num_restarts_(block_->num_restarts_),
         current_(entries_end_),

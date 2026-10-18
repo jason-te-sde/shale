@@ -85,6 +85,15 @@ Entries ReadAllEntries(std::string contents) {
   return entries;
 }
 
+// ReadBlock(), checking the checksum, with what it read copied into `*out`.
+Status ReadBlockToString(const RandomAccessFile* file, const BlockHandle& handle,
+                         std::string* out) {
+  BlockContents contents;
+  const Status s = ReadBlock(file, handle, true, &contents);
+  out->assign(contents.view());
+  return s;
+}
+
 void Parse(const std::string& bytes, ParsedTable* parsed) {
   ASSERT_GE(bytes.size(), kFooterSize);
   ASSERT_OK(parsed->footer.DecodeFrom(std::string_view(bytes).substr(bytes.size() - kFooterSize)));
@@ -94,8 +103,8 @@ void Parse(const std::string& bytes, ParsedTable* parsed) {
   std::unique_ptr<RandomAccessFile> file;
   ASSERT_OK(env->NewRandomAccessFile("/t.sst", &file));
 
-  ASSERT_OK(ReadBlock(file.get(), parsed->footer.filter, true, &parsed->filter));
-  ASSERT_OK(ReadBlock(file.get(), parsed->footer.index, true, &parsed->index));
+  ASSERT_OK(ReadBlockToString(file.get(), parsed->footer.filter, &parsed->filter));
+  ASSERT_OK(ReadBlockToString(file.get(), parsed->footer.index, &parsed->index));
 
   std::unique_ptr<Iterator> index =
       NewBlockIterator(std::make_shared<const Block>(parsed->index), CompareInternalKey, 8);
@@ -106,7 +115,7 @@ void Parse(const std::string& bytes, ParsedTable* parsed) {
     ASSERT_OK(block.handle.DecodeFrom(&value));
     ASSERT_TRUE(value.empty()) << "an index value is a handle and nothing else";
     std::string contents;
-    ASSERT_OK(ReadBlock(file.get(), block.handle, true, &contents));
+    ASSERT_OK(ReadBlockToString(file.get(), block.handle, &contents));
     block.entries = ReadAllEntries(std::move(contents));
     parsed->blocks.push_back(std::move(block));
   }

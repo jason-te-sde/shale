@@ -10,6 +10,7 @@
 
 #include "io/block.h"
 #include "io/lru_cache.h"
+#include "io/table_format.h"
 #include "shale/env.h"
 #include "shale/iterator.h"
 #include "shale/status.h"
@@ -141,7 +142,7 @@ class Table : public std::enable_shared_from_this<Table> {
  public:
   /// Not for callers: use Open(). It takes a type that only Table can name.
   Table(PrivateTag, std::unique_ptr<RandomAccessFile> file, uint64_t cache_id, BlockCache* cache,
-        uint64_t data_end, std::shared_ptr<const Block> index_block, std::string filter);
+        uint64_t data_end, std::shared_ptr<const Block> index_block, BlockContents filter);
 
  private:
   // Reads the block the index value `index_value` names, from the cache if it is there.
@@ -159,7 +160,7 @@ class Table : public std::enable_shared_from_this<Table> {
   // Where the data blocks end and the filter block begins. An index entry's handle must lie before.
   const uint64_t data_end_;
   const std::shared_ptr<const Block> index_block_;
-  const std::string filter_;  // empty if the table was written without one
+  const BlockContents filter_;  // empty if the table was written without one
   mutable std::atomic<uint64_t> data_block_reads_{0};
 };
 
