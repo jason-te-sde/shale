@@ -1,0 +1,11 @@
+# The fuzz targets, one to a line: the name, which is also the name of its source file without .cc,
+# and the libraries it links. fuzz/CMakeLists.txt builds exactly these, and the fuzz job of the CI
+# and the fuzz stage of scripts/preflight.sh run exactly these, so a target that is added here is
+# built and run everywhere with no other change. Blank lines and lines that start with # are
+# skipped.
+fuzz_log_reader shale_io
+fuzz_block shale_io
+fuzz_table shale_io
+fuzz_version_edit shale_core
+fuzz_version_set shale_db
+fuzz_db_ops shale_db shale_testkit

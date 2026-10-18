@@ -415,6 +415,40 @@ TEST_F(TableCacheTest, DamagedDataBlockIsCorruptionNamingTheFile) {
       << "the message names the file: " << s.ToString();
 }
 
+TEST_F(TableCacheTest, IteratorServesTheEntriesOfTheTable) {
+  FileMetaData meta;
+  ASSERT_NO_FATAL_FAILURE(Build(2, *NumberedMemTable(30), &meta));
+  const std::unique_ptr<Iterator> iter =
+      table_cache_.NewIterator(TableReadOptions{}, 2, meta.file_size);
+  EXPECT_EQ(Drain(iter.get()), NumberedEntries(30));
+  iter->Seek(IKey(UserKey(20), kMaxSequenceNumber));
+  ASSERT_TRUE(iter->Valid());
+  EXPECT_EQ(iter->key(), IKey(UserKey(20), 21));
+  EXPECT_EQ(iter->value(), ValueOf(20));
+  EXPECT_OK(iter->status());
+}
+
+TEST_F(TableCacheTest, DamagedDataBlockInAnIteratorIsCorruptionNamingTheFile) {
+  FileMetaData meta;
+  ASSERT_NO_FATAL_FAILURE(Build(2, *NumberedMemTable(30), &meta));
+  std::string contents = env_.FileContents(TableFileName(kDb, 2));
+  ASSERT_GT(contents.size(), 16u);
+  contents[10] ^= 0x01;  // in the first data block, which Open() does not read
+  env_.SetFileContents(TableFileName(kDb, 2), contents);
+
+  BlockCache blocks(size_t{1} << 20);
+  TableCache fresh(kDb, &env_, &blocks, 10);
+  const std::unique_ptr<Iterator> iter = fresh.NewIterator(TableReadOptions{}, 2, meta.file_size);
+  iter->SeekToFirst();
+  EXPECT_FALSE(iter->Valid());
+  const Status s = iter->status();
+  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+  const std::string path = TableFileName(kDb, 2);
+  EXPECT_NE(s.ToString().find(path), std::string::npos)
+      << "the message names the file: " << s.ToString();
+  EXPECT_EQ(s.ToString().find(path), s.ToString().rfind(path)) << "once: " << s.ToString();
+}
+
 TEST_F(TableCacheTest, NoShardHoldsFewerThanSixteenTables) {
   // The cache is least recently used within a shard and not across them, so it is divided only as
   // far as every shard can hold a useful number of tables.

@@ -47,6 +47,13 @@ if(SHALE_FUZZ AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
   message(FATAL_ERROR
     "SHALE_FUZZ needs Clang (libFuzzer), but the compiler is ${CMAKE_CXX_COMPILER_ID}")
 endif()
+# A fuzz target without AddressSanitizer would find only the inputs that happen to crash, and
+# ThreadSanitizer cannot be combined with it. The fuzz preset sets both.
+if(SHALE_FUZZ AND NOT SHALE_SANITIZE STREQUAL "address,undefined")
+  message(FATAL_ERROR
+    "SHALE_FUZZ needs SHALE_SANITIZE=address,undefined, but it is '${SHALE_SANITIZE}'; "
+    "the fuzz preset sets both")
+endif()
 
 # Sanitizers and coverage change the runtime, so they apply to fetched dependencies too: an
 # uninstrumented GoogleTest next to an instrumented test makes ThreadSanitizer report false races.
@@ -62,6 +69,15 @@ if(NOT SHALE_SANITIZE STREQUAL "")
     add_compile_options(-fno-sanitize-recover=all)
     add_link_options(-fno-sanitize-recover=all)
   endif()
+endif()
+
+# libFuzzer steers by the coverage of the code under test, so the engine libraries need the
+# instrumentation too, not only the fuzz targets. "-no-link" adds the counters without linking the
+# libFuzzer runtime, which only the fuzz targets want. -O1 is what libFuzzer recommends: at -O0 the
+# instrumentation and the sanitizers make an execution several times slower, and a fuzzer is worth
+# what it executes. It comes after the flags of the build type, so it wins over any of them.
+if(SHALE_FUZZ)
+  add_compile_options(-fsanitize=fuzzer-no-link -O1)
 endif()
 
 if(SHALE_COVERAGE)

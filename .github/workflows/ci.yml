@@ -181,6 +181,134 @@ jobs:
           path: build/flaw-${{ matrix.flaw }}/sim-output.log
           if-no-files-found: ignore
 
+  # The engine under a real kill: a writer process that puts and deletes keys is stopped with
+  # SIGKILL at a random moment, and the database that is opened again must hold exactly what the
+  # writer was told was done. The simulator cannot show this, since its filesystem is not the real
+  # one, and the unit tests never kill a process. macOS is here because it is a different kernel and
+  # a different filesystem under the same engine; a kill of the process cannot tell how the writes
+  # are synced.
+  crash:
+    name: crash (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the toolchain
+        env:
+          OS: ${{ matrix.os }}
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          if [ "$OS" = macos-14 ]; then
+            brew install ninja
+          else
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends ninja-build
+          fi
+
+      # Only the tool is built, so that GoogleTest is not fetched.
+      - name: Configure
+        run: >
+          cmake -S . -B build/crash -G Ninja -DCMAKE_BUILD_TYPE=Release -DSHALE_BUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build/crash --target shale_crashtest
+
+      # The seed changes with every run, so that the kill delays and the keys differ. It does not
+      # repeat a run: where in the engine's work a kill lands depends on timing, so the database
+      # that a failed run leaves, uploaded below, is what to look at. --min_compactions=1 makes a
+      # run that never saw a table removed, so that no kill reached a compaction that merged, fail
+      # instead of passing. The second run puts the fsync calls in the path as well: it is slower,
+      # and meant only to be killed in them now and then. Two hundred rounds take about a minute.
+      # Two flaws injected by hand, each open only for the width of one MANIFEST edit, were each
+      # caught in one of six local runs of twenty rounds, and in four and five of six runs of up to
+      # 150.
+      - name: Kill the writer two hundred times, and check the database each time
+        env:
+          SEED: ${{ github.run_number }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/crash"
+          build/crash/tools/shale_crashtest --rounds=200 --seed="$SEED" --min_compactions=1 \
+            --db="$RUNNER_TEMP/crash/db"
+
+      - name: Kill a writer that syncs six times
+        env:
+          SEED: ${{ github.run_number }}
+        run: |
+          build/crash/tools/shale_crashtest --rounds=6 --seed="$SEED" --sync \
+            --db="$RUNNER_TEMP/crash/db-sync"
+
+      - name: Upload the database
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: crash-db-${{ matrix.os }}
+          path: ${{ runner.temp }}/crash
+          if-no-files-found: ignore
+
+  # Every decoder that reads bytes off a disk, the recovery of the table set from CURRENT and a
+  # MANIFEST, and the whole database under a random program of operations, under libFuzzer with
+  # AddressSanitizer and UndefinedBehaviorSanitizer. Sixty seconds a target is a smoke run, long
+  # enough to start from the seed corpus and to catch what a change has just made easy to reach; it
+  # is not a campaign, and a clean run says nothing about inputs it did not try. A crash is a bug in
+  # the engine, so the input that caused it is uploaded: the fuzz targets reproduce it, run with the
+  # file as their only argument.
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v7
+
+      # libclang-rt-18-dev holds the libFuzzer runtime that -fsanitize=fuzzer links, and the
+      # sanitizer runtimes; it is named here and not left to what clang-18 happens to pull in.
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang-18 libclang-rt-18-dev
+
+      - name: Configure
+        run: cmake --preset fuzz
+
+      # Only the fuzz targets: the preset instruments the test suite too, which a fuzz run does not
+      # use.
+      - name: Build
+        run: cmake --build --preset fuzz --target fuzz_targets
+
+      # The targets are those of fuzz/fuzz_targets.txt, the file the build reads too, so a target
+      # that is added there is run here with no other change. Every target runs even when an
+      # earlier one has crashed, so that one run reports all the crashes there are; the step fails
+      # at the end. libFuzzer writes the inputs it finds to the first directory it is given and only
+      # reads the second, which is the seed corpus.
+      - name: Fuzz each target for sixty seconds
+        run: |
+          mkdir -p build/fuzz/crashes
+          status=0
+          while read -r target _; do
+            case "$target" in '' | '#'*) continue ;; esac
+            mkdir -p build/fuzz/found/"$target"
+            build/fuzz/fuzz/"$target" -max_total_time=60 -timeout=60 \
+              -artifact_prefix=build/fuzz/crashes/"$target"- \
+              build/fuzz/found/"$target" build/fuzz/fuzz/corpus/"$target" </dev/null || status=1
+          done < fuzz/fuzz_targets.txt
+          exit "$status"
+
+      # The crash-*, oom-* and timeout-* files that libFuzzer wrote, one prefixed with its target.
+      - name: Upload the inputs that failed
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashes
+          path: build/fuzz/crashes/
+          if-no-files-found: ignore
+
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -224,3 +352,45 @@ jobs:
 
       - name: Doxygen
         run: cmake --build build/lint --target docs
+
+  # Does the benchmark tool run, and do the micro benchmarks? The job asserts completion and nothing
+  # else: a shared runner is too noisy for any number to be held to, so none is. What is asserted
+  # about the tool's answers is its own: it checks every read against what it wrote, and exits with
+  # status 1 on a wrong one. The numbers go up as a file all the same, so that a run can be looked
+  # at.
+  bench-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build
+
+      # Only the benchmarks are built, so that GoogleTest is not fetched.
+      - name: Configure
+        run: >
+          cmake -S . -B build/bench -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DSHALE_BUILD_BENCH=ON -DSHALE_BUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build/bench --target shale_bench micro_bench
+
+      - name: Run every workload on a small database
+        run: |
+          mkdir -p "$RUNNER_TEMP/bench"
+          build/bench/tools/shale_bench --num=20000 --sync_num=200 --repeat=1 \
+            --db="$RUNNER_TEMP/bench/db" --json="$RUNNER_TEMP/bench/result.json"
+
+      - name: Run the micro benchmarks for a moment
+        run: build/bench/bench/micro_bench --benchmark_min_time=0.01s
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-smoke-result
+          path: ${{ runner.temp }}/bench/result.json
+          if-no-files-found: ignore

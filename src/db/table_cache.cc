@@ -24,6 +24,28 @@ namespace {
 constexpr int kMaxShardBits = 4;
 constexpr size_t kMinTablesPerShard = 16;
 
+// An iterator over one table that says which file an error of the table is in. A data block that
+// fails its checksum knows where in the file it is and not which file, and the error of an
+// iterator travels up through a scan, a flush and a compaction with nothing else to name the file;
+// TableCache::Get() names it for the same reason.
+class NamedTableIterator final : public Iterator {
+ public:
+  NamedTableIterator(std::unique_ptr<Iterator> iter, std::string path)
+      : iter_(std::move(iter)), path_(std::move(path)) {}
+
+  bool Valid() const override { return iter_->Valid(); }
+  void SeekToFirst() override { iter_->SeekToFirst(); }
+  void Seek(std::string_view target) override { iter_->Seek(target); }
+  void Next() override { iter_->Next(); }
+  std::string_view key() const override { return iter_->key(); }
+  std::string_view value() const override { return iter_->value(); }
+  Status status() const override { return WithFileName(iter_->status(), path_); }
+
+ private:
+  const std::unique_ptr<Iterator> iter_;
+  const std::string path_;
+};
+
 }  // namespace
 
 int TableCache::ShardBitsFor(size_t capacity) {
@@ -75,7 +97,8 @@ std::unique_ptr<Iterator> TableCache::NewIterator(const TableReadOptions& option
     return NewErrorIterator(s);
   }
   // The iterator holds the table, so it outlives the cache's share of it.
-  return table->NewIterator(options);
+  return std::make_unique<NamedTableIterator>(table->NewIterator(options),
+                                              TableFileName(dbname_, number));
 }
 
 Status TableCache::Get(const TableReadOptions& options, uint64_t number, uint64_t file_size,

@@ -164,3 +164,53 @@ set_tests_properties(cmake_options_accept_and_reject PROPERTIES TIMEOUT 300)
 add_test(NAME flaws_script_and_ci_agree
          COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/flaws_test.sh")
 set_tests_properties(flaws_script_and_ci_agree PROPERTIES TIMEOUT 120)
+
+# The command-line tools. Their libraries are tested directly; the binary is run by a script that
+# makes its own database in a directory of its own. Both exist only when the tools are built.
+if(SHALE_BUILD_TOOLS)
+  shale_add_test(cli_args SOURCES tools/cli_args_test.cc LIBS shale_cli shale_testkit)
+  shale_add_test(verify SOURCES tools/verify_test.cc LIBS shale_verify shale_testkit)
+  shale_add_test(histogram SOURCES tools/histogram_test.cc LIBS shale_bench_support)
+  shale_add_test(bench_stats SOURCES tools/bench_stats_test.cc LIBS shale_bench_support)
+  shale_add_test(bench_report SOURCES tools/bench_report_test.cc LIBS shale_bench_support)
+  shale_add_test(bench_engine SOURCES tools/bench_engine_test.cc LIBS shale_bench_support
+                 shale_testkit)
+  shale_add_test(bench_workloads SOURCES tools/bench_workloads_test.cc LIBS shale_bench_support
+                 shale_testkit)
+
+  add_test(NAME shalectl_commands
+           COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/shalectl_test.sh"
+                   "$<TARGET_FILE:shalectl>")
+  set_tests_properties(shalectl_commands PROPERTIES TIMEOUT 300)
+
+  # The benchmark tool on small databases: every workload runs, the reads are checked against what
+  # was written, a seed repeats a run, and the JSON parses. It checks no time.
+  add_test(NAME shale_bench_workloads
+           COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/shale_bench_test.sh"
+                   "$<TARGET_FILE:shale_bench>")
+  set_tests_properties(shale_bench_workloads PROPERTIES TIMEOUT 300)
+
+  # The crash test kills a child process that is writing to a real directory, and the parent checks
+  # what survived. The tool refuses a directory that already holds a database, so each run of the
+  # smoke test makes a new one, and removes it only if the run passed: a failed run leaves its
+  # database where the tool's output says. A directory shared between runs broke the test under
+  # `ctest --repeat`, which runs a test again without running its fixtures again.
+  #
+  # Three rounds, so that a break in the tool or in the engine's reopen shows up in every build of
+  # the suite. The crash job in .github/workflows/ci.yml runs two hundred in a Release build, and
+  # asks that the kills have reached a compaction, which three rounds of a slow build need not do.
+  add_test(NAME crashtest_smoke
+           COMMAND "${SHALE_BASH}" -c [=[
+             dir="$(mktemp -d "${TMPDIR:-/tmp}/crashtest_smoke.XXXXXX")" || exit 1
+             "$0" --rounds=3 --seed=1 --db="$dir/db" && rm -rf "$dir"
+           ]=] "$<TARGET_FILE:shale_crashtest>")
+  set_tests_properties(crashtest_smoke PROPERTIES TIMEOUT 120)
+
+  # A check that has only passed has not shown that it can fail. This script has the tool overwrite
+  # one key with a wrong value before the check, and requires exit status 1 and the line that says
+  # the check named the key. It makes its own directory.
+  add_test(NAME crashtest_detects_damage
+           COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/crashtest_damage_test.sh"
+                   "$<TARGET_FILE:shale_crashtest>")
+  set_tests_properties(crashtest_detects_damage PROPERTIES TIMEOUT 120)
+endif()
