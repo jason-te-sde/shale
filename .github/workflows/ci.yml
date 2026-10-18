@@ -346,3 +346,44 @@ jobs:
 
       - name: Doxygen
         run: cmake --build build/lint --target docs
+
+  # Does the benchmark tool run, and do the micro benchmarks? The job asserts completion and nothing
+  # else: a shared runner is too noisy for any number to be held to, so none is. What is asserted
+  # about the tool's answers is its own: it checks every read against what it wrote, and exits with
+  # status 1 on a wrong one. The numbers go up as a file all the same, so that a run can be looked at.
+  bench-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build
+
+      # Only the benchmarks are built, so that GoogleTest is not fetched.
+      - name: Configure
+        run: >
+          cmake -S . -B build/bench -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DSHALE_BUILD_BENCH=ON -DSHALE_BUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build/bench --target shale_bench micro_bench
+
+      - name: Run every workload on a small database
+        run: |
+          mkdir -p "$RUNNER_TEMP/bench"
+          build/bench/tools/shale_bench --num=20000 --sync_num=200 --repeat=1 \
+            --db="$RUNNER_TEMP/bench/db" --json="$RUNNER_TEMP/bench/result.json"
+
+      - name: Run the micro benchmarks for a moment
+        run: build/bench/bench/micro_bench --benchmark_min_time=0.01s
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-smoke-result
+          path: ${{ runner.temp }}/bench/result.json
+          if-no-files-found: ignore

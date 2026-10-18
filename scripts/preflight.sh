@@ -136,6 +136,16 @@ for target in "${FUZZ_TARGETS[@]}"; do
     "build/fuzz/found/$target" "build/fuzz/fuzz/corpus/$target"
 done
 
+# The bench-smoke job of .github/workflows/ci.yml, which asserts completion only. It has a build tree
+# of its own, because the micro benchmarks need Google Benchmark, which the other trees do not fetch.
+stage "bench smoke"
+cmake --preset release -B build/bench -DSHALE_BUILD_BENCH=ON -DSHALE_BUILD_TESTS=OFF
+cmake --build build/bench --target shale_bench micro_bench
+bench_dir="$(mktemp -d)"
+build/bench/tools/shale_bench --num=20000 --sync_num=200 --repeat=1 --db="$bench_dir/db"
+build/bench/bench/micro_bench --benchmark_min_time=0.01s
+rm -rf "$bench_dir"
+
 stage "clang-tidy"
 # The standalone clang-tidy does not ask Xcode where the SDK is, so it cannot find <string>.
 if [ "$(uname -s)" = Darwin ] && [ -z "${SDKROOT:-}" ]; then

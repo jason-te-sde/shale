@@ -170,11 +170,24 @@ set_tests_properties(flaws_script_and_ci_agree PROPERTIES TIMEOUT 120)
 if(SHALE_BUILD_TOOLS)
   shale_add_test(cli_args SOURCES tools/cli_args_test.cc LIBS shale_cli shale_testkit)
   shale_add_test(verify SOURCES tools/verify_test.cc LIBS shale_verify shale_testkit)
+  shale_add_test(histogram SOURCES tools/histogram_test.cc LIBS shale_bench_support)
+  shale_add_test(bench_stats SOURCES tools/bench_stats_test.cc LIBS shale_bench_support)
+  shale_add_test(bench_engine SOURCES tools/bench_engine_test.cc LIBS shale_bench_support
+                 shale_testkit)
+  shale_add_test(bench_workloads SOURCES tools/bench_workloads_test.cc LIBS shale_bench_support
+                 shale_testkit)
 
   add_test(NAME shalectl_commands
            COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/shalectl_test.sh"
                    "$<TARGET_FILE:shalectl>")
   set_tests_properties(shalectl_commands PROPERTIES TIMEOUT 300)
+
+  # The benchmark tool on small databases: every workload runs, the reads are checked against what
+  # was written, a seed repeats a run, and the JSON parses. It checks no time.
+  add_test(NAME shale_bench_workloads
+           COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/shale_bench_test.sh"
+                   "$<TARGET_FILE:shale_bench>")
+  set_tests_properties(shale_bench_workloads PROPERTIES TIMEOUT 300)
 
   # The crash test kills a child process that is writing to a real directory, and the parent checks
   # what survived. The tool refuses a directory that already holds a database, so each run of the
