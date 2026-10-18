@@ -394,3 +394,113 @@ jobs:
           name: bench-smoke-result
           path: ${{ runner.temp }}/bench/result.json
           if-no-files-found: ignore
+
+  # Which lines of src/ the tests run. It is a smoke alarm and not a target: the job has no floor,
+  # since a number that must not fall is a number that gets tests written to move it. It runs on
+  # GCC, whose gcov gcovr reads; Clang's coverage is a different tool. The report goes up as a
+  # directory of pages, one for each file, with the line-by-line view.
+  coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build g++-14
+
+      # gcovr is pinned like clang-format and clang-tidy, and for the same reason: its output is
+      # what the job prints, and a new release should reach this job when someone chooses it.
+      - name: Install the pinned gcovr
+        run: |
+          python3 -m venv "$RUNNER_TEMP/coverage-tools"
+          "$RUNNER_TEMP/coverage-tools/bin/pip" install gcovr==8.7
+          echo "$RUNNER_TEMP/coverage-tools/bin" >> "$GITHUB_PATH"
+
+      - name: Configure
+        run: cmake --preset coverage
+
+      - name: Build
+        run: cmake --build --preset coverage
+
+      - name: Test
+        run: ctest --preset coverage
+
+      # gcovr must run the gcov of the compiler that wrote the data: the gcov that the runner has
+      # under that plain name is GCC 13's, which cannot read GCC 14's files.
+      - name: Report
+        run: |
+          mkdir coverage
+          gcovr --root . --filter src/ --gcov-executable gcov-14 --txt-summary \
+            --html-details coverage/index.html
+
+      - name: Upload the report
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: coverage/
+          if-no-files-found: error
+
+  # The project as someone who has just cloned it meets it: a checkout and nothing else, no cache of
+  # any kind, built from the release preset, tested, installed into a scratch directory, and used
+  # from there by a project that has nothing of the repository but examples/. A header that was never
+  # committed, a library the install forgot, a package file that names a path of the build machine:
+  # none of them show in a tree that has been built in before. Keep the steps from the install on in
+  # step with examples_against_install in scripts/preflight.sh.
+  clean-clone:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build
+
+      - name: Configure
+        run: cmake --preset release
+
+      - name: Build
+        run: cmake --build --preset release
+
+      - name: Test
+        run: ctest --preset release
+
+      - name: Install
+        run: cmake --install build/release --prefix "$RUNNER_TEMP/prefix"
+
+      # Nothing of src/ is installed, so the headers in the prefix are the public ones and no more.
+      - name: Check what was installed
+        run: |
+          diff <(git ls-files include | sort) <(cd "$RUNNER_TEMP/prefix" && find include -type f | sort)
+
+      - name: Build the example against the installation
+        run: |
+          cmake -S examples -B "$RUNNER_TEMP/examples" -G Ninja \
+            -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix"
+          cmake --build "$RUNNER_TEMP/examples"
+
+      - name: Run the example
+        run: |
+          "$RUNNER_TEMP/examples/basic" "$RUNNER_TEMP/exdb" > "$RUNNER_TEMP/basic.out"
+          diff -u examples/basic.expected "$RUNNER_TEMP/basic.out"
+
+      # The tool is not installed, so it is the one of the build tree. The second call is a process
+      # of its own, so that what it prints is what the first one left on disk.
+      - name: Write a key with shalectl and read it back
+        run: |
+          build/release/tools/shalectl --db="$RUNNER_TEMP/db" --create put greeting hello
+          test "$(build/release/tools/shalectl --db="$RUNNER_TEMP/db" get greeting)" = hello
+
+      - name: Upload the test log
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-log-clean-clone
+          path: build/**/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore

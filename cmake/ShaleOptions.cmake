@@ -80,8 +80,12 @@ if(SHALE_FUZZ)
   add_compile_options(-fsanitize=fuzzer-no-link -O1)
 endif()
 
+# GCC updates the counters of --coverage with plain stores unless told otherwise, a method it
+# documents for programs of one thread. With the threads of the tests, gcovr stopped on a negative
+# count of hits in a line of src/db/db_iter.cc and wrote no report. Atomic updates are the
+# thread-safe method; they make the instrumented tests slower, which a coverage run can afford.
 if(SHALE_COVERAGE)
-  add_compile_options(--coverage)
+  add_compile_options(--coverage -fprofile-update=atomic)
   add_link_options(--coverage)
 endif()
 

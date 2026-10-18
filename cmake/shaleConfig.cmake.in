@@ -1,0 +1,14 @@
+# The package file of an installed shale: find_package(shale) runs this, and gives the project the
+# target shale::shale, which carries the include directory, the four libraries and the thread
+# library. The text between @ signs is filled in when shale is configured; the rest is copied.
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# The libraries use the platform's thread library through Threads::Threads, so a project that
+# links them needs that target to exist.
+find_dependency(Threads)
+
+include("${CMAKE_CURRENT_LIST_DIR}/shaleTargets.cmake")
+
+check_required_components(shale)

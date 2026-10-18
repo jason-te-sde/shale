@@ -114,7 +114,9 @@ leaves_out "thread sanitizer does not recover-disable" "-fno-sanitize-recover"
 rejects "an unknown sanitizer" "" "memory" OFF OFF "SHALE_SANITIZE"
 rejects "address without undefined" "" "address" OFF OFF "SHALE_SANITIZE"
 
-accepts "coverage" "" "" ON OFF "--coverage"
+# The counters have to be updated atomically: the tests run threads, and with plain counters gcovr
+# stopped on a negative count of hits and wrote no report.
+accepts "coverage" "" "" ON OFF "--coverage" "-fprofile-update=atomic"
 
 # SHALE_FUZZ needs Clang, and which compiler this is depends on the machine running the test.
 compiler_id="$(sed -n 's/^set(CMAKE_CXX_COMPILER_ID "\(.*\)")$/\1/p' \

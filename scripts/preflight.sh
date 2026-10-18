@@ -5,6 +5,12 @@
 # version, fails the whole script: a preflight that quietly checks half of CI produces the
 # confidence without the coverage.
 #
+# What it does not run, which is a gap of this loop and not of what CI covers: the coverage job,
+# which only reports, and needs the gcovr that the job pins; the compilers of the build-test matrix
+# other than the Apple Clang and the GCC of this machine; and the fresh checkout of the clean-clone
+# job. The stages here build the working tree, so a file that was never committed is not noticed
+# by them. The steps of that job from the installation on do run, in the examples stage.
+#
 # Never pipe a stage into another command. With a pipe the exit status is the last command's, and
 # a failing stage followed by `tail` reads as a success.
 set -euo pipefail
@@ -102,12 +108,50 @@ bash scripts/check-hygiene.sh
 
 build_and_test dev
 build_and_test asan
-build_and_test tsan
+
+# The thread leg of the sanitize job of .github/workflows/ci.yml. Every test runs three times, since
+# a race that does not happen on every run gets three chances to show. The simulator and its
+# determinism test are single-threaded, so ThreadSanitizer has nothing to find in them: they run
+# once, with fewer seeds, and make up most of what three runs would cost.
+stage "tsan: configure, build, test three times"
+cmake --preset tsan
+cmake --build --preset tsan
+ctest --preset tsan --repeat until-fail:3 -E '^(sim|determinism)_test$'
+SHALE_SIM_SEEDS=20 ctest --preset tsan -R '^(sim|determinism)_test$'
 
 stage "release with GCC"
 CC=gcc-16 CXX=g++-16 cmake --preset release -B build/gcc
 cmake --build build/gcc
 ctest --test-dir build/gcc --output-on-failure --no-tests=error
+
+# examples_against_install <build dir> <C++ compiler>: the clean-clone job of
+# .github/workflows/ci.yml from the installation on. It installs the tree into a scratch prefix,
+# builds examples/ against that prefix and nothing else, runs the program and compares what it
+# prints with examples/basic.expected, then writes a key with shalectl and reads it back in a
+# process of its own. The compiler must be the one that built the libraries: a static library is
+# only usable by the standard library it was compiled against.
+examples_against_install() {
+  local build_dir=$1 cxx=$2 work got
+  work="$(mktemp -d)"
+  echo "scratch directory: $work (left in place if this stage fails)"
+  cmake --install "$build_dir" --prefix "$work/prefix"
+  # Nothing of src/ is installed: the headers in the prefix are the public ones and no more.
+  diff <(git ls-files include | sort) <(cd "$work/prefix" && find include -type f | sort)
+  CXX="$cxx" cmake -S examples -B "$work/build" -G Ninja -DCMAKE_PREFIX_PATH="$work/prefix"
+  cmake --build "$work/build"
+  "$work/build/basic" "$work/exdb" >"$work/basic.out"
+  diff -u examples/basic.expected "$work/basic.out"
+  "$build_dir/tools/shalectl" --db="$work/db" --create put greeting hello
+  got="$("$build_dir/tools/shalectl" --db="$work/db" get greeting)"
+  if [ "$got" != hello ]; then
+    echo "preflight: shalectl get greeting printed '$got', wanted 'hello'" >&2
+    exit 1
+  fi
+  rm -rf "$work"
+}
+
+stage "examples against a local install"
+examples_against_install build/gcc g++-16
 
 # The crash job of .github/workflows/ci.yml, on the Release build above: the tests of that build ran
 # only the three rounds of the smoke test. Twenty rounds here against the job's two hundred, to keep
