@@ -743,8 +743,8 @@ TEST_F(VersionSetTest, FailedSwitchWithUnreadableCurrentKeepsTheNewManifest) {
 }
 
 TEST_F(VersionSetTest, FailedSwitchWithMisreadCurrentKeepsTheNewManifest) {
-  // A read that works is not always right: CURRENT has no checksum, so one that comes back with a
-  // bit flipped is one that names, as far as the read can tell, neither MANIFEST. That the rename
+  // A read that works is not always right: CURRENT comes back with a bit flipped, fails its
+  // checksum, and so names, as far as the read can tell, neither MANIFEST. That the rename
   // went through, and that CURRENT names the new file, is not undone by it. Deleting the new file
   // on that evidence leaves CURRENT naming nothing, and the database cannot be opened again; the
   // new file may only be deleted when CURRENT is seen to name the old one.

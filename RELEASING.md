@@ -48,8 +48,8 @@ The version is written in one place, `project(shale VERSION x.y.z ...)` in `CMak
 5. **The release workflow** (`.github/workflows/release.yml`) runs on a pushed `v*` tag, in two jobs.
    - `verify` cannot write to the repository. It **refuses** a tag that does not equal `v` plus the
      `VERSION` in `CMakeLists.txt` (step 4's check, which prints both versions), so a tag can never name
-     a version the source does not say it is, and a version that the changelog has no entry for. It
-     then builds Release on Ubuntu 24.04 and runs the tests: `cmake --preset release`,
+     a version the source does not say it is. It also refuses a version that the changelog has no entry
+     for. It then builds Release on Ubuntu 24.04 and runs the tests: `cmake --preset release`,
      `cmake --build --preset release` and `ctest --preset release`.
    - `publish` runs only when `verify` passed, and is the only job with write access to the repository
      (`contents: write`). It checks the tag again and makes `git archive --prefix=shale-X.Y.Z/` of the

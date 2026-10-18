@@ -117,11 +117,11 @@ struct SimResult {
 /// that, such an open lost the rest of the file, a synced write among it, in about one run in
 /// three hundred, and the simulator could not hold it to I4.)
 ///
-/// **Replay.** A run is a function of its options, on every toolchain: the same options give the
-/// same operations, the same answers and the same trace digest, in any build, with any compiler
-/// and standard library. The engine's memtable is full when its arena says so, and the arena
-/// pads to a constant, not to alignof(std::max_align_t), which is why. determinism_test pins the
-/// digests of three seeds, so that a toolchain that differs is seen.
+/// **Replay.** A run is a function of its options, on every toolchain that CI builds with: the same
+/// options give the same operations, the same answers and the same trace digest, in any build, with
+/// any of those compilers and standard libraries. The engine's memtable is full when its arena says
+/// so, and the arena pads to a constant, not to alignof(std::max_align_t), which is why.
+/// determinism_test pins the digests of three seeds, so that a toolchain that differs is seen.
 /// @param options the seed and the shape of the run.
 SimResult RunSimulation(const SimOptions& options);
 

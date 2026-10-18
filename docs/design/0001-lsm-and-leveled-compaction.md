@@ -47,9 +47,10 @@ oracles and replayed by the simulator.
   whole new files.
 - A table is immutable once written. The two files that grow, the write-ahead log and the MANIFEST,
   only ever have a record appended, each record checksummed, and the MANIFEST is synced before the
-  version it makes is installed; `CURRENT` is replaced whole by a rename and never changed in place. A crash can therefore leave extra files, which recovery deletes, and a
-  log or MANIFEST whose last record is cut, which the reader takes for its end
-  (`log::Reader`, `VersionSet::Recover`); it can never leave a half-modified table. That is what makes the
+  version it makes is installed; `CURRENT` is replaced whole by a rename and never changed in place.
+  A crash can therefore leave extra files, which recovery deletes, and a log or MANIFEST whose last
+  record is cut, which the reader takes for its end (`log::Reader`, `VersionSet::Recover`); it can
+  never leave a half-modified table. That is what makes the
   crash argument short: see [ADR 0004](0004-durability.md).
 - A read looks in the memtables, in each level 0 file whose range covers the key, and in at most one
   file for each deeper level, and a Bloom filter lets it skip most of those without reading a block.

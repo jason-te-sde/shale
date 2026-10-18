@@ -265,8 +265,8 @@ compaction because a write may be stalled for it.
       removes what it made and stops without an error.
 5. **Install.** `LogAndApply` an edit that deletes every input, adds every output at the next level and
    moves the compact pointer (it leaves `last_sequence` as it was), in the same order as a flush: check
-   with the mutex held, append and sync with it given up, install with it held again. If that fails, the outputs are **not** deleted, because the MANIFEST may hold the
-   edit all the same.
+   with the mutex held, append and sync with it given up, install with it held again. If that fails,
+   the outputs are **not** deleted, because the MANIFEST may hold the edit all the same.
 6. `DeleteObsoleteFiles()` removes the inputs, unless a reader still holds a Version that names them.
 
 ## Recovery
@@ -292,11 +292,11 @@ compaction because a write may be stalled for it.
    first batch of each log must be at most one past the newest write of the tables (the MANIFEST's
    `last_sequence`) and of the logs before it. If it is beyond that, a power loss took the end of an
    earlier log: replay stops, and that log and every later one are renamed `.dropped`, whatever
-   `paranoid_checks` says. What the reader reports decides the rest: nothing for a log that merely ends short, as a crash leaves it;
-   otherwise `paranoid_checks` (the default) fails the open with `Corruption`, and without it replay
-   stops at the first defect, applies nothing after it, and the logs from there on are **renamed to
-   `.dropped`, never deleted**. A log that cannot be *read* fails the open with `IOError` whatever
-   `paranoid_checks` says.
+   `paranoid_checks` says. What the reader reports decides the rest: nothing for a log that merely
+   ends short, as a crash leaves it; otherwise `paranoid_checks` (the default) fails the open with
+   `Corruption`, and without it replay stops at the first defect, applies nothing after it, and the
+   logs from there on are **renamed to `.dropped`, never deleted**. A log that cannot be *read* fails
+   the open with `IOError` whatever `paranoid_checks` says.
 6. Move `last_sequence` to the larger of the MANIFEST's and the replay's. (The MANIFEST's is the newest
    write that its tables hold, so it is also what the first log was held to.)
 7. Create a **new** log and sync the directory. A replayed log is never appended to: it may end in a
@@ -343,10 +343,11 @@ moment the iterator is destroyed.
 The destructor aborts if an iterator or a snapshot is still alive, or if a write or a flush is still
 in progress, since they point into what is about to be freed. It then sets `shutting_down_`, waits for
 the background task that is running (a compaction stops at its next output), closes the log, and an old
-log that is still waiting for a sync without syncing it (no acknowledgement depends on it, and a power loss
-afterwards leaves a gap that the next open handles), and releases the lock. **Closing does not flush**: what the memtables hold is in the logs, which the next
-open replays. That is deliberate, and it is why a copy of a closed database needs no more than the next
-open to be whole (see [operations](operations.md#backup)).
+log that is still waiting for a sync without syncing it (no acknowledgement depends on it, and a power
+loss afterwards leaves a gap that the next open handles), and releases the lock. **Closing does not
+flush**: what the memtables hold is in the logs, which the next open replays. That is deliberate, and
+it is why a copy of a closed database needs no more than the next open to be whole (see
+[operations](operations.md#backup)).
 
 ## Where to look
 

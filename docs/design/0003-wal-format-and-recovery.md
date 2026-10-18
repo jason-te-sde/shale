@@ -18,7 +18,8 @@ the rest of a block is cut into `FIRST`, `MIDDLE` and `LAST` fragments. A block 
 where a reader that has met a defect can always start again. The exact bytes are in
 [format](../format.md#the-write-ahead-log). The same format holds the MANIFEST.
 
-**The reader separates a crash from corruption exactly, and recovery acts on the difference.**
+**The reader separates a crash from corruption, with one rare false report that is loud, and recovery
+acts on the difference.**
 
 - The only thing that is silent is the file *ending* inside a record: inside a header, inside a record
   that would have fitted in its block, or after a `FIRST` or `MIDDLE` fragment with no `LAST`. That is
@@ -39,8 +40,8 @@ where a reader that has met a defect can always start again. The exact bytes are
 | What the reader says | `paranoid_checks = true` (default) | `paranoid_checks = false` |
 | --- | --- | --- |
 | nothing, or a record cut by the end of the file | the writes before it are recovered | the same |
-| a first write beyond the one after the newest write of the tables and of the logs before it (a gap) | the writes before the gap are recovered; that log and every later one are renamed `<name>.dropped`, never deleted, and the `LOG` says which and why | the same |
-| a defect in the contents | `Open` fails with `Corruption`, naming the file | the writes before the defect are recovered, nothing after it is applied, in that log or in any later one; the logs from the defect on are renamed `<name>.dropped`, never deleted, and the `LOG` says which and why |
+| a first write beyond the one after the newest write of the tables and of the logs before it (a gap) | the writes before the gap are recovered; that log and every later one are renamed `<name>.dropped`, never deleted except by `DestroyDB()`, and the `LOG` says which and why | the same |
+| a defect in the contents | `Open` fails with `Corruption`, naming the file | the writes before the defect are recovered, nothing after it is applied, in that log or in any later one; the logs from the defect on are renamed `<name>.dropped`, never deleted except by `DestroyDB()`, and the `LOG` says which and why |
 | a read error | `Open` fails with `IOError` | `Open` fails with `IOError` |
 
 A read that failed says nothing about what the log holds, so it is never taken for a defect of the

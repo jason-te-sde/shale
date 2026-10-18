@@ -149,10 +149,11 @@ a gap. It recovers everything before the gap, applies nothing from there on, and
 every later one to `NNNNNN.log.dropped`, with `paranoid_checks` on or off, because this is what a power
 loss leaves and not damage. The database is a consistent prefix of the writes, which is what D2 promises.
 What is in the dropped files is **only** writes made after the last one acknowledged as synced:
-nothing that was acknowledged as synced is in them. The engine never reads or deletes a `.dropped` file
-again. You may delete it when you have decided that you do not want those unsynced writes; until then,
-`shalectl dump-wal NNNNNN.log.dropped` prints them. One or more such files can appear after each power
-loss that leaves a gap, and they take the space of the logs they were.
+nothing that was acknowledged as synced is in them. No open reads or deletes a `.dropped` file
+again, and only `DestroyDB()` removes one. You may delete it when you have decided that you do not
+want those unsynced writes; until then, `shalectl dump-wal NNNNNN.log.dropped` prints them. One or more
+such files can appear after each power loss that leaves a gap, and they take the space of the logs they
+were.
 
 ## Corruption found while reading
 

@@ -67,7 +67,7 @@ that holds none.
 - **An indirection on every I/O.** Calls go through a virtual `Env`. A change that wants `mmap`, direct
   I/O or `io_uring` has to grow the interface, and the simulated filesystem with it.
 - **The simulator checks a model, not a machine.** What it finds is true of the model of the disk written
-  in `fault_env.h`, and that file also lists what the model leaves out: torn, zero-filled and
+  in `fault_env.h`, and that file also lists what the model leaves out: zero-filled and
   garbage-tailed files after a power loss (a power loss there leaves a clean prefix), the durability of
   `CreateDir`, a partial effect of a failed call, and bits that change at rest. See
   [testing](../testing.md#what-the-tests-do-not-cover).

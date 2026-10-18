@@ -21,7 +21,7 @@ prose.
 | **D3** | A `WriteBatch` is, after any crash, entirely visible or entirely invisible. |
 | **D4** | A read returns the right value or an error (`Corruption`, `IOError`). It never returns a wrong value, including after a bit flips on the disk (`ReadOptions::verify_checksums` is `true` by default). |
 | **D5** | After a background I/O error, every write returns that error until the database is opened again. Reads keep being served. The effect of the write that failed is undefined (it may or may not be there after the next open), but the batch is still atomic. |
-| **D6** | Two traces of a crash are tolerated in the write-ahead logs whatever `paranoid_checks` says. The first is a record or a header **cut off by the end of a file**, which is ignored. The second is a **gap in the sequence numbers at the start of a log**: its first write is not the one after the newest write of the tables and of the logs replayed before it. That is what a power loss leaves when it takes the unsynced end of one log and keeps unsynced writes of the next. At a gap, replay stops; that log and every later one are renamed `<name>.dropped`, never read or deleted by the engine, and the `LOG` says why. Neither trace drops a write that was acknowledged as synced (D1, rule 2). Every other defect the log reader reports is an error at `Open` when `paranoid_checks` is `true` (the default): `Corruption`, or `IOError` for a read error. With `paranoid_checks = false`, replay stops at the first defect, and what is dropped is kept, renamed. A memtable switch does not sync the old log, so after a power loss the last two logs can both end in unsynced bytes. A zero-filled or garbage tail in either is a defect, not a cut-off record. See [ADR 0003](0003-wal-format-and-recovery.md). |
+| **D6** | Two traces of a crash are tolerated in the write-ahead logs whatever `paranoid_checks` says. The first is a record or a header **cut off by the end of a file**, which is ignored. The second is a **gap in the sequence numbers at the start of a log**: its first write is not the one after the newest write of the tables and of the logs replayed before it. That is what a power loss leaves when it takes the unsynced end of one log and keeps unsynced writes of the next. At a gap, replay stops; that log and every later one are renamed `<name>.dropped`, never read again and deleted by nothing but `DestroyDB()`, and the `LOG` says why. Neither trace drops a write that was acknowledged as synced (D1, rule 2). Every other defect the log reader reports is an error at `Open` when `paranoid_checks` is `true` (the default): `Corruption`, or `IOError` for a read error. With `paranoid_checks = false`, replay stops at the first defect, and what is dropped is kept, renamed. A memtable switch does not sync the old log, so after a power loss the last two logs can both end in unsynced bytes. A zero-filled or garbage tail in either is a defect, not a cut-off record. See [ADR 0003](0003-wal-format-and-recovery.md). |
 | **D7** | One directory is open by one `DB` at a time: a `LOCK` file held with `flock` refuses a second open, in the same process or another. |
 <!-- /table:contract -->
 
@@ -63,8 +63,9 @@ are in the code in the places named.
    directory synced.
 5. **An edit is durable in the MANIFEST before the version it makes is installed** (`LogAndApply`,
    `src/db/version_set.cc`). The record is appended and synced (with the DB mutex given up, and only one
-   writer at a time, which the version set enforces), then the version is installed. A version that readers see is one a
-   crash will not take back, and a table a version names is one the MANIFEST names too. If the append
+   writer at a time, which the version set enforces), then the version is installed. A version that
+   readers see is one a crash will not take back, and a table a version names is one the MANIFEST
+   names too. If the append
    or the sync fails, the MANIFEST is not trusted again until a new one is written, because a `Sync()`
    that succeeds after a failed one proves nothing.
 6. **`CURRENT` changes by atomic rename and a synced directory** (`SetCurrentFile`). The new

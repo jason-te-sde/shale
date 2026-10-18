@@ -29,7 +29,8 @@ The first release.
   that begins after a gap in the sequence numbers, which a power loss leaves because a memtable switch
   does not sync the old log, is set aside the same way by any open; nothing acknowledged as synced is in it.
 - **Tools**: `shalectl` (put, get, delete, scan, stats, flush, verify and the dumps of tables, logs and
-  MANIFESTs), `shale_bench` (db_bench-style workloads) and `shale_crashtest` (a real process killed with
+  MANIFESTs), `shale_bench` (db_bench-style workloads, also run against LevelDB with `--engine=leveldb` for
+  the comparison in the benchmarks) and `shale_crashtest` (a real process killed with
   `SIGKILL`).
 - **Packaging**: a CMake package (`find_package(shale)`, target `shale::shale`), an example that is built
   against the installation in CI, and presets for development, release, sanitizers, coverage and fuzzing.
@@ -38,8 +39,8 @@ The first release.
   ThreadSanitizer; six libFuzzer targets; the crash test; and tests that hold the documents'
   numbers to the code.
 - **Documentation**: [README](README.md), [architecture](docs/architecture.md), the byte-level
-  [format](docs/format.md), the [operations guide](docs/operations.md), [testing](docs/testing.md) and seven
-  [design records](docs/design/).
+  [format](docs/format.md), the [operations guide](docs/operations.md), [testing](docs/testing.md), the
+  [benchmarks](docs/benchmarks.md) and seven [design records](docs/design/).
 
 [Unreleased]: https://github.com/jason-te-sde/shale/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/jason-te-sde/shale/releases/tag/v0.1.0

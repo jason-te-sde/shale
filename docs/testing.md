@@ -94,9 +94,9 @@ iterators held across a compaction, injected errors and corrupted reads all have
 under them, as it does if no table ever reached level 2. A simulator that quietly stopped crashing the
 database would otherwise pass.
 
-**It is deterministic.** One seed is one run, on every toolchain: `tests/sim/determinism_test.cc` asserts
-that a seed run twice has the same trace digest and pins the digests of three seeds, so a toolchain that
-diverges fails.
+**It is deterministic.** One seed is one run, on every toolchain that CI builds with:
+`tests/sim/determinism_test.cc` asserts that a seed run twice has the same trace digest and pins the
+digests of three seeds, so a toolchain that diverges fails.
 
 **Its crash model.** A crash is made between two operations, never inside one, and a flush or a compaction
 is one operation to the driver. What a crash does to the middle of one is reached the other way: an armed
@@ -286,7 +286,7 @@ database, `fuzz` the input; `coverage` and `bench-smoke` upload their reports. `
 `scripts/preflight.sh` runs the same things locally, in CI's order, and fails if a tool it needs is
 missing or has the wrong version.
 
-**Coverage**, measured by CI on Linux with GCC 14: **95.4% of lines, 95.2% of functions, 64.8% of
+**Coverage**, measured by CI on Linux with GCC 14: **95.4% of lines, 95.3% of functions, 64.9% of
 branches** of `src/`. The same build on macOS with GCC 16 measures 92.3% of lines. The floor of 90% is an
 alarm for a measurement that is empty or broken and for a large part of `src/` that the tests no longer
 run; it is not a target, and nobody should write a test to move the number. Branch coverage is reported
@@ -323,6 +323,12 @@ The author's machine is a Mac (arm64) with Apple Clang, Homebrew Clang and GCC 1
   a power loss leaves a clean prefix of a file, never zero-filled or garbage tails; `CreateDir` and
   `RemoveDir` are durable at once; a failed call has no partial effect; stored bytes never change by
   themselves (a read can come back with a flipped bit, but the bytes at rest do not rot).
+- **Lenient recovery under faults.** No simulator run, fuzz target or crash test opens a database with
+  `paranoid_checks = false`; only `tests/db/db_recovery_test.cc` does. The simulator opens with the
+  default, under which an open that reads a corrupted byte of a log fails with `Corruption` instead of
+  working, so `damaged_opens`, the count of opens that worked with a corrupted read, was 0 in CI's 50
+  seeds and in a run of 600. So the clause of I4 about an open that read corrupted bytes and worked is
+  not exercised by CI's simulator runs, and lenient recovery has that one test and no other.
 - **Runs longer or bigger than CI's.** The simulator runs 50 seeds of 2000 steps over 200 keys, the crash
   test 200 rounds, each fuzz target 60 seconds, and the stress tests a few thousand writes. A database of
   tens of gigabytes, a year of uptime and a compaction that takes an hour have never been run.

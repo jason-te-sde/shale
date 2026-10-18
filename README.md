@@ -18,10 +18,10 @@ claim below is backed by a test, a commit or a measurement that you can run.
 **1. Every write the database confirmed is still there after a crash.** A deterministic simulator runs
 the real engine over a filesystem that can lose power: it keeps the bytes that were synced and a seeded
 prefix of the rest (so a file is cut at a seeded byte), keeps only a seeded in-order prefix of the
-directory changes (new files, renames, removals) that were never synced, kills the process, fails calls, and flips bits in what is read. After **every** step it compares
-the database with a reference model, and after every reopen it requires the recovered state to be the
-state after some prefix of the acknowledged writes, at least as long as the last synced one, with no
-half-applied batch.
+directory changes (new files, renames, removals) that were never synced, kills the process, fails
+calls, and flips bits in what is read. After **every** step it compares the database with a reference
+model, and after every reopen it requires the recovered state to be the state after some prefix of the
+acknowledged writes, at least as long as the last synced one, with no half-applied batch.
 [`tests/sim/sim_test.cc`](tests/sim/sim_test.cc) · [`tests/testkit/simulator.h`](tests/testkit/simulator.h) ·
 [the contract](docs/design/0004-durability.md) · and a real `kill -9` of a real process on a real
 filesystem, 200 rounds in CI: [`tools/shale_crashtest.cc`](tools/shale_crashtest.cc)
@@ -30,7 +30,7 @@ filesystem, 200 rounds in CI: [`tools/shale_crashtest.cc`](tools/shale_crashtest
 injected `Env` and all background work through an injected `Scheduler`; the decisions of the engine are
 made by a pure core that cannot touch the world. A bug that seed 2240 found yesterday is found by
 seed 2240 tomorrow, and a test asserts that one seed gives the same trace digest twice and on every
-toolchain. [`tests/sim/determinism_test.cc`](tests/sim/determinism_test.cc) ·
+toolchain that CI builds with. [`tests/sim/determinism_test.cc`](tests/sim/determinism_test.cc) ·
 [`tests/sim/regression_seeds.txt`](tests/sim/regression_seeds.txt) ·
 [ADR 0002](docs/design/0002-pure-core-and-injected-env.md)
 
@@ -172,9 +172,10 @@ int main() {
 
 Every operation that can fail returns a `shale::Status` (an iterator reports its failure through
 `status()`), and `Status` is `[[nodiscard]]`: nothing throws, and a dropped error is a warning, which the
-project's own build, like the examples', turns into an error. [`examples/basic.cc`](examples/basic.cc) is a longer tour with batches, an iterator and a
-snapshot. Every public item in [`include/shale/`](include/shale/) has a Doxygen comment, and the build fails
-without it.
+project's own build, like the examples', turns into an error.
+[`examples/basic.cc`](examples/basic.cc) is a longer tour with batches, an iterator and a snapshot.
+Every public item in [`include/shale/`](include/shale/) has a Doxygen comment, and the documentation
+build that CI runs fails without it.
 
 ## How it works
 
@@ -215,9 +216,9 @@ keeps the crash argument short. The steps of every path are in
 | **D1** | With `sync = true` (**the default**), a `Write` that returns OK is present after a crash of the process and after a loss of power (assuming the device honours `fsync`; macOS uses `F_FULLFSYNC`). |
 | **D2** | With `sync = false`, an OK write survives a crash of the process; after a power loss the state is the state after some prefix of the acknowledged writes that includes everything up to the last synced write. No holes. |
 | **D3** | A `WriteBatch` is entirely visible or entirely invisible after any crash. |
-| **D4** | A read returns the right value or an error. Never a wrong value, even after a bit flips on disk. |
+| **D4** | A read returns the right value or an error. Never a wrong value, even after a bit flips on disk (with `verify_checksums`, the default). |
 | **D5** | After a background I/O error every write returns that error until the database is reopened. Reads keep working. |
-| **D6** | Two traces of a crash are tolerated in the logs whatever `paranoid_checks` says: a record cut off by the end of a file, and a gap in the sequence numbers at the start of a log, which is what a power loss leaves when it takes the unsynced end of one log and keeps unsynced writes of the next (that log and the later ones are set aside as `.dropped` files, never deleted). Neither drops a write that was acknowledged as synced. Any other defect fails `Open` (`paranoid_checks = true`, the default). |
+| **D6** | Two traces of a crash are tolerated in the logs whatever `paranoid_checks` says: a record cut off by the end of a file, and a gap in the sequence numbers at the start of a log, which is what a power loss leaves when it takes the unsynced end of one log and keeps unsynced writes of the next (that log and the later ones are set aside as `.dropped` files, never deleted except by `DestroyDB()`). Neither drops a write that was acknowledged as synced. Any other defect fails `Open` (`paranoid_checks = true`, the default). |
 | **D7** | One `DB` per directory at a time, enforced with `flock`. |
 <!-- /table:contract -->
 
@@ -233,6 +234,27 @@ under 1 means shale is slower.** Each figure is the median of three runs, with t
 brackets. Every read was checked against a record of what was written. The figures of shale are those of
 the final build, after four changes that a first measurement led to
 ([docs/benchmarks.md](docs/benchmarks.md) has the figures before them).
+
+In short, measured on 2026-10-18 with both engines in the same session:
+
+- **Writes.** On `fillseq` and `fillrandom` shale is level with LevelDB: 0.99 and 0.98 of its ops/s in
+  three interleaved rounds of the two engines, against 0.87 and 0.90 before the changes. `overwrite` is
+  0.84 (0.81 before). The single runs of the full commands put shale above LevelDB on all three in the first
+  pass and below it in the second; the write rows of this machine move by up to 16% from one run to the next,
+  which is why the interleaved rounds are the figure to use. Synced writes are level (1.02, 1.03).
+- **Reads.** LevelDB is faster at reading what is there: `readrandom` 0.70 and 0.74, `readseq` 0.28 and 0.46,
+  `seekrandom` 0.28 and 0.68 (first pass, and compacted before the reads). shale is faster at keys that
+  are not there: `readmissing` 1.21 and 2.49.
+- **The changes.** Four inefficiencies that the first measurement found were fixed. A synced write still
+  survives a power loss with every write acknowledged before it, and a power loss still leaves a prefix of
+  the writes. Since a memtable switch no longer syncs, recovery now also sets aside a log that begins after
+  a gap that a power loss left, whatever `paranoid_checks` says
+  ([durability](docs/design/0004-durability.md), D6). Inlining `Status::ok()` and the key comparison
+  made `readseq` 9% faster in the compacted pass, and the first-pass reads 7% to 59% faster in runs
+  that are less steady; reading blocks into buffers that are not zero-filled, 2% on the point reads
+  and seeks; writing the MANIFEST without the database mutex held, nothing measurable on its own;
+  taking the syncs of a memtable switch off the writer's path, 4% to 13% on the write rows in the
+  interleaved rounds. Each, with its figures, is in [docs/benchmarks.md](docs/benchmarks.md).
 
 **Machine.** Apple M2, 8 cores (4 performance, 4 efficiency), 16 GiB, macOS 26.6.2 (build 25G83), `Darwin 25.6.0
 arm64`; shale a Release build with Apple clang 21.0.0; LevelDB 1.23, the Homebrew bottle `leveldb 1.23_2`;
