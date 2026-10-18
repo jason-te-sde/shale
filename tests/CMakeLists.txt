@@ -158,3 +158,9 @@ add_test(NAME cmake_options_accept_and_reject
          COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/options_test.sh"
                  "${CMAKE_COMMAND}" "${CMAKE_GENERATOR}" "${CMAKE_CXX_COMPILER}")
 set_tests_properties(cmake_options_accept_and_reject PROPERTIES TIMEOUT 300)
+
+# run-flaws.sh decides whether the simulator can fail, so its verdicts and the list of flaws that
+# CI runs are tested too: the matrix of the flaws job must name every flaw the build defines.
+add_test(NAME flaws_script_and_ci_agree
+         COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/flaws_test.sh")
+set_tests_properties(flaws_script_and_ci_agree PROPERTIES TIMEOUT 120)
