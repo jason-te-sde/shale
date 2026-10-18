@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -87,9 +88,17 @@ Status Footer::DecodeFrom(std::string_view input) {
   return Status::OK();
 }
 
+BlockContents BlockContents::CopyOf(std::string_view bytes) {
+  auto data = std::make_unique_for_overwrite<char[]>(bytes.size());
+  if (!bytes.empty()) {
+    std::memcpy(data.get(), bytes.data(), bytes.size());
+  }
+  return BlockContents(std::move(data), bytes.size());
+}
+
 Status ReadBlock(const RandomAccessFile* file, const BlockHandle& handle, bool verify_checksum,
-                 std::string* contents) {
-  contents->clear();
+                 BlockContents* contents) {
+  *contents = BlockContents();
   // A block and its trailer that cannot be counted in bytes, or that would end beyond what a file
   // offset can name, are in no file.
   constexpr uint64_t kMaxBlockSize =
@@ -102,16 +111,29 @@ Status ReadBlock(const RandomAccessFile* file, const BlockHandle& handle, bool v
     return Status::Corruption("truncated block read");
   }
 
-  // Read in chunks. Each is requested only after the one before it came back whole, so the buffer
-  // is never larger than the file's bytes plus one chunk, however large the handle says the block
-  // is.
-  std::string stored;
+  // Read in chunks. Each is requested only after the one before it came back whole, and the buffer
+  // grows only to take the next one, doubling so that a large block is not copied once a chunk: it
+  // is never more than twice what the file has supplied, or one chunk, however large the handle
+  // says the block is. A block of one chunk or less, which is every block of a table written with
+  // the default options, is one allocation and one read. The buffer is not zero-filled: every byte
+  // that is looked at below was written by the file, since a read that comes back short ends this.
+  std::unique_ptr<char[]> stored;
+  size_t capacity = 0;
   size_t have = 0;
   while (have < total) {
     const size_t want = std::min(total - have, kReadChunkSize);
-    stored.resize(have + want);
+    if (have + want > capacity) {
+      const size_t doubled = capacity > total / 2 ? total : 2 * capacity;
+      const size_t grown = std::min(total, std::max(have + want, doubled));
+      auto bigger = std::make_unique_for_overwrite<char[]>(grown);
+      if (have > 0) {
+        std::memcpy(bigger.get(), stored.get(), have);
+      }
+      stored = std::move(bigger);
+      capacity = grown;
+    }
     std::string_view got;
-    char* const scratch = stored.data() + have;
+    char* const scratch = stored.get() + have;
     Status s = file->Read(handle.offset + have, want, &got, scratch);
     if (!s.ok()) {
       return s;
@@ -131,17 +153,17 @@ Status ReadBlock(const RandomAccessFile* file, const BlockHandle& handle, bool v
   const size_t size = static_cast<size_t>(handle.size);
   const char type = stored[size];
   if (verify_checksum) {
-    const uint32_t expected = crc32c::Unmask(DecodeFixed32(stored.data() + size + 1));
+    const uint32_t expected = crc32c::Unmask(DecodeFixed32(stored.get() + size + 1));
     // The checksum covers the contents and the type byte, which are contiguous.
-    if (crc32c::Value(stored.data(), size + 1) != expected) {
+    if (crc32c::Value(stored.get(), size + 1) != expected) {
       return Status::Corruption("block checksum mismatch");
     }
   }
   if (type != kBlockTypeRaw) {
     return Status::Corruption("unknown block type");
   }
-  stored.resize(size);
-  *contents = std::move(stored);
+  // The trailer stays in the buffer, out of the view.
+  *contents = BlockContents(std::move(stored), size);
   return Status::OK();
 }
 

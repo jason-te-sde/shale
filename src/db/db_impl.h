@@ -101,6 +101,13 @@ struct DBCounters {
 /// runs tasks on the caller's thread, it runs them itself, which is for one thread at a time: two
 /// that wait at once would run tasks on the same ManualScheduler together.
 ///
+/// A flush or a compaction ends in an edit of the version set, which is appended to the MANIFEST
+/// and synced before the version it makes is installed. The mutex is given up while the edit is
+/// written and synced (VersionSet::LogAndApply() with the mutex), so that writes and reads do not
+/// wait for the disk with it; the background task is the one writer of the MANIFEST, which the
+/// version set enforces, and nothing that a writer or a reader changes in the meantime is in the
+/// edit.
+///
 /// The first error of the log, of a flush, of a compaction or of the MANIFEST stops all writes: it
 /// is kept in `bg_error_`, counted, and every write and flush after it returns it. Reads go on.
 class DBImpl final : public DB {
@@ -218,13 +225,17 @@ class DBImpl final : public DB {
   Status FindLogsToReplay(std::vector<uint64_t>* logs) SHALE_REQUIRES(mutex_);
 
   // Replays log `number` into `mem_`. `*max_sequence` is the last sequence number applied so far
-  // and moves on with each batch; `*entries` counts the operations applied. Returns the IOError of
-  // a read that failed, whether or not paranoid_checks is on: the log may be whole. Sets
-  // `*stopped_for` to what was wrong when the log has a defect that is not an error because
-  // paranoid_checks is off: replay ends there, with nothing after it in this log or the later ones
-  // applied, and the caller sets those logs aside.
-  Status ReplayLog(uint64_t number, SequenceNumber* max_sequence, uint64_t* entries,
-                   std::string* stopped_for) SHALE_REQUIRES(mutex_);
+  // and moves on with each batch; `*entries` counts the operations applied. `tables_sequence` is
+  // the newest write the tables hold, as the MANIFEST says. Returns the IOError of a read that
+  // failed, whether or not paranoid_checks is on: the log may be whole. Sets `*stopped_for` to what
+  // was wrong when replay ends in this log, with nothing after that in this log or the later ones
+  // applied, and the caller sets those logs aside. That is for a defect that is not an error
+  // because paranoid_checks is off, and, whatever paranoid_checks says, for a log whose first
+  // write is not the one after the newest of the tables and of the logs before it: the writes in
+  // between were the end of an earlier log, which a power loss took, and replaying this one would
+  // leave a hole where no prefix of the writes has one.
+  Status ReplayLog(uint64_t number, SequenceNumber tables_sequence, SequenceNumber* max_sequence,
+                   uint64_t* entries, std::string* stopped_for) SHALE_REQUIRES(mutex_);
 
   // Applies the batch that is `record` to `mem_`, whole or not at all: returns Corruption, with
   // nothing applied, for a batch that does not decode, whose sequence number does not come after
@@ -306,10 +317,11 @@ class DBImpl final : public DB {
   // caller that read anything under the mutex before it must read it again.
   Status MakeRoomForWrite(bool force) SHALE_REQUIRES(mutex_);
 
-  // Starts a new log and a new `mem_`, and makes the old `mem_` the `imm_`, which must be null.
-  // The old log is synced first and the new one's directory entry before any write goes into it, so
-  // that a write that is durable in the new log never has an earlier one that is not in the old.
-  // Any failure is a background error: the state of the log is not known after it.
+  // Starts a new log and a new `mem_`, and makes the old `mem_` the `imm_`, which must be null. It
+  // syncs nothing: the old log, if it holds writes that were not synced, is kept open in
+  // `unsynced_log_`, and the new log's directory entry is left to the first synced write and to
+  // the flush, which make them durable (see the comment in it). A failure to make the new log is
+  // a background error.
   Status SwitchMemTable() SHALE_REQUIRES(mutex_);
 
   // Queues a background task if there is work and none is queued or running: the work is a memtable
@@ -373,7 +385,7 @@ class DBImpl final : public DB {
   // Deletes the files that nothing needs: the tables that no version, in use by a reader or not,
   // names and no flush or compaction is producing, the logs older than `LogNumber()`, the MANIFESTs
   // but the current one, and temporary files. A file whose name is not one of the database's, a
-  // log that a lenient open set aside among them, is not touched, nor is a numbered file at or
+  // log that an open set aside among them, is not touched, nor is a numbered file at or
   // above kMaxFileNumber, which the database never makes. A table that is deleted is evicted from
   // the table cache. Does nothing after an error has stopped writes, since whether the version
   // that a failed edit would have installed is the one that a restart finds is not known. Gives up
@@ -438,10 +450,23 @@ class DBImpl final : public DB {
   std::unique_ptr<WritableFile> logfile_ SHALE_GUARDED_BY(mutex_);
   std::unique_ptr<log::Writer> log_ SHALE_GUARDED_BY(mutex_);
   uint64_t logfile_number_ SHALE_GUARDED_BY(mutex_) = 0;
-  // Whether a record was appended to the log since it was last synced: the switch to a new
-  // memtable syncs the old log, and does not when there is nothing to sync, which with every write
-  // synced, as they are by default, is every time. Set by the leader when it has the mutex again.
+  // Whether a record was appended to the log since it was last synced. A switch keeps a log that
+  // has such records open, in `unsynced_log_`, for the next synced write to sync, and closes one
+  // that has none, which with every write synced, as they are by default, is every time. Set by
+  // the leader when it has the mutex again.
   bool log_unsynced_ SHALE_GUARDED_BY(mutex_) = false;
+  // The log that the last switch replaced, when it holds records that were not synced; else null.
+  // The next synced write syncs it before it is acknowledged, and the flush of `imm_`, whose
+  // writes it holds, makes it unnecessary: either takes it, the leader with the mutex given up
+  // while it syncs. There is never more than one, since a switch waits for `imm_` to be flushed.
+  std::unique_ptr<WritableFile> unsynced_log_ SHALE_GUARDED_BY(mutex_);
+  // Whether a log made by a switch may have a directory entry that is not durable: set by the
+  // switch, cleared by a directory sync made after it, by the next synced write or by the flush
+  // of `imm_`. A switch happens only at the front of the queue and while `imm_` is null, so no
+  // switch comes between either of those and the sync it makes.
+  bool log_dir_unsynced_ SHALE_GUARDED_BY(mutex_) = false;
+  // The newest write in `imm_`, which the flush of it records as the newest write of the tables.
+  SequenceNumber imm_last_sequence_ SHALE_GUARDED_BY(mutex_) = 0;
   SnapshotList snapshots_ SHALE_GUARDED_BY(mutex_);
   // How many iterators from NewIterator() are alive. Counted up under the mutex and down by the
   // iterator, which is destroyed on any thread and must not take the mutex for it, so atomic.

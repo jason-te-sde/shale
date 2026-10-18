@@ -71,10 +71,11 @@ size_t TableCacheCapacity(const Options& options) {
   return static_cast<size_t>(options.max_open_files - kReservedFiles);
 }
 
-// What a lenient open adds to the name of a log that it sets aside: a name that nothing reads.
+// What an open adds to the name of a log that it sets aside, a lenient one after a defect and any
+// one after a hole: a name that nothing reads.
 constexpr std::string_view kDroppedSuffix = ".dropped";
 
-// Whether `name`, a bare file name, is that of a log that a lenient open set aside: the name of a
+// Whether `name`, a bare file name, is that of a log that an open set aside: the name of a
 // log, as LogFileName() makes it, and the suffix, and nothing else.
 bool IsDroppedLog(const std::string& name) {
   if (name.size() <= kDroppedSuffix.size() || !name.ends_with(kDroppedSuffix)) {
@@ -193,6 +194,12 @@ DBImpl::~DBImpl() {
   if (logfile_ != nullptr) {
     static_cast<void>(logfile_->Close());
     logfile_.reset();
+  }
+  // The log before it, kept open for a sync that no synced write came to ask for. Its writes were
+  // handed to the Env as they were made, and the next open replays them.
+  if (unsynced_log_ != nullptr) {
+    static_cast<void>(unsynced_log_->Close());
+    unsynced_log_.reset();
   }
 }
 
@@ -336,12 +343,14 @@ Status DBImpl::OpenLocked() {
     return s;
   }
   mem_ = NewMemTable();
+  // The newest write the tables hold, which the first write replayed must not be beyond.
+  const SequenceNumber tables_sequence = versions_.LastSequence();
   SequenceNumber max_sequence = 0;
   uint64_t entries = 0;
   size_t first_dropped = logs.size();  // the index of the log that replay stopped in, if it did
   std::string stopped_for;
   for (size_t i = 0; i < logs.size(); i++) {
-    s = ReplayLog(logs[i], &max_sequence, &entries, &stopped_for);
+    s = ReplayLog(logs[i], tables_sequence, &max_sequence, &entries, &stopped_for);
     if (!s.ok()) {
       return s;
     }
@@ -350,8 +359,9 @@ Status DBImpl::OpenLocked() {
       break;
     }
   }
-  // The sequence numbers of the tables and of the logs overlap, since a flush records the number
-  // the database had reached and not the newest write in the table, so the larger is the newest.
+  // The logs go on from the newest write of the tables, and may overlap it: a MANIFEST written
+  // before flushes recorded the newest write of their table records the number the database had
+  // reached, which can be above writes that are only in a log. The larger is the newest.
   versions_.SetLastSequence(std::max(versions_.LastSequence(), max_sequence));
   Log("replayed " + std::to_string(logs.size()) + " log(s), " + std::to_string(entries) +
       " operation(s), last sequence number " + std::to_string(versions_.LastSequence()));
@@ -382,7 +392,7 @@ Status DBImpl::OpenLocked() {
   // Until the logs that are to be set aside have been renamed, the MANIFEST goes on naming the
   // first of them as the oldest that matters: a crash before the renames then replays them again
   // and stops at the same place, and a crash after leaves the table that holds the writes before
-  // the defect, named by this MANIFEST, as the only thing to read.
+  // the defect or the hole, named by this MANIFEST, as the only thing to read.
   edit.log_number = setting_aside ? logs[first_dropped] : log_number;
   if (entries > 0) {
     s = WriteRecoveredMemTable(&edit);
@@ -398,16 +408,16 @@ Status DBImpl::OpenLocked() {
     return s;
   }
   if (setting_aside) {
-    // What follows the defect is not applied, and is not the database's to delete either: the
-    // logs are renamed to a name that nothing reads or deletes, and only then does the MANIFEST
-    // move past them, which is what would make the next sweep delete them.
+    // What follows the defect, or the hole, is not applied, and is not the database's to delete
+    // either: the logs are renamed to a name that nothing reads or deletes, and only then does the
+    // MANIFEST move past them, which is what would make the next sweep delete them.
     s = SetAsideLogs(logs, first_dropped, stopped_for);
     if (!s.ok()) {
       return s;
     }
     VersionEdit move_on;
     move_on.log_number = log_number;
-    s = versions_.LogAndApply(std::move(move_on));
+    s = versions_.LogAndApply(std::move(move_on), &mutex_);
     if (!s.ok()) {
       return s;
     }
@@ -462,7 +472,8 @@ Status DBImpl::FindLogsToReplay(std::vector<uint64_t>* logs) {
   return Status::OK();
 }
 
-Status DBImpl::ReplayLog(uint64_t number, SequenceNumber* max_sequence, uint64_t* entries,
+Status DBImpl::ReplayLog(uint64_t number, SequenceNumber tables_sequence,
+                         SequenceNumber* max_sequence, uint64_t* entries,
                          std::string* stopped_for) {
   const std::string fname = LogFileName(dbname_, number);
   std::unique_ptr<SequentialFile> file;
@@ -476,9 +487,31 @@ Status DBImpl::ReplayLog(uint64_t number, SequenceNumber* max_sequence, uint64_t
   std::string scratch;
   Status defect;
   size_t dropped = 0;
+  bool first_record = true;
   while (reader.ReadRecord(&record, &scratch)) {
     if (!report.status().ok()) {
       break;  // a defect is reported before the record found after it, which is not applied
+    }
+    if (first_record) {
+      first_record = false;
+      // Writes are numbered one after another, and a power loss takes the end of a log, so the
+      // first write of a log is the one after the newest that the tables and the logs before it
+      // hold, unless writes in between were lost with the end of an earlier log, which a switch
+      // does not sync. Those were not synced, and neither is any write of this log or a later one
+      // that is not followed by a synced write in it, which syncs the earlier logs first: a hole
+      // is what replaying them would make, and the database is the writes up to it.
+      WriteBatch batch;
+      if (WriteBatchInternal::SetContents(&batch, record).ok()) {
+        const SequenceNumber first = WriteBatchInternal::Sequence(&batch);
+        const SequenceNumber expected = std::max(tables_sequence, *max_sequence) + 1;
+        if (first > expected) {
+          *stopped_for = "its first write is sequence number " + std::to_string(first) +
+                         ", and the writes from " + std::to_string(expected) +
+                         " were lost with the end of an earlier log";
+          Log("WAL " + fname + ": " + *stopped_for + "; nothing from here on is replayed");
+          return Status::OK();
+        }
+      }
     }
     defect = ApplyRecoveredBatch(record, max_sequence, entries);
     if (!defect.ok()) {

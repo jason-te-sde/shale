@@ -219,7 +219,14 @@ if [ "$(uname -s)" = Darwin ] && [ -z "${SDKROOT:-}" ]; then
   SDKROOT="$(xcrun --show-sdk-path)"
   export SDKROOT
 fi
-git ls-files -z -- 'src/*.cc' 'tools/*.cc' | xargs -0 -r clang-tidy -p build/dev --quiet
+# tools/bench_leveldb.cc includes LevelDB's headers, which the lint job of CI does not have, so the job
+# leaves it out. Here it is checked when a build tree that found LevelDB exists (build/release, made
+# with -DSHALE_BUILD_BENCH=ON and LevelDB on CMAKE_PREFIX_PATH), and left out of the run otherwise.
+git ls-files -z -- 'src/*.cc' 'tools/*.cc' ':!tools/bench_leveldb.cc' |
+  xargs -0 -r clang-tidy -p build/dev --quiet
+if [ -f build/release/tools/libshale_bench_leveldb.a ]; then
+  clang-tidy -p build/release --quiet tools/bench_leveldb.cc
+fi
 
 stage "docs"
 cmake --build --preset dev --target docs

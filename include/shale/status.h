@@ -27,7 +27,7 @@ class [[nodiscard]] Status {
   Status() noexcept = default;
 
   /// Returns an OK status.
-  static Status OK() noexcept;
+  static Status OK() noexcept { return Status(); }
 
   /// Returns a NotFound status.
   /// @param msg what was not found.
@@ -55,25 +55,25 @@ class [[nodiscard]] Status {
   static Status NotSupported(std::string_view msg, std::string_view detail = {});
 
   /// Returns true if the operation succeeded.
-  bool ok() const noexcept;
+  bool ok() const noexcept { return code_ == Code::kOk; }
 
   /// Returns true if code() is Code::kNotFound.
-  bool IsNotFound() const noexcept;
+  bool IsNotFound() const noexcept { return code_ == Code::kNotFound; }
 
   /// Returns true if code() is Code::kCorruption.
-  bool IsCorruption() const noexcept;
+  bool IsCorruption() const noexcept { return code_ == Code::kCorruption; }
 
   /// Returns true if code() is Code::kInvalidArgument.
-  bool IsInvalidArgument() const noexcept;
+  bool IsInvalidArgument() const noexcept { return code_ == Code::kInvalidArgument; }
 
   /// Returns true if code() is Code::kIOError.
-  bool IsIOError() const noexcept;
+  bool IsIOError() const noexcept { return code_ == Code::kIOError; }
 
   /// Returns true if code() is Code::kNotSupported.
-  bool IsNotSupported() const noexcept;
+  bool IsNotSupported() const noexcept { return code_ == Code::kNotSupported; }
 
   /// Returns the category of this status.
-  Code code() const noexcept;
+  Code code() const noexcept { return code_; }
 
   /// Returns a human-readable description: `"OK"`, or the code name followed by the message and,
   /// when one was given, the detail, for example `"Corruption: bad block: 000007.sst"`.

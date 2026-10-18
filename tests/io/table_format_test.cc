@@ -191,21 +191,21 @@ TEST_F(ReadBlockTest, VerifiesTrailer) {
   const BlockHandle handle{prefix.size(), contents.size()};
 
   Store(prefix + WithTrailer(contents, 0));
-  std::string read;
+  BlockContents read;
   ASSERT_OK(ReadBlock(file_.get(), handle, true, &read));
-  EXPECT_EQ(read, contents) << "the contents, without the trailer";
+  EXPECT_EQ(read.view(), contents) << "the contents, without the trailer";
 
   // One flipped bit in the contents.
   std::string damaged = prefix + WithTrailer(contents, 0);
   damaged[prefix.size() + 4] = static_cast<char>(damaged[prefix.size() + 4] ^ 0x04);
   Store(damaged);
-  read = "stale";
+  read = BlockContents::CopyOf("stale");
   EXPECT_EQ(ReadBlock(file_.get(), handle, true, &read).ToString(),
             "Corruption: block checksum mismatch");
   EXPECT_TRUE(read.empty()) << "a failed read leaves no contents behind to be mistaken for good";
   // Without verification the bytes come back as they are.
   ASSERT_OK(ReadBlock(file_.get(), handle, false, &read));
-  EXPECT_EQ(read, damaged.substr(prefix.size(), contents.size()));
+  EXPECT_EQ(read.view(), damaged.substr(prefix.size(), contents.size()));
 
   // The stored checksum itself damaged.
   std::string bad_crc = prefix + WithTrailer(contents, 0);
@@ -234,7 +234,7 @@ TEST_F(ReadBlockTest, VerifiesTrailer) {
 
 TEST_F(ReadBlockTest, EmptyBlockIsReadable) {
   Store(WithTrailer("", 0));
-  std::string read = "stale";
+  BlockContents read = BlockContents::CopyOf("stale");
   ASSERT_OK(ReadBlock(file_.get(), BlockHandle{0, 0}, true, &read));
   EXPECT_TRUE(read.empty());
 }
@@ -242,7 +242,7 @@ TEST_F(ReadBlockTest, EmptyBlockIsReadable) {
 TEST_F(ReadBlockTest, HandleBeyondTheEndOfTheFileIsATruncatedRead) {
   const std::string contents = "twelve bytes";
   Store(WithTrailer(contents, 0));
-  std::string read;
+  BlockContents read;
   // One byte more than the file has.
   EXPECT_EQ(ReadBlock(file_.get(), BlockHandle{0, contents.size() + 1}, true, &read).ToString(),
             "Corruption: truncated block read");
@@ -260,7 +260,7 @@ TEST_F(ReadBlockTest, HostileHandleSizesNeitherAllocateNorOverflow) {
   // A handle comes out of a file, so its size is whatever an attacker wrote. A read that sized its
   // buffer from it would try to allocate terabytes before it found out the file is a few bytes.
   Store(WithTrailer("small", 0));
-  std::string read;
+  BlockContents read;
   constexpr uint64_t kMax = std::numeric_limits<uint64_t>::max();
   for (const BlockHandle& handle :
        {BlockHandle{0, uint64_t{1} << 62}, BlockHandle{0, kMax}, BlockHandle{0, kMax - 4},
@@ -281,9 +281,9 @@ TEST_F(ReadBlockTest, BlocksLargerThanOneReadChunkAreReadWhole) {
     contents[i] = static_cast<char>('a' + (i / 4099) % 26);
   }
   Store("pad" + WithTrailer(contents, 0));
-  std::string read;
+  BlockContents read;
   ASSERT_OK(ReadBlock(file_.get(), BlockHandle{3, contents.size()}, true, &read));
-  EXPECT_EQ(read, contents);
+  EXPECT_EQ(read.view(), contents);
   // And one byte short, in the last chunk.
   EXPECT_EQ(ReadBlock(file_.get(), BlockHandle{3, contents.size() + 1}, true, &read).ToString(),
             "Corruption: truncated block read");

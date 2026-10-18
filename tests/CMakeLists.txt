@@ -226,9 +226,16 @@ if(SHALE_BUILD_TOOLS)
 
   # The benchmark tool on small databases: every workload runs, the reads are checked against what
   # was written, a seed repeats a run, and the JSON parses. It checks no time.
+  # Whether the binary has the LevelDB engine decides what it has to do for --engine=leveldb, so the
+  # script is told.
+  if(SHALE_BENCH_HAS_LEVELDB)
+    set(_bench_leveldb_state leveldb)
+  else()
+    set(_bench_leveldb_state no-leveldb)
+  endif()
   add_test(NAME shale_bench_workloads
            COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/shale_bench_test.sh"
-                   "$<TARGET_FILE:shale_bench>")
+                   "$<TARGET_FILE:shale_bench>" "${_bench_leveldb_state}")
   set_tests_properties(shale_bench_workloads PROPERTIES TIMEOUT 300)
 
   # The README's "Try it" is the output of its commands. This runs them again and compares, so that a
@@ -238,6 +245,16 @@ if(SHALE_BUILD_TOOLS)
            COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/readme_transcript_test.sh"
                    "$<TARGET_FILE:shalectl>")
   set_tests_properties(readme_transcript PROPERTIES TIMEOUT 120)
+
+  # The LevelDB engine is tested where it is built, which is where LevelDB is installed and the
+  # benchmarks are asked for: not in CI.
+  if(SHALE_BENCH_HAS_LEVELDB)
+    shale_add_test(bench_leveldb
+                   SOURCES tools/bench_leveldb_test.cc tools/counting_leveldb_env.cc
+                   LIBS shale_bench_leveldb shale_testkit)
+    # LevelDB is built without RTTI, and the Env that derives from its classes must be too.
+    set_source_files_properties(tools/counting_leveldb_env.cc PROPERTIES COMPILE_OPTIONS -fno-rtti)
+  endif()
 
   # The crash test kills a child process that is writing to a real directory, and the parent checks
   # what survived. The tool refuses a directory that already holds a database, so each run of the

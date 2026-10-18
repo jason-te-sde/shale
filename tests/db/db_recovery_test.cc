@@ -501,9 +501,10 @@ TEST_F(DBRecoveryTest, StrayLogAtTheFileNumberCeilingIsNeitherReplayedNorDeleted
 }
 
 TEST_F(DBRecoveryTest, ReplayAcceptsLogsWhoseSequenceNumbersAreBelowTheManifests) {
-  // A flush that finishes while writes go on records the sequence number the database has reached,
-  // which is above those of the writes that are still in the log. The log is replayed, and the
-  // numbers it is held to are those of the replay, not of the MANIFEST.
+  // A MANIFEST may record a sequence number above those of writes that are still in the log, as a
+  // flush that recorded the number the database had reached did, before flushes recorded the
+  // newest write of their table. The log is replayed, and the numbers it is held to are those of
+  // the replay, not of the MANIFEST.
   Close();
   ASSERT_OK(DestroyDB(dbname_, CurrentOptions()));
   ASSERT_OK(ForgeEmptyDatabase(env_.get(), kDb, 100, 2));
@@ -530,7 +531,11 @@ TEST_F(DBRecoveryTest, ReplayAcceptsLogsWhoseSequenceNumbersAreBelowTheManifests
 }
 
 TEST_F(DBRecoveryTest, ReplayAcceptsTheLargestSequenceNumber) {
-  StartOver();
+  // The tables end where the log begins, as they do in a database that has been written to this
+  // far.
+  Close();
+  ASSERT_OK(DestroyDB(dbname_, CurrentOptions()));
+  ASSERT_OK(ForgeEmptyDatabase(env_.get(), kDb, kMaxSequenceNumber - 4, 2));
   ASSERT_OK(WriteLogFile(env_.get(), LogFileName(kDb, 9),
                          {EncodedBatch(kMaxSequenceNumber - 3, {{"a", "1"}, {"b", "2"}}),
                           EncodedBatch(kMaxSequenceNumber - 1, {{"c", "3"}, {"d", "4"}})}));
@@ -571,23 +576,27 @@ TEST_F(DBRecoveryTest, ReplayRejectsSequenceNumbersThatDoNotAdvance) {
     std::vector<std::string> applied;  // keys that the lenient open finds
     std::vector<std::string> dropped;  // keys that it does not
   };
+  // Each log begins where the database it is in, an empty one, and the log before it end, so that
+  // what is tested is a number that goes back, and not a first number that goes forward, which is
+  // what a power loss leaves and is not an error (ALaterLogIsSetAsideWhenAnEarlierLogLostItsEnd).
   const std::vector<Case> cases = {
       {"a repeated number",
-       {{9, {EncodedBatch(5, {{"a", "1"}}), EncodedBatch(5, {{"b", "2"}})}}},
+       {{9, {EncodedBatch(1, {{"a", "1"}}), EncodedBatch(1, {{"b", "2"}})}}},
        {"a"},
        {"b"}},
       {"a range that overlaps the one before",
        {{9,
-         {EncodedBatch(5, {{"a1", "1"}, {"a2", "1"}, {"a3", "1"}}),
-          EncodedBatch(7, {{"b", "2"}})}}},
+         {EncodedBatch(1, {{"a1", "1"}, {"a2", "1"}, {"a3", "1"}}),
+          EncodedBatch(3, {{"b", "2"}})}}},
        {"a1", "a2", "a3"},
        {"b"}},
       {"a number below the last of the log before",
-       {{9, {EncodedBatch(10, {{"a", "1"}})}}, {10, {EncodedBatch(4, {{"b", "2"}})}}},
-       {"a"},
+       {{9, {EncodedBatch(1, {{"a", "1"}}), EncodedBatch(2, {{"a2", "1"}})}},
+        {10, {EncodedBatch(1, {{"b", "2"}})}}},
+       {"a", "a2"},
        {"b"}},
       {"the same batch in two logs",
-       {{9, {EncodedBatch(5, {{"a", "1"}})}}, {10, {EncodedBatch(5, {{"a", "1"}})}}},
+       {{9, {EncodedBatch(1, {{"a", "1"}})}}, {10, {EncodedBatch(1, {{"a", "1"}})}}},
        {"a"},
        {}},
       {"sequence number zero", {{9, {EncodedBatch(0, {{"a", "1"}})}}}, {}, {"a"}},
@@ -738,6 +747,104 @@ TEST_F(DBRecoveryTest, TwoNonEmptyLogsReplayTogether) {
   Reopen();
   EXPECT_EQ(Get("z"), "3");
   EXPECT_EQ(Get("next"), "4");
+}
+
+TEST_F(DBRecoveryTest, ALaterLogIsSetAsideWhenAnEarlierLogLostItsEnd) {
+  // A memtable switch does not sync the old log, so a power loss can take the end of it, writes
+  // that were not synced, and keep writes of the new log that were not synced either. Replaying
+  // the new log after what is left of the old one would make a hole, which no prefix of the writes
+  // has: the writes are numbered one after another, so the first write of the new log shows that
+  // writes before it are missing, and replay stops there. The logs from there on are set aside,
+  // as a lenient open sets aside what follows a defect, strict or not: this is no defect, but what
+  // a power loss leaves.
+  StartOver();
+  const std::vector<std::string> logs = {LogFileName(kDb, 9), LogFileName(kDb, 10),
+                                         LogFileName(kDb, 11)};
+  WriteDurableLog(logs[0], {EncodedBatch(1, {{"a", "1"}}), EncodedBatch(2, {{"b", "2"}})});
+  // Sequence number 3 was the end of the first log, and is gone.
+  WriteDurableLog(logs[1], {EncodedBatch(4, {{"d", "4"}, {"e", "5"}})});
+  WriteDurableLog(logs[2], {EncodedBatch(6, {{"f", "6"}})});
+  std::vector<std::string> bytes;
+  for (const std::string& log : logs) {
+    bytes.push_back(env_->FileContents(log));
+  }
+  Reopen();
+  EXPECT_EQ(Get("a"), "1");
+  EXPECT_EQ(Get("b"), "2");
+  EXPECT_EQ(Get("d"), "NOT_FOUND") << "a write after the hole was replayed";
+  EXPECT_EQ(Get("e"), "NOT_FOUND");
+  EXPECT_EQ(Get("f"), "NOT_FOUND") << "a log after the one that shows the hole was replayed";
+  EXPECT_EQ(dbfull()->TEST_LastSequence(), 2u);
+  EXPECT_TRUE(env_->FileExists(logs[0]) == false) << "the replayed log is deleted as usual";
+  for (size_t i = 1; i < logs.size(); i++) {
+    EXPECT_FALSE(env_->FileExists(logs[i]));
+    EXPECT_TRUE(env_->FileContents(logs[i] + ".dropped") == bytes[i])
+        << logs[i] << " was not set aside whole";
+  }
+  const std::string info = env_->FileContents(InfoLogFileName(kDb));
+  EXPECT_TRUE(Contains(info, "000010.log")) << "the LOG does not say why:\n" << info;
+
+  // The numbers go on from the last write that was replayed, and the next open finds nothing to
+  // stop at.
+  ASSERT_OK(Put("c", "3"));
+  EXPECT_EQ(dbfull()->TEST_LastSequence(), 3u);
+  Reopen();
+  EXPECT_EQ(Get("c"), "3");
+  EXPECT_EQ(Get("d"), "NOT_FOUND");
+}
+
+TEST_F(DBRecoveryTest, AFirstLogThatLostEverythingIsCaughtByTheManifestsSequenceNumber) {
+  // The writes up to the MANIFEST's sequence number are in tables, and the first log replayed goes
+  // on from the one after it. When the first log lost all of its writes, the second log's first
+  // write is beyond that, and it is set aside; when it is the next one, it is replayed.
+  Close();
+  ASSERT_OK(DestroyDB(dbname_, CurrentOptions()));
+  ASSERT_OK(ForgeEmptyDatabase(env_.get(), kDb, 10, 2));
+  const std::string empty = LogFileName(kDb, 9);
+  const std::string later = LogFileName(kDb, 10);
+  WriteDurableLog(empty, {});
+  WriteDurableLog(later, {EncodedBatch(15, {{"x", "1"}})});
+  Reopen();
+  EXPECT_EQ(Get("x"), "NOT_FOUND") << "writes 11 to 14 are missing, and 15 was replayed";
+  EXPECT_EQ(dbfull()->TEST_LastSequence(), 10u);
+  EXPECT_TRUE(env_->FileExists(later + ".dropped"));
+
+  Close();
+  ASSERT_OK(DestroyDB(dbname_, CurrentOptions()));
+  ASSERT_OK(ForgeEmptyDatabase(env_.get(), kDb, 10, 2));
+  WriteDurableLog(empty, {});
+  WriteDurableLog(later, {EncodedBatch(11, {{"x", "1"}})});
+  Reopen();
+  EXPECT_EQ(Get("x"), "1");
+  EXPECT_EQ(dbfull()->TEST_LastSequence(), 11u);
+}
+
+TEST_F(DBRecoveryTest, APowerLossThatTakesTheEndOfTheOldLogLeavesAPrefix) {
+  // What the write path leaves, and a power loss that keeps the new log's writes and not the end
+  // of the old one's: the recovered state is the writes up to the first one lost.
+  Reopen(SmallBuffer());
+  const int written = PutUntilSwitched();  // the last of them went into the new log
+  ASSERT_GT(written, 2);
+  ASSERT_OK(Put("later", "1", /*sync=*/false));
+  ASSERT_EQ(NumTableFilesAtLevel(0), 0);
+  const std::vector<std::string> logs = FilesOfType(FileType::kLogFile);
+  ASSERT_EQ(logs.size(), 2u);
+  const std::string old_log = std::string(kDb) + "/" + logs[0];
+  const std::string new_log = std::string(kDb) + "/" + logs[1];
+  // The old log loses its last record, the new one keeps everything, and both are then durable,
+  // as a power loss that kept them would leave them.
+  const std::vector<uint64_t> offsets = LogRecordOffsets(env_.get(), old_log);
+  ASSERT_EQ(offsets.size(), static_cast<size_t>(written - 1));
+  Close();  // which neither syncs nor flushes anything
+  env_->SetFileContents(old_log, env_->FileContents(old_log).substr(0, offsets.back()));
+  env_->SetFileContents(new_log, env_->FileContents(new_log));
+  Reopen(SmallBuffer());
+  for (int i = 0; i < written - 2; i++) {
+    EXPECT_TRUE(Get(UserKey(i)) == KiB(i)) << "entry " << i;
+  }
+  EXPECT_EQ(Get(UserKey(written - 2)), "NOT_FOUND") << "the lost write";
+  EXPECT_EQ(Get(UserKey(written - 1)), "NOT_FOUND") << "a write after the lost one";
+  EXPECT_EQ(Get("later"), "NOT_FOUND") << "a write after the lost one";
 }
 
 TEST_F(DBRecoveryTest, LenientOpenSetsAsideTheLogWithTheDefectAndEveryLaterLog) {

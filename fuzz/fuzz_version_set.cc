@@ -11,6 +11,7 @@
 // something that a recovery accepts again, with the tables it was installed with: a database that
 // wrote a MANIFEST which it then refuses is a database that cannot be opened.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -132,6 +133,15 @@ void Run(std::string_view bytes) {
       }
       for (const auto& [level, file] : edit.new_files) {
         versions.MarkFileNumberUsed(file.number);
+      }
+      // And the writes that a flush says its table holds were made by the database before it made
+      // the edit, which a sequence number beyond the largest no database reaches.
+      if (edit.last_sequence.has_value()) {
+        if (*edit.last_sequence <= kMaxSequenceNumber) {
+          versions.SetLastSequence(std::max(versions.LastSequence(), *edit.last_sequence));
+        } else {
+          edit.last_sequence.reset();
+        }
       }
       const Status applied = versions.LogAndApply(std::move(edit));
       if (!applied.ok()) {
