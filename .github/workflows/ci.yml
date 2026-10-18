@@ -395,10 +395,13 @@ jobs:
           path: ${{ runner.temp }}/bench/result.json
           if-no-files-found: ignore
 
-  # Which lines of src/ the tests run. It is a smoke alarm and not a target: the job has no floor,
-  # since a number that must not fall is a number that gets tests written to move it. It runs on
-  # GCC, whose gcov gcovr reads; Clang's coverage is a different tool. The report goes up as a
-  # directory of pages, one for each file, with the line-by-line view.
+  # Which lines of src/ the tests run. It is a smoke alarm and not a target, and the floor of 90% of
+  # the lines is set to match: far under the 95% that the first run measured, so that a point lost
+  # does not turn the job red and nobody writes a test to move the number. What the floor is for is
+  # a measurement that is empty or broken, which gcovr reports as 0% and exits 0 on, and a large part
+  # of src/ that the tests no longer run. The job runs on GCC, whose gcov gcovr reads; Clang's
+  # coverage is a different tool. The report goes up as a directory of pages, one for each file,
+  # with the line-by-line view.
   coverage:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -431,12 +434,14 @@ jobs:
         run: ctest --preset coverage
 
       # gcovr must run the gcov of the compiler that wrote the data: the gcov that the runner has
-      # under that plain name is GCC 13's, which cannot read GCC 14's files.
+      # under that plain name is GCC 13's, which cannot read GCC 14's files. With --fail-under-line
+      # it exits with status 2 when the figure is under the floor, an empty measurement included,
+      # after it has printed the summary and written the report.
       - name: Report
         run: |
           mkdir coverage
-          gcovr --root . --filter src/ --gcov-executable gcov-14 --txt-summary \
-            --html-details coverage/index.html
+          gcovr --root . --filter src/ --gcov-executable gcov-14 --fail-under-line 90 \
+            --txt-summary --html-details coverage/index.html
 
       - name: Upload the report
         uses: actions/upload-artifact@v7
@@ -489,6 +494,27 @@ jobs:
         run: |
           "$RUNNER_TEMP/examples/basic" "$RUNNER_TEMP/exdb" > "$RUNNER_TEMP/basic.out"
           diff -u examples/basic.expected "$RUNNER_TEMP/basic.out"
+
+      # The installed package is version 0.1: a project that asks for it gets it, and one that asks
+      # for version 1 does not. The same project asks both times, so that the refusal can only be
+      # the version's. Which mode of compatibility the package uses is pinned by
+      # tests/scripts/options_test.sh, since an installation of 0.1 cannot tell SameMajorVersion
+      # from AnyNewerVersion, which refuses version 1 too.
+      - name: Check that another major version is refused
+        run: |
+          mkdir "$RUNNER_TEMP/version"
+          cat > "$RUNNER_TEMP/version/CMakeLists.txt" <<'EOF'
+          cmake_minimum_required(VERSION 3.25)
+          project(version_check LANGUAGES CXX)
+          find_package(shale ${REQUESTED} REQUIRED)
+          EOF
+          cmake -S "$RUNNER_TEMP/version" -B "$RUNNER_TEMP/version/build-0.1" -G Ninja \
+            -DREQUESTED=0.1 -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix"
+          if cmake -S "$RUNNER_TEMP/version" -B "$RUNNER_TEMP/version/build-1" -G Ninja \
+            -DREQUESTED=1 -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/prefix" > /dev/null 2>&1; then
+            echo "find_package(shale 1) was satisfied by the installed 0.1" >&2
+            exit 1
+          fi
 
       # The tool is not installed, so it is the one of the build tree. The second call is a process
       # of its own, so that what it prints is what the first one left on disk.

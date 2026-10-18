@@ -95,6 +95,58 @@ fi
 leaves_out "the defaults add no flaw" "SHALE_FLAW_"
 leaves_out "the defaults add no sanitizer" "-fsanitize"
 leaves_out "the defaults add no coverage" "--coverage"
+leaves_out "the defaults add no atomic profile update" "-fprofile-update"
+
+# The warning flags of every target are those of examples/CMakeLists.txt. The example has to build
+# with nothing of the repository but its own directory, so it repeats the list instead of including
+# it, and this is what keeps the copy from falling behind. -Wthread-safety is left out of both: only
+# Clang takes it, so the compile commands of another compiler lack it, and the example names it in
+# a generator expression.
+warning_flags() {
+  grep -oE '(^|[[:space:]])-W[a-z][a-z-]*' "$1" | sed 's/^[[:space:]]*//' | sort -u |
+    grep -v -x -e '-Wthread-safety'
+}
+cases=$((cases + 1))
+build_flags="$(warning_flags "$build/compile_commands.json")"
+example_flags="$(warning_flags "$source_dir/examples/CMakeLists.txt")"
+if [ -z "$build_flags" ] || [ "$build_flags" != "$example_flags" ]; then
+  fail "the example's warning flags are those of every other target" \
+    "$(printf 'compile commands:\n%s\nexamples/CMakeLists.txt:\n%s' "$build_flags" "$example_flags")"
+fi
+
+# The package asks for SameMajorVersion: of the releases that are not older than a request, only
+# those of its major version answer it. An installed 2.3.0 is newer than a request for 0.1 and is no
+# answer to it, and it is one to a request for 2. The version file is made at configure time, so this
+# runs it as find_package does, from a copy that says 2.3.0 where the file says the version of this
+# tree. An installation of this tree is 0.x, and a check against it alone could not tell this mode
+# from AnyNewerVersion, which refuses a request for 1 as well.
+cases=$((cases + 1))
+version_text="$(<"$build/shaleConfigVersion.cmake")"
+this_version="$(sed -n 's/^set(PACKAGE_VERSION "\(.*\)")$/\1/p' <<<"$version_text")"
+if [ -z "$this_version" ]; then
+  fail "the version file names the version of this tree" "$version_text"
+else
+  mkdir -p "$tmp/fake" "$tmp/consumer"
+  printf '%s\n' "${version_text//"$this_version"/2.3.0}" >"$tmp/fake/shaleConfigVersion.cmake"
+  : >"$tmp/fake/shaleConfig.cmake"
+  printf '%s\n' 'cmake_minimum_required(VERSION 3.25)' 'project(consumer LANGUAGES NONE)' \
+    'find_package(shale ${REQUEST} QUIET CONFIG PATHS "${FAKE}" NO_DEFAULT_PATH)' \
+    'if(shale_FOUND)' '  message(STATUS "answer=yes")' 'else()' '  message(STATUS "answer=no")' \
+    'endif()' >"$tmp/consumer/CMakeLists.txt"
+  # answer <requested version> <yes or no>: whether find_package takes the 2.3.0 for the request.
+  answer() {
+    local got
+    cases=$((cases + 1))
+    got="$("$cmake_cmd" -S "$tmp/consumer" -B "$tmp/consumer/build-$1" -DREQUEST="$1" \
+      -DFAKE="$tmp/fake" 2>&1 | sed -n 's/^-- answer=//p')"
+    if [ "$got" != "$2" ]; then
+      fail "a request for $1 of an installed 2.3.0: answer '$got', wanted '$2'"
+    fi
+  }
+  answer 0.1 no
+  answer 2 yes
+  answer 3 no
+fi
 
 for flaw in skip_wal_sync skip_dir_sync drop_tombstones_early ignore_snapshots_in_compaction \
   skip_manifest_sync delete_live_files; do

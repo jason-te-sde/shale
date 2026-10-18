@@ -141,6 +141,23 @@ examples_against_install() {
   cmake --build "$work/build"
   "$work/build/basic" "$work/exdb" >"$work/basic.out"
   diff -u examples/basic.expected "$work/basic.out"
+  # The package is the one of version 0.1: a project that asks for it gets it, and one that asks for
+  # version 1 does not. The same project asks both times, so that the refusal can only be the
+  # version's. That the mode is SameMajorVersion and not AnyNewerVersion, which refuses version 1
+  # too, is pinned by tests/scripts/options_test.sh: an installation of 0.1 cannot show it.
+  mkdir "$work/version"
+  cat >"$work/version/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.25)
+project(version_check LANGUAGES CXX)
+find_package(shale ${REQUESTED} REQUIRED)
+EOF
+  CXX="$cxx" cmake -S "$work/version" -B "$work/version/build-0.1" -DREQUESTED=0.1 \
+    -DCMAKE_PREFIX_PATH="$work/prefix"
+  if CXX="$cxx" cmake -S "$work/version" -B "$work/version/build-1" -DREQUESTED=1 \
+    -DCMAKE_PREFIX_PATH="$work/prefix" >/dev/null 2>&1; then
+    echo "preflight: find_package(shale 1) was satisfied by the installed 0.1" >&2
+    exit 1
+  fi
   "$build_dir/tools/shalectl" --db="$work/db" --create put greeting hello
   got="$("$build_dir/tools/shalectl" --db="$work/db" get greeting)"
   if [ "$got" != hello ]; then
