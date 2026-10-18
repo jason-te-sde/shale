@@ -123,6 +123,12 @@ target_compile_definitions(sim_test PRIVATE
 set_tests_properties(sim_test PROPERTIES TIMEOUT 1800)
 shale_add_test(determinism SOURCES sim/determinism_test.cc LIBS shale_simulator)
 
+# The database under real threads, with its own scheduler thread and an in-memory Env. These are
+# the tests that ThreadSanitizer is for, and the sanitize job runs the whole suite three times under
+# it, these included. The label lets one run them alone: ctest -L stress.
+shale_add_test(concurrency SOURCES stress/concurrency_test.cc LIBS shale_dbtest)
+set_tests_properties(concurrency_test PROPERTIES LABELS stress)
+
 # Clang's thread-safety analysis is what makes SHALE_GUARDED_BY more than a comment, and nothing
 # else would notice if it silently stopped working. So the build itself is tested: one translation
 # unit that reads a guarded member without the lock must be rejected, and the same unit with the
