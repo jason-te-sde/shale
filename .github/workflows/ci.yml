@@ -223,13 +223,15 @@ jobs:
       # a failed run leaves, uploaded below, is what to look at. --min_compactions=1 makes a run that
       # never saw a table removed, so that no kill reached a compaction that merged, fail instead of
       # passing. The second run puts the fsync calls in the path as well: it is slower, and meant
-      # only to be killed in them now and then.
-      - name: Kill the writer twenty times, and check the database each time
+      # only to be killed in them now and then. Two hundred rounds take about a minute. Two flaws
+      # injected by hand, each open only for the width of one MANIFEST edit, were each caught in one
+      # of six local runs of twenty rounds, and in four and five of six runs of up to 150.
+      - name: Kill the writer two hundred times, and check the database each time
         env:
           SEED: ${{ github.run_number }}
         run: |
           mkdir -p "$RUNNER_TEMP/crash"
-          build/crash/tools/shale_crashtest --rounds=20 --seed="$SEED" --min_compactions=1 \
+          build/crash/tools/shale_crashtest --rounds=200 --seed="$SEED" --min_compactions=1 \
             --db="$RUNNER_TEMP/crash/db"
 
       - name: Kill a writer that syncs six times

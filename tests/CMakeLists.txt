@@ -186,7 +186,7 @@ if(SHALE_BUILD_TOOLS)
   set_tests_properties(crashtest_clean_dirs PROPERTIES FIXTURES_SETUP crashtest_dirs)
 
   # Three rounds, so that a break in the tool or in the engine's reopen shows up in every build of
-  # the suite. The crash job in .github/workflows/ci.yml runs twenty in a Release build, and asks
+  # the suite. The crash job in .github/workflows/ci.yml runs two hundred in a Release build, and asks
   # that the kills have reached a compaction, which three rounds of a slow build need not do.
   add_test(NAME crashtest_smoke
            COMMAND $<TARGET_FILE:shale_crashtest> --rounds=3 --seed=1 "--db=${_crashtest_smoke_db}")
