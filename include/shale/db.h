@@ -41,8 +41,10 @@ class DB {
   /// uses it at the same time; a second open fails with an IOError that names the LOCK file. It
   /// reads the MANIFEST that CURRENT names, replays the write-ahead logs that hold writes the
   /// tables do not, and starts a new log and a new MANIFEST. A write-ahead log that merely ends
-  /// short, as a crash leaves it, is not an error. See Options::paranoid_checks for one that is
-  /// damaged; a log that cannot be read fails the open with an IOError in either case.
+  /// short, as a crash leaves it, is not an error, and neither is one that begins after a gap in
+  /// the sequence numbers that a power loss left: it and the later logs are set aside as ".dropped"
+  /// files. See Options::paranoid_checks for a log that is damaged; a log that cannot be read fails
+  /// the open with an IOError in either case.
   ///
   /// Returns InvalidArgument for options that ValidateOptions() refuses, for a path with no
   /// database when create_if_missing is false, and for a path with one when error_if_exists is

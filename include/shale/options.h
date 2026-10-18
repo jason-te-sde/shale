@@ -124,7 +124,7 @@ struct ReadOptions {
 struct WriteOptions {
   /// Whether the write is on stable storage when the call returns. With it, an acknowledged write
   /// survives a crash of the machine; without it, only a crash of the process, and a power loss may
-  /// lose the most recent writes, though never one and keep an older one.
+  /// lose the most recent writes, but never loses a write and keeps a later one.
   bool sync = true;
 };
 
