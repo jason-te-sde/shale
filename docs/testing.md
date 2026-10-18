@@ -23,12 +23,12 @@ tested.
 
 | Layer | What it is for | Where |
 | --- | --- | --- |
-| **Unit tests** | One module at a time. The decoders of what is read from a disk (coding, log reader, block, table, write batch, version edit) are tested with truncated input and with lengths and counts that run past the end, and must return `Corruption` and never crash or read outside the buffer; the log reader, block and table tests add damaged bytes of their own (every bit of a record's length, random bit flips, a flipped byte in a block), and the fuzz targets feed random bytes to all of them. | `tests/util`, `tests/io`, `tests/core`, `tests/db` |
+| **Unit tests** | One module at a time. The decoders of what is read from a disk (coding, log reader, block, table, write batch, version edit) are tested with truncated input and with lengths and counts that run past the end, and must return `Corruption` and never crash or read outside the buffer; the log reader, block and table tests add damaged bytes of their own (every bit of a record's length, random bit flips, a flipped byte in a block), and the fuzz targets feed random bytes to the log reader, the block and table readers and the version edit decoder (and the varints it is made of), and, through the recovery of the table set, to the log reader again and to the edits of a MANIFEST. The write batch decoder is covered by `tests/io/write_batch_test.cc` alone. | `tests/util`, `tests/io`, `tests/core`, `tests/db` |
 | **The simulator** | The whole engine over a fault-injecting filesystem and a manual scheduler, driven by a seed, checked against a reference model after **every** step. This is where crash consistency is shown. | `tests/sim`, `tests/testkit` |
 | **Injected flaws** | Proof that the simulator can fail: six deliberate bugs, each of which must make it go red. | `scripts/run-flaws.sh`, the `flaws` CI job |
 | **Stress** | The engine under real threads and ThreadSanitizer: writers, readers, scans and snapshots racing flushes and compactions. | `tests/stress` |
-| **Sanitizers** | The whole suite under AddressSanitizer and UndefinedBehaviorSanitizer, and under ThreadSanitizer (three times). | the `asan` and `tsan` presets |
-| **Fuzzing** | Every decoder, the recovery of the table set, and the whole database under random operations, under libFuzzer with the sanitizers. | `fuzz/` |
+| **Sanitizers** | The whole suite under AddressSanitizer and UndefinedBehaviorSanitizer, and the suite under ThreadSanitizer, three times (the single-threaded simulator and its determinism test once, at 20 seeds). | the `asan` and `tsan` presets |
+| **Fuzzing** | The decoders of the log, blocks, tables and version edits, the recovery of the table set from `CURRENT` and a MANIFEST, and the whole database under random operations, under libFuzzer with the sanitizers. The write batch decoder is not fuzzed. | `fuzz/` |
 | **The crash test** | A real process writing to a real filesystem, killed with `SIGKILL` at a random moment, and the database checked after. | `tools/shale_crashtest.cc` |
 | **Tests of the repository** | The scripts that enforce layering, hygiene and links, the CMake options, and the documents' numbers. | `tests/scripts`, `tests/docs` |
 
@@ -55,7 +55,7 @@ ctest --preset dev -L stress                             # the stress tests only
 | **Fuzzing** | Needs a Clang that ships libFuzzer (Apple's does not; Homebrew's `llvm` does). `CC=clang CXX=clang++ cmake --preset fuzz && cmake --build --preset fuzz --target fuzz_targets`, then for a target: `build/fuzz/fuzz/fuzz_table -max_total_time=60 build/fuzz/found/fuzz_table build/fuzz/fuzz/corpus/fuzz_table`. The targets are listed in `fuzz/fuzz_targets.txt`; CI and `preflight.sh` read the same file. To reproduce a crash, give the target the crash file as its only argument. |
 | **The crash test** | `cmake -S . -B build/crash -G Ninja -DCMAKE_BUILD_TYPE=Release -DSHALE_BUILD_TESTS=OFF && cmake --build build/crash --target shale_crashtest`, then `build/crash/tools/shale_crashtest --rounds=200 --seed=1 --min_compactions=1 --db=/tmp/crash/db`. The directory must not hold a database. Exit status 0 passed, 1 a check failed, 2 usage, 3 the run could not reach what it is for. |
 | **Benchmark smoke** | `-DSHALE_BUILD_BENCH=ON -DSHALE_BUILD_TESTS=OFF`, then `shale_bench --num=20000 --sync_num=200 --repeat=1 --db=DIR`. It asserts completion and that every read matched what was written; it holds no number. The measured figures are in [benchmarks](benchmarks.md). |
-| **Coverage** | `cmake --preset coverage && cmake --build --preset coverage && ctest --preset coverage`, then `mkdir coverage && gcovr --root . --filter src/ --gcov-executable gcov-14 --fail-under-line 90 --txt-summary --html-details coverage/index.html` (the `gcov` that goes with your GCC). |
+| **Coverage** | `cmake --preset coverage && cmake --build --preset coverage && ctest --preset coverage`, then `mkdir -p coverage && gcovr --root . --filter src/ --gcov-executable gcov-14 --fail-under-line 90 --txt-summary --html-details coverage/index.html` (the `gcov` that goes with your GCC). |
 | **Everything CI does** | `scripts/preflight.sh`. It takes about half an hour. |
 
 ## The simulator
@@ -205,7 +205,7 @@ Six libFuzzer targets in `fuzz/`, built with AddressSanitizer and UndefinedBehav
 | `fuzz_log_reader` | the log reader, with oracles for what it must and must not report |
 | `fuzz_block` | the block decoder |
 | `fuzz_table` | `Table::Open`, `Get` and iteration, with oracles for the answers |
-| `fuzz_version_edit` | the version edit decoder and `ApplyEdit` |
+| `fuzz_version_edit` | the version edit decoder, with a round-trip oracle: an edit that decodes must encode back to what it was |
 | `fuzz_version_set` | the recovery of the table set from a fuzzed `CURRENT` and MANIFEST in memory |
 | `fuzz_db_ops` | the whole database, with the input read as a program of operations, compared with `ModelDB` |
 
@@ -235,9 +235,9 @@ a compaction leaves a database that opens and holds everything it said it did, o
 ## Tests of the repository itself
 
 - `tests/scripts/layering_test.sh` and `check-layering.sh`: which headers each layer may include; that
-  nothing under `src/` or `include/` writes to standard output or error; that nothing under `src/`
-  throws; and that no C++ under `src/`, `tests/` or `tools/` uses `std::rand` or `std::random_device` or
-  includes `<random>`.
+  nothing under `src/` or `include/` writes to standard output or error; that nothing under `src/` or
+  `include/` throws; and that no C++ under `include/`, `src/`, `tests/` or `tools/` uses `std::rand` or
+  `std::random_device` or includes `<random>`.
 - `tests/scripts/hygiene_test.sh` and `check-hygiene.sh`: no Chinese, Japanese or Korean characters, and
   none of the authorship trailers that `scripts/attribution-patterns.txt` lists, in any tracked file or
   commit message.

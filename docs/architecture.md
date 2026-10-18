@@ -89,7 +89,7 @@ with a driver that decides when each task runs.
 These rules are checked three ways: by link dependencies in `src/CMakeLists.txt`,
 by [`scripts/check-layering.sh`](../scripts/check-layering.sh), which reads every `#include` (and
 also checks that nothing under `src/` or `include/` writes to standard output or standard error,
-`src/util/check.cc` excepted, that nothing under `src/` throws, and that no C++ under `src/`, `tests/`
+`src/util/check.cc` excepted, that nothing under `src/` or `include/` throws, and that no C++ under `src/`, `tests/`
 or `tools/` uses `std::rand` or `std::random_device` or includes `<random>`), and by a test of the
 script itself that shows each rule alarming and passing (`tests/scripts/layering_test.sh`).
 

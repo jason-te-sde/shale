@@ -42,7 +42,7 @@ simulator uses:
   would then not mean the same run under libstdc++ and libc++.
 
 What enforces this: the link dependencies keep `shale_core` from reaching the I/O layer;
-`scripts/check-layering.sh` reads every `#include`, fails on `throw` under `src/`, and fails on
+`scripts/check-layering.sh` reads every `#include`, fails on `throw` under `include/` and `src/`, and fails on
 `std::rand`, `std::srand`, `rand(`, `srand(`, `std::random_device` and `#include <random>` under `src/`,
 `tests/` and `tools/` (its own test shows each of these going red). That there is **no mutable global
 state** is a rule that no tool checks, and that review holds: `Env::Default()` is a function-local static

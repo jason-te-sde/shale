@@ -177,6 +177,54 @@ TEST(BloomTest, VaryingLengthsHaveNoFalseNegativesAndLowFalsePositives) {
   }
 }
 
+// The share of absent keys that a filter lets through, for 100000 keys and 400000 absent probes, as
+// a fraction. The keys are those of `make_key` for 0 to 99999, and the probes those of
+// `make_absent`.
+double FalsePositiveRate(int bits_per_key, std::string (*make_key)(uint32_t),
+                         std::string (*make_absent)(uint32_t)) {
+  constexpr uint32_t kKeys = 100000;
+  constexpr uint32_t kProbes = 400000;
+  BloomFilterBuilder builder(bits_per_key);
+  for (uint32_t i = 0; i < kKeys; ++i) {
+    builder.AddKey(make_key(i));
+  }
+  const std::string filter = builder.Finish();
+  uint32_t false_positives = 0;
+  for (uint32_t i = 0; i < kProbes; ++i) {
+    if (BloomFilterMayMatch(filter, make_absent(i))) {
+      ++false_positives;
+    }
+  }
+  return static_cast<double>(false_positives) / kProbes;
+}
+
+std::string BinaryAbsent(uint32_t i) { return KeyOf(i + 1000000000U); }
+std::string TextKey(uint32_t i) { return "key" + std::to_string(i); }
+std::string TextAbsent(uint32_t i) { return "absent" + std::to_string(i); }
+
+// docs/operations.md and docs/design/0005-sstable-format.md quote these rates, so they are held
+// here and not left to a comment. Keys that are four binary bytes, counting up, are the harder case
+// for the hash (about 1.5% at 10 bits per key, 0.26% at 15); keys that are ten or so bytes of text
+// leak about half as much (0.8% and 0.1%). The bounds sit above what was measured, with room for
+// the choice of absent keys.
+TEST(BloomTest, FalsePositiveRatesAtTenAndFifteenBitsPerKey) {
+  const double binary_10 = FalsePositiveRate(10, KeyOf, BinaryAbsent);
+  const double binary_15 = FalsePositiveRate(15, KeyOf, BinaryAbsent);
+  const double text_10 = FalsePositiveRate(10, TextKey, TextAbsent);
+  const double text_15 = FalsePositiveRate(15, TextKey, TextAbsent);
+  EXPECT_LE(binary_10, 0.02) << "four binary bytes, 10 bits per key";
+  EXPECT_LE(binary_15, 0.004) << "four binary bytes, 15 bits per key";
+  EXPECT_LE(text_10, 0.011) << "text keys, 10 bits per key";
+  EXPECT_LE(text_15, 0.002) << "text keys, 15 bits per key";
+  RecordProperty("binary_10_percent", std::to_string(binary_10 * 100));
+  RecordProperty("binary_15_percent", std::to_string(binary_15 * 100));
+  RecordProperty("text_10_percent", std::to_string(text_10 * 100));
+  RecordProperty("text_15_percent", std::to_string(text_15 * 100));
+  // More bits per key leaks less, for both shapes.
+  EXPECT_LT(binary_15, binary_10);
+  EXPECT_LT(text_15, text_10);
+}
+
 TEST(BloomDeathTest, NegativeBitsPerKeyAborts) {
   EXPECT_DEATH(BloomFilterBuilder(-1), "bits_per_key");
 }
