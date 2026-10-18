@@ -95,8 +95,8 @@ cmake --build build/gcc
 ctest --test-dir build/gcc --output-on-failure --no-tests=error
 
 # The crash job of .github/workflows/ci.yml, on the Release build above: the tests of that build ran
-# only the three rounds of the smoke test. A failed run leaves its database in the directory that
-# the tool names.
+# only the three rounds of the smoke test. Twenty rounds here against the job's two hundred, to keep
+# the preflight short. A failed run leaves its database in the directory that the tool names.
 stage "crash test"
 crash_dir="$(mktemp -d)"
 build/gcc/tools/shale_crashtest --rounds=20 --seed=7 --min_compactions=1 --db="$crash_dir/db"

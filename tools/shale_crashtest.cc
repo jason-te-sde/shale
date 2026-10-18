@@ -16,8 +16,9 @@
 // the simulator's job, over a filesystem that can lose what was not synced. What it can show is
 // that a kill, at any point of a write, a flush or a compaction, leaves a database that opens and
 // holds everything it said it did. The parent watches the directory while the writer runs and
-// counts the tables that appear and the tables that are removed, so that a run says whether the
-// kills reached flushes and compactions at all. Run it with no arguments for the usage.
+// counts the tables that appear and the tables that are removed, so that a run shows whether the
+// writers flushed and compacted at all, which a kill needs before it can land in either; whether
+// one did is a matter of chance. Run it with no arguments for the usage.
 
 #include <poll.h>
 #include <signal.h>
@@ -29,7 +30,6 @@
 #include <array>
 #include <cerrno>
 #include <charconv>
-#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -43,6 +43,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include "cli_args.h"
@@ -380,8 +381,8 @@ class Acks {
 // there in one listing and gone in the next was removed, and a table is removed only after a
 // compaction has merged it into others. A table that is in a listing and was not in the one before
 // was written by a flush or by a compaction. Tables that come and go between two listings are not
-// seen, so the counts are least counts, which is the safe side for a claim that the kills reached
-// them.
+// seen, so the counts are least counts, which is the safe side for a claim that the writers did
+// that work.
 class TableWatch {
  public:
   TableWatch(Env* env, std::string dbname) : env_(env), dbname_(std::move(dbname)) {}
@@ -680,11 +681,20 @@ void Check(DB* db, const Config& config, const Model& model, uint64_t in_flight,
     landed_by_get = landed_by_get || (is_flying && here);
   }
 
+  // Each key at most once and in ascending order, which the map below would otherwise hide: a
+  // scan that returned a key twice, the newest value first, would compare as if it were right.
   std::map<std::string, std::string> found;
   {
     const std::unique_ptr<Iterator> scan = db->NewIterator(ReadOptions());
+    std::string previous;
     for (scan->SeekToFirst(); scan->Valid(); scan->Next()) {
-      found.emplace(std::string(scan->key()), std::string(scan->value()));
+      std::string name(scan->key());
+      if (!found.empty() && name <= previous) {
+        findings->AddOther("the scan returned " + Excerpt(name) +
+                           (name == previous ? " twice" : " after " + Excerpt(previous)));
+      }
+      found.emplace(name, std::string(scan->value()));
+      previous = std::move(name);
     }
     if (const Status s = scan->status(); !s.ok()) {
       findings->AddOther("the scan stopped with an error: " + s.ToString());
