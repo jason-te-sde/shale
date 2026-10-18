@@ -79,6 +79,11 @@ std::map<std::string, std::string> ExpectedFrom(const ModelDB& model, const std:
   return expected;
 }
 
+// The checks of the reads below are the simulator's I1 (CheckReadsMatch() in testkit/invariants.h)
+// for a database that nothing has disturbed, with two things that it does not have: the scan that
+// starts at a key, and a miss on a key that was deleted. They are written out here, in the form of
+// a trap, so that a failure is a crash that libFuzzer saves and not a Status to be read.
+
 // Reads `db` from `seek_to`, or from its first entry if that is empty, to its end, and requires
 // what it finds to be the model's contents from there on, in key order.
 void CheckScan(DB* db, const ModelDB& model, const std::string& seek_to) {

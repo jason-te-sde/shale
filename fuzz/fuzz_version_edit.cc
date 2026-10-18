@@ -18,15 +18,24 @@
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   const std::string_view input(reinterpret_cast<const char*>(data), size);
 
-  shale::VersionEdit edit;
+  // The edit that is decoded into is not empty, so that "leaves this edit as it was" on failure and
+  // "replaces this edit" on success are both something that can be seen: a decoder that cleared the
+  // edit before it failed, or that added to what was there, is not the one that is documented.
+  shale::VersionEdit sentinel;
+  sentinel.log_number = 1;
+  sentinel.deleted_files.insert({0, 1});
+
+  shale::VersionEdit edit = sentinel;
   const shale::Status s = edit.DecodeFrom(input);
   if (!s.ok()) {
-    // "Returns Corruption, with a message that starts "VersionEdit: ", and leaves this edit as it
-    // was": it was empty.
     SHALE_FUZZ_CHECK(s.IsCorruption());
-    SHALE_FUZZ_CHECK(edit == shale::VersionEdit{});
+    SHALE_FUZZ_CHECK(s.ToString().find("VersionEdit: ") != std::string::npos);
+    SHALE_FUZZ_CHECK(edit == sentinel);
     return 0;
   }
+  shale::VersionEdit fresh;
+  SHALE_FUZZ_CHECK(fresh.DecodeFrom(input).ok());
+  SHALE_FUZZ_CHECK(edit == fresh);
 
   // Descriptions are for logs and for the dump tools, which are pointed at damaged files.
   shale::fuzz::Touch(edit.DebugString());

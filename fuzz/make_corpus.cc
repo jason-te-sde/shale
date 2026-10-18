@@ -24,10 +24,13 @@
 #include "db_ops_program.h"
 #include "io/block_builder.h"
 #include "io/env_util.h"
+#include "io/log_format.h"
 #include "io/log_writer.h"
 #include "io/table_builder.h"
 #include "shale/env.h"
 #include "shale/status.h"
+#include "util/coding.h"
+#include "util/crc32c.h"
 #include "util/dbformat.h"
 #include "util/random.h"
 
@@ -87,6 +90,21 @@ std::string LogFile(const std::vector<std::string>& records) {
   return bytes;
 }
 
+// Returns one physical record of a log as the format lays it out, whatever the sequence it sits in:
+// the masked CRC32C of the type and the payload, the length, the type. A Writer cannot make the
+// sequences that the reader reports as defects, so those seeds are put together from these.
+std::string Fragment(log::RecordType type, std::string_view payload) {
+  const char type_byte = static_cast<char>(type);
+  const uint32_t crc = crc32c::Extend(crc32c::Value(&type_byte, 1), payload.data(), payload.size());
+  std::string fragment;
+  PutFixed32(&fragment, crc32c::Mask(crc));
+  fragment.push_back(static_cast<char>(payload.size() & 0xff));
+  fragment.push_back(static_cast<char>(payload.size() >> 8));
+  fragment.push_back(type_byte);
+  fragment.append(payload);
+  return fragment;
+}
+
 void SeedLogReader(const std::string& corpus_dir) {
   const SeedWriter out(corpus_dir, "fuzz_log_reader");
   out.Write("records", LogFile({"first", "", std::string(100, 'x'), "last record"}));
@@ -95,6 +113,20 @@ void SeedLogReader(const std::string& corpus_dir) {
   out.Write("fragmented", LogFile({std::string(100, 'a'), std::string(70000, 'b'),
                                    std::string(32768 - 7 - 7, 'c'), "tail"}));
   out.Write("empty", "");
+
+  // What a Writer never writes and the reader must meet: a FIRST that another FIRST follows, a
+  // FIRST that a FULL follows, and a MIDDLE and a LAST with no FIRST before them. Each leaves a
+  // record that is good after the defect, to be returned alone, and not joined to what the defect
+  // cut off.
+  const std::string a(100, 'a');
+  const std::string b(100, 'b');
+  const std::string c(100, 'c');
+  out.Write("first_after_first", Fragment(log::kFirstType, a) + Fragment(log::kFirstType, b) +
+                                     Fragment(log::kLastType, c));
+  out.Write("full_after_first", Fragment(log::kFirstType, a) + Fragment(log::kFullType, b) +
+                                    Fragment(log::kFullType, c));
+  out.Write("orphans", Fragment(log::kMiddleType, a) + Fragment(log::kLastType, b) +
+                           Fragment(log::kFullType, c));
 }
 
 // A block of internal keys, as a data block holds, and one of short plain keys.
