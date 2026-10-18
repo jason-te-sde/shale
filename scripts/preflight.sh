@@ -99,7 +99,8 @@ ctest --test-dir build/gcc --output-on-failure --no-tests=error
 # the tool names.
 stage "crash test"
 crash_dir="$(mktemp -d)"
-build/gcc/tools/shale_crashtest --rounds=20 --seed=7 --db="$crash_dir/db"
+build/gcc/tools/shale_crashtest --rounds=20 --seed=7 --min_compactions=1 --db="$crash_dir/db"
+build/gcc/tools/shale_crashtest --rounds=6 --seed=7 --sync --db="$crash_dir/db-sync"
 rm -rf "$crash_dir"
 
 stage "clang-tidy"

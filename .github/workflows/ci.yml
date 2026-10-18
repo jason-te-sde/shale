@@ -181,10 +181,11 @@ jobs:
           path: build/flaw-${{ matrix.flaw }}/sim-output.log
           if-no-files-found: ignore
 
-  # The engine under a real kill: a writer process is stopped with SIGKILL at a random moment, and
-  # every key it was told was stored must be there when the database is opened again. The simulator
-  # cannot show this, since its filesystem is not the real one, and the unit tests never kill a
-  # process. macOS is here because its Env syncs with F_FULLFSYNC, a different path from Linux's.
+  # The engine under a real kill: a writer process that puts and deletes keys is stopped with SIGKILL
+  # at a random moment, and the database that is opened again must hold exactly what the writer was
+  # told was done. The simulator cannot show this, since its filesystem is not the real one, and the
+  # unit tests never kill a process. macOS is here because it is a different kernel and a different
+  # filesystem under the same engine; a kill of the process cannot tell how the writes are synced.
   crash:
     name: crash (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -217,14 +218,26 @@ jobs:
       - name: Build
         run: cmake --build build/crash --target shale_crashtest
 
-      # The seed changes with every run, so that the kills land in different places; it is printed
-      # on the first line of the output, and with it a failed run can be repeated.
+      # The seed changes with every run, so that the kill delays and the keys differ. It does not
+      # repeat a run: where in the engine's work a kill lands depends on timing, so the database that
+      # a failed run leaves, uploaded below, is what to look at. --min_compactions=1 makes a run that
+      # never saw a table removed, so that no kill reached a compaction that merged, fail instead of
+      # passing. The second run puts the fsync calls in the path as well: it is slower, and meant
+      # only to be killed in them now and then.
       - name: Kill the writer twenty times, and check the database each time
         env:
           SEED: ${{ github.run_number }}
         run: |
           mkdir -p "$RUNNER_TEMP/crash"
-          build/crash/tools/shale_crashtest --rounds=20 --seed="$SEED" --db="$RUNNER_TEMP/crash/db"
+          build/crash/tools/shale_crashtest --rounds=20 --seed="$SEED" --min_compactions=1 \
+            --db="$RUNNER_TEMP/crash/db"
+
+      - name: Kill a writer that syncs six times
+        env:
+          SEED: ${{ github.run_number }}
+        run: |
+          build/crash/tools/shale_crashtest --rounds=6 --seed="$SEED" --sync \
+            --db="$RUNNER_TEMP/crash/db-sync"
 
       - name: Upload the database
         if: failure()
