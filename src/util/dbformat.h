@@ -11,6 +11,9 @@
 #include <string>
 #include <string_view>
 
+#include "util/check.h"
+#include "util/coding.h"
+
 namespace shale {
 
 /// The position of a write in the database's history. Every write gets the next number, so a
@@ -58,9 +61,16 @@ void AppendInternalKey(std::string* result, const ParsedInternalKey& key);
 /// is shorter than the 8-byte tag or the tag names a type that does not exist.
 bool ParseInternalKey(std::string_view internal_key, ParsedInternalKey* result);
 
+// The three functions below are defined here and not in dbformat.cc: an iterator calls them for
+// every entry it steps over, and a call that cannot be inlined costs more than the comparison.
+
 /// Returns the user key of an internal key, as a view into it. Aborts if the key is shorter than
 /// the 8-byte tag, since no code path may hand it anything else.
-std::string_view ExtractUserKey(std::string_view internal_key);
+inline std::string_view ExtractUserKey(std::string_view internal_key) {
+  SHALE_CHECK(internal_key.size() >= kInternalKeyTagSize,
+              "internal key is shorter than its 8-byte tag");
+  return internal_key.substr(0, internal_key.size() - kInternalKeyTagSize);
+}
 
 /// A three-way comparison of two keys: negative if `a` sorts first, positive if `b` does, and
 /// zero if they are equal, always returned as -1, 0 or 1.
@@ -68,12 +78,32 @@ using KeyCompareFn = int (*)(std::string_view a, std::string_view b);
 
 /// Orders user keys by their bytes as unsigned values, and a key before any longer key it is a
 /// prefix of. Returns -1, 0 or 1.
-int BytewiseCompare(std::string_view a, std::string_view b);
+inline int BytewiseCompare(std::string_view a, std::string_view b) {
+  // string_view::compare orders by unsigned bytes, since char_traits<char> does. Its result is
+  // only specified by sign, and callers rely on -1, 0 or 1.
+  const int r = a.compare(b);
+  return (r > 0) - (r < 0);
+}
 
 /// Orders internal keys by user key ascending, then by tag descending, so that for one user key
 /// the newest entry comes first, and at one sequence number a value comes before a deletion.
 /// Returns -1, 0 or 1.
-int CompareInternalKey(std::string_view a, std::string_view b);
+inline int CompareInternalKey(std::string_view a, std::string_view b) {
+  const int r = BytewiseCompare(ExtractUserKey(a), ExtractUserKey(b));
+  if (r != 0) {
+    return r;
+  }
+  // Same user key: the larger tag, which is the newer entry, sorts first.
+  const uint64_t a_tag = DecodeFixed64(a.data() + a.size() - kInternalKeyTagSize);
+  const uint64_t b_tag = DecodeFixed64(b.data() + b.size() - kInternalKeyTagSize);
+  if (a_tag > b_tag) {
+    return -1;
+  }
+  if (a_tag < b_tag) {
+    return 1;
+  }
+  return 0;
+}
 
 /// The key a point lookup searches for, in the forms the layers below it want.
 ///

@@ -37,36 +37,6 @@ bool ParseInternalKey(std::string_view internal_key, ParsedInternalKey* result) 
   return true;
 }
 
-std::string_view ExtractUserKey(std::string_view internal_key) {
-  SHALE_CHECK(internal_key.size() >= kInternalKeyTagSize,
-              "internal key is shorter than its 8-byte tag");
-  return internal_key.substr(0, internal_key.size() - kInternalKeyTagSize);
-}
-
-int BytewiseCompare(std::string_view a, std::string_view b) {
-  // string_view::compare orders by unsigned bytes, since char_traits<char> does. Its result is
-  // only specified by sign, and callers rely on -1, 0 or 1.
-  const int r = a.compare(b);
-  return (r > 0) - (r < 0);
-}
-
-int CompareInternalKey(std::string_view a, std::string_view b) {
-  const int r = BytewiseCompare(ExtractUserKey(a), ExtractUserKey(b));
-  if (r != 0) {
-    return r;
-  }
-  // Same user key: the larger tag, which is the newer entry, sorts first.
-  const uint64_t a_tag = DecodeFixed64(a.data() + a.size() - kInternalKeyTagSize);
-  const uint64_t b_tag = DecodeFixed64(b.data() + b.size() - kInternalKeyTagSize);
-  if (a_tag > b_tag) {
-    return -1;
-  }
-  if (a_tag < b_tag) {
-    return 1;
-  }
-  return 0;
-}
-
 LookupKey::LookupKey(std::string_view user_key, SequenceNumber sequence) {
   const uint64_t internal_size = uint64_t{user_key.size()} + kInternalKeyTagSize;
   SHALE_CHECK(internal_size <= std::numeric_limits<uint32_t>::max(),
