@@ -1,0 +1,684 @@
+Evidence behind the explanations in docs/benchmarks.md
+=====================================================
+
+This file holds what was recorded while looking for the reason of each row where shale is slower
+than LevelDB: system call counts, the engines' own counters, and where the time of the calling
+thread went. None of it is a result that the tables quote. The tables of docs/benchmarks.md are
+made from the four JSON files next to this one. What is here comes from separate runs of the same
+workloads, on the same machine and the same Release build, made with the probe at the end of this
+file (which calls shale_bench's own workload functions), while the machine was not held quiet. It
+gives counts and shares. The speeds that the probe printed are not recorded, and are not quoted.
+The probe is compiled with `c++ -O2 -g -std=c++20` and linked with the libraries of the Release build.
+
+How each part was made:
+
+  * System calls: a library loaded with DYLD_INSERT_LIBRARIES that counts pread, read, write, mmap,
+    munmap, fsync and fcntl(F_FULLFSYNC) (interpose.c, at the end of this file), and a snapshot of
+    the counts around each benchmark (probe.cc, at the end of this file).
+  * Counters: shale.stats and leveldb.stats, read through each engine's GetProperty after each
+    benchmark. They count from the open of the database, and overwrite opens it again after its
+    load, so overwrite's figures are the overwrites alone.
+  * Where the time went: `sample <pid> <seconds>` on the probe, started a moment after the
+    benchmark began, so that it samples the timed loop. Each thread is reported on its own. The
+    percentages are shares of the samples of the thread that calls the engine (the one that runs
+    the benchmark loop), by the function at the top of the stack. A share is of that thread's time
+    in that run, and is not a time. "Compacted" means that the probe compacted the database between
+    overwrite and the first read, as shale_bench --compact_before_reads does.
+
+0. The machine and the four runs of the tables
+------------------------------------------------------------
+Taken before the runs (machine record), and by the script that ran each one (load, power, time).
+
+  == date
+  2026-10-18 03:09:24 -0700
+  == sysctl
+  Apple M2
+  hw.ncpu=8 hw.physicalcpu=8 hw.perflevel0.logicalcpu=4 hw.perflevel1.logicalcpu=4 hw.memsize=17179869184
+  == sw_vers
+  ProductName:		macOS
+  ProductVersion:		26.6.2
+  BuildVersion:		25G83
+  == uname -srm
+  Darwin 25.6.0 arm64
+  == pmset
+  Now drawing from 'AC Power'
+   -InternalBattery-0	100%; charged; 0:00 remaining present: true
+  == disk
+     Volume Name:               Data
+     File System Personality:   APFS
+     Protocol:                  Apple Fabric
+     Device Location:           Internal
+     Solid State:               Yes
+  /dev/disk3s5   228Gi   193Gi    13Gi    94%    2.4M  133M    2%   /System/Volumes/Data
+  == compiler
+  Apple clang version 21.0.0 (clang-2100.3.34.2)
+  Target: arm64-apple-darwin25.6.0
+  Thread model: posix
+  InstalledDir: /Library/Developer/CommandLineTools/usr/bin
+  == cmake
+  cmake version 4.4.3
+  == leveldb
+  leveldb 1.23_2
+  snappy 1.3.1
+  /opt/homebrew/opt/leveldb/lib/libleveldb.dylib:
+  	/opt/homebrew/opt/leveldb/lib/libleveldb.1.dylib (compatibility version 1.0.0, current version 1.23.0)
+  	/opt/homebrew/opt/snappy/lib/libsnappy.1.dylib (compatibility version 1.0.0, current version 1.2.2)
+  	/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2000.63.0)
+  	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)
+
+shale: docs/benchmarks/2026-10-m2.json
+  quiet: load average (1 min) 1.85, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process
+  start: 2026-10-18 03:44:08 -0700
+  uptime at start:  3:44  up 2 days,  2:48, 1 user, load averages: 1.85 2.28 2.63
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims build/release/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2.json
+  exit status: 0
+  end: 2026-10-18 03:47:14 -0700
+  uptime at end:  3:47  up 2 days,  2:51, 1 user, load averages: 2.82 2.59 2.68
+
+LevelDB: docs/benchmarks/2026-10-m2-leveldb.json
+  quiet: load average (1 min) 1.95, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process
+  start: 2026-10-18 03:49:27 -0700
+  uptime at start:  3:49  up 2 days,  2:53, 1 user, load averages: 1.95 2.41 2.60
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims build/release/tools/shale_bench --engine=leveldb --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-leveldb.json
+  exit status: 0
+  end: 2026-10-18 03:51:53 -0700
+  uptime at end:  3:51  up 2 days,  2:55, 1 user, load averages: 3.61 2.82 2.72
+
+shale, compacted before the reads: docs/benchmarks/2026-10-m2-compacted.json
+  quiet: load average (1 min) 1.89, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process
+  start: 2026-10-18 04:13:40 -0700
+  uptime at start:  4:13  up 2 days,  3:17, 1 user, load averages: 1.89 2.63 2.75
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims build/release/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-compacted.json --compact_before_reads
+  exit status: 0
+  end: 2026-10-18 04:16:22 -0700
+  uptime at end:  4:16  up 2 days,  3:20, 1 user, load averages: 3.39 2.92 2.84
+
+LevelDB, compacted before the reads: docs/benchmarks/2026-10-m2-leveldb-compacted.json
+  quiet: load average (1 min) 1.93, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process
+  start: 2026-10-18 04:21:38 -0700
+  uptime at start:  4:21  up 2 days,  3:25, 1 user, load averages: 1.93 2.48 2.66
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims build/release/tools/shale_bench --engine=leveldb --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-leveldb-compacted.json --compact_before_reads
+  exit status: 0
+  end: 2026-10-18 04:24:07 -0700
+  uptime at end:  4:24  up 2 days,  3:28, 1 user, load averages: 2.79 2.60 2.68
+
+1. Syncing: what a synced write does on each engine
+------------------------------------------------------------
+shale_bench --engine=<engine> --benchmarks=fillsync --sync_num=200 --repeat=1, with the counting library.
+
+shale:
+  fillsync              390      0.04   2984.62   3371.71    4004.58       1.19  200 keys in the database
+  interpose: pread=0 (0 bytes) read=0 write=210 (27981 bytes) pwrite=0 mmap=1 munmap=0
+  interpose: F_FULLFSYNC=209 (failed 0) fsync=0 other_fcntl=1
+
+leveldb:
+  fillsync              383      0.04   2987.71   4011.29    4139.79        n/a  200 keys in the database
+  interpose: pread=0 (0 bytes) read=3 write=205 (27723 bytes) pwrite=0 mmap=2 munmap=0
+  interpose: F_FULLFSYNC=206 (failed 0) fsync=0 other_fcntl=3
+
+2. System calls around each benchmark (probe, 1,000,000 keys; one run of each read benchmark)
+------------------------------------------------------------
+A SNAP line counts the calls since the SNAP line before it, taken at the point that its label names.
+'before X' therefore covers what ran since the line above: the benchmark that came before X, and any
+setup. 'loop start X' is taken when X's loop begins, and 'after 1 x X' counts the run of X.
+
+Not compacted (the first pass of the tables):
+
+shale:
+  SNAP before fillrandom            pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=1 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP before overwrite             pread=83689 (350622727 B) read=0 write=1007465 (572752580 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=554 fsync=0
+  SNAP before readrandom            pread=125081 (525251329 B) read=6 write=2011682 (950118385 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=920 fsync=0
+  SNAP loop start readrandom        pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP after 1 x readrandom         pread=958642 (3936940544 B) read=0 write=1107 (63216301 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=83 fsync=0
+  SNAP before readmissing           pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP loop start readmissing       pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP after 1 x readmissing        pread=16990 (69954621 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP before readseq               pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP loop start readseq           pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP after 1 x readseq            pread=33051 (135648492 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP before seekrandom            pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP loop start seekrandom        pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP after 1 x seekrandom         pread=2255061 (9282112643 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+
+leveldb:
+  SNAP before fillrandom            pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=1 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP before overwrite             pread=0 (0 B) read=3 write=1113322 (599256015 B) pwrite=0 mmap=222 munmap=172 F_FULLFSYNC=375 fsync=0
+  SNAP before readrandom            pread=0 (0 B) read=7 write=2167138 (947871003 B) pwrite=0 mmap=312 munmap=319 F_FULLFSYNC=625 fsync=0
+  SNAP loop start readrandom        pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=1 fsync=0
+  SNAP after 1 x readrandom         pread=0 (0 B) read=0 write=75195 (314345022 B) pwrite=0 mmap=246 munmap=218 F_FULLFSYNC=278 fsync=0
+  SNAP before readmissing           pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP loop start readmissing       pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP after 1 x readmissing        pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP before readseq               pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP loop start readseq           pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP after 1 x readseq            pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP before seekrandom            pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP loop start seekrandom        pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP after 1 x seekrandom         pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+
+Compacted before the reads (the second pass of the tables):
+
+shale:
+  SNAP before fillrandom            pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=1 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP before overwrite             pread=85751 (359194074 B) read=0 write=1007596 (580345354 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=565 fsync=0
+  SNAP before readrandom            pread=124475 (522722224 B) read=6 write=2011667 (949376013 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=913 fsync=0
+  SNAP loop start readrandom        pread=76104 (316394678 B) read=0 write=4697 (277442594 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=275 fsync=0
+  SNAP after 1 x readrandom         pread=926670 (3801173927 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP before readmissing           pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP loop start readmissing       pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP after 1 x readmissing        pread=5453 (22368232 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP before readseq               pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP loop start readseq           pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP after 1 x readseq            pread=27710 (113665497 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP before seekrandom            pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP loop start seekrandom        pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP after 1 x seekrandom         pread=953108 (3909625745 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+
+leveldb:
+  SNAP before fillrandom            pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=1 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP before overwrite             pread=0 (0 B) read=3 write=1113131 (598431270 B) pwrite=0 mmap=222 munmap=172 F_FULLFSYNC=375 fsync=0
+  SNAP before readrandom            pread=0 (0 B) read=7 write=2166627 (945735683 B) pwrite=0 mmap=310 munmap=315 F_FULLFSYNC=621 fsync=0
+  SNAP loop start readrandom        pread=0 (0 B) read=0 write=72454 (302886497 B) pwrite=0 mmap=235 munmap=223 F_FULLFSYNC=262 fsync=0
+  SNAP after 1 x readrandom         pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP before readmissing           pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP loop start readmissing       pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP after 1 x readmissing        pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP before readseq               pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP loop start readseq           pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP after 1 x readseq            pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP before seekrandom            pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP loop start seekrandom        pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  SNAP after 1 x seekrandom         pread=0 (0 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+
+3. The engines' own counters (probe: fillseq, fillrandom, overwrite and readrandom, each on a new database)
+------------------------------------------------------------
+shale:
+  after fillseq:
+  shale stats
+  Level 0: 3 files, 9706763 bytes
+  Level 1: 3 files, 9701265 bytes
+  Level 2: 29 files, 93783952 bytes
+  Level 3: 0 files, 0 bytes
+  Level 4: 0 files, 0 bytes
+  Level 5: 0 files, 0 bytes
+  Level 6: 0 files, 0 bytes
+  Counters: flushes=35 compactions=0 trivial_moves=61 tombstones_dropped=0 shadowed_dropped=0 user_bytes_written=116000000 wal_bytes_written=138028602 flush_bytes_written=113191980 compaction_bytes_read=0 compaction_bytes_written=0 write_groups=1000000 wal_syncs=0 write_slowdowns=0 write_stops=0 bg_errors=0
+
+  after fillrandom:
+  shale stats
+  Level 0: 3 files, 9789401 bytes
+  Level 1: 7 files, 14107394 bytes
+  Level 2: 30 files, 61619677 bytes
+  Level 3: 0 files, 0 bytes
+  Level 4: 0 files, 0 bytes
+  Level 5: 0 files, 0 bytes
+  Level 6: 0 files, 0 bytes
+  Counters: flushes=35 compactions=35 trivial_moves=10 tombstones_dropped=0 shadowed_dropped=239628 user_bytes_written=116000000 wal_bytes_written=138028602 flush_bytes_written=114157885 compaction_bytes_read=351322692 compaction_bytes_written=322681279 write_groups=1000000 wal_syncs=0 write_slowdowns=0 write_stops=0 bg_errors=0
+
+  after overwrite:
+  shale stats
+  Level 0: 4 files, 13051159 bytes
+  Level 1: 11 files, 22518391 bytes
+  Level 2: 52 files, 109721096 bytes
+  Level 3: 4 files, 12934177 bytes
+  Level 4: 0 files, 0 bytes
+  Level 5: 0 files, 0 bytes
+  Level 6: 0 files, 0 bytes
+  Counters: flushes=35 compactions=35 trivial_moves=0 tombstones_dropped=0 shadowed_dropped=613847 user_bytes_written=116000000 wal_bytes_written=138028602 flush_bytes_written=114158760 compaction_bytes_read=482296722 compaction_bytes_written=410157305 write_groups=1000000 wal_syncs=0 write_slowdowns=372 write_stops=0 bg_errors=0
+
+  after readrandom:
+  shale stats
+  Level 0: 0 files, 0 bytes
+  Level 1: 4 files, 8500732 bytes
+  Level 2: 51 files, 104342574 bytes
+  Level 3: 9 files, 20994908 bytes
+  Level 4: 0 files, 0 bytes
+  Level 5: 0 files, 0 bytes
+  Level 6: 0 files, 0 bytes
+  Counters: flushes=35 compactions=50 trivial_moves=2 tombstones_dropped=0 shadowed_dropped=822587 user_bytes_written=116000000 wal_bytes_written=138028602 flush_bytes_written=114158760 compaction_bytes_read=649579748 compaction_bytes_written=553053722 write_groups=1000000 wal_syncs=0 write_slowdowns=372 write_stops=0 bg_errors=0
+
+
+leveldb:
+  after fillseq:
+                                 Compactions
+  Level  Files Size(MB) Time(sec) Read(MB) Write(MB)
+  --------------------------------------------------
+    2       31       97         1        0       110
+    3        4       13         0        0         0
+
+  after fillrandom:
+                                 Compactions
+  Level  Files Size(MB) Time(sec) Read(MB) Write(MB)
+  --------------------------------------------------
+    0        5       16         1        0       104
+    1        5        8         1      137       130
+    2       31       59         1      203       189
+
+  after overwrite:
+                                 Compactions
+  Level  Files Size(MB) Time(sec) Read(MB) Write(MB)
+  --------------------------------------------------
+    0        2        6         1        0       107
+    1       10       17         1      167       157
+    2       31       59         1      180       165
+    3       67      111         0        0         0
+
+  after readrandom:
+                                 Compactions
+  Level  Files Size(MB) Time(sec) Read(MB) Write(MB)
+  --------------------------------------------------
+    0        0        0         1        0       107
+    1        0        0         1      181       170
+    2        0        0         2      297       270
+    3       67      111         1      255       185
+
+
+3b. The shape of the tree after the compaction (probe: fillrandom, overwrite, compacted, readmissing)
+------------------------------------------------------------
+shale:
+  after readmissing:
+  shale stats
+  Level 0: 0 files, 0 bytes
+  Level 1: 0 files, 0 bytes
+  Level 2: 0 files, 0 bytes
+  Level 3: 55 files, 116197631 bytes
+  Level 4: 0 files, 0 bytes
+  Level 5: 0 files, 0 bytes
+  Level 6: 0 files, 0 bytes
+  Counters: flushes=36 compactions=40 trivial_moves=0 tombstones_dropped=0 shadowed_dropped=1000000 user_bytes_written=116000000 wal_bytes_written=138028602 flush_bytes_written=117199826 compaction_bytes_read=812080781 compaction_bytes_written=694873106 write_groups=1000000 wal_syncs=0 write_slowdowns=339 write_stops=0 bg_errors=0
+
+
+leveldb:
+  after readmissing:
+                                 Compactions
+  Level  Files Size(MB) Time(sec) Read(MB) Write(MB)
+  --------------------------------------------------
+    0        0        0         0        0       109
+    1        0        0         1      189       178
+    2        0        0         1      281       254
+    3       56      111         1      248       178
+
+
+4. Where the time of the calling thread went (probe, sampled with `sample`)
+------------------------------------------------------------
+Share of the thread's samples, by kind of function at the top of the stack.
+
+Not compacted (the first pass of the tables):
+  shale    fillseq     1548 samples; write syscall (log append) 59.2%; waiting for the DB mutex 11.2%; F_FULLFSYNC 10.9%; engine and harness code 9.9%; memmove, memcmp 4.1%; malloc, free, memset 2.2%; clock reads (harness) 2.1%; crc32c 0.2%; Status::ok() (out of line) 0.2%
+  leveldb  fillseq     780 samples; write syscall (log append) 79.7%; engine and harness code 11.2%; memmove, memcmp 5.3%; clock reads (harness) 2.1%; malloc, free, memset 1.3%; crc32c 0.4%; waiting for the DB mutex 0.1%
+  shale    fillrandom  2316 samples; write syscall (log append) 66.0%; engine and harness code 11.7%; F_FULLFSYNC 10.6%; waiting for the DB mutex 5.0%; memmove, memcmp 3.4%; malloc, free, memset 1.6%; clock reads (harness) 1.4%; crc32c 0.2%; Status::ok() (out of line) 0.0%
+  leveldb  fillrandom  2326 samples; write syscall (log append) 82.4%; engine and harness code 11.0%; memmove, memcmp 2.6%; clock reads (harness) 1.8%; malloc, free, memset 1.2%; crc32c 0.8%; waiting for the DB mutex 0.2%
+  shale    overwrite   3070 samples; write syscall (log append) 63.7%; engine and harness code 10.5%; F_FULLFSYNC 9.2%; sleep (write slowdown, 1 ms) 6.8%; waiting for the DB mutex 3.7%; memmove, memcmp 3.2%; malloc, free, memset 1.4%; clock reads (harness) 1.2%; crc32c 0.2%; Status::ok() (out of line) 0.2%
+  leveldb  overwrite   2314 samples; write syscall (log append) 79.4%; engine and harness code 12.7%; memmove, memcmp 3.9%; clock reads (harness) 1.6%; malloc, free, memset 1.3%; crc32c 0.6%; waiting for the DB mutex 0.4%
+  shale    readrandom  2317 samples; engine and harness code 34.8%; pread syscall 26.0%; malloc, free, memset 14.9%; crc32c 12.9%; memmove, memcmp 6.0%; clock reads (harness) 4.2%; waiting for the DB mutex 1.1%; Status::ok() (out of line) 0.0%
+  leveldb  readrandom  1532 samples; crc32c 38.1%; engine and harness code 36.6%; malloc, free, memset 11.2%; memmove, memcmp 8.2%; clock reads (harness) 5.6%; waiting for the DB mutex 0.5%
+  shale    readseq     4645 samples; engine and harness code 59.7%; Status::ok() (out of line) 12.5%; pread syscall 8.0%; memmove, memcmp 7.9%; crc32c 5.8%; malloc, free, memset 5.7%; clock reads (harness) 0.4%
+  leveldb  readseq     4639 samples; engine and harness code 51.1%; crc32c 24.4%; memmove, memcmp 21.4%; malloc, free, memset 2.3%; clock reads (harness) 0.7%; waiting for the DB mutex 0.0%
+  shale    seekrandom  4219 samples; engine and harness code 35.0%; malloc, free, memset 24.3%; pread syscall 21.7%; crc32c 10.3%; memmove, memcmp 5.4%; clock reads (harness) 1.9%; Status::ok() (out of line) 0.9%; waiting for the DB mutex 0.5%
+  leveldb  seekrandom  1700 samples; crc32c 47.2%; engine and harness code 28.1%; malloc, free, memset 11.6%; memmove, memcmp 11.2%; clock reads (harness) 1.9%
+
+Compacted before the reads (the second pass of the tables):
+  shale    readrandom  1849 samples; pread syscall 33.6%; engine and harness code 23.9%; malloc, free, memset 17.5%; crc32c 15.1%; memmove, memcmp 5.0%; clock reads (harness) 4.8%; Status::ok() (out of line) 0.1%
+  leveldb  readrandom  1261 samples; crc32c 46.7%; engine and harness code 28.3%; malloc, free, memset 9.4%; memmove, memcmp 7.9%; clock reads (harness) 7.7%
+  shale    readseq     4619 samples; engine and harness code 57.0%; Status::ok() (out of line) 11.2%; pread syscall 9.0%; malloc, free, memset 8.3%; crc32c 7.3%; memmove, memcmp 7.3%
+  leveldb  readseq     4619 samples; engine and harness code 55.5%; crc32c 31.8%; memmove, memcmp 8.4%; malloc, free, memset 3.2%; clock reads (harness) 1.1%
+  shale    seekrandom  2513 samples; engine and harness code 28.9%; malloc, free, memset 26.9%; pread syscall 23.2%; crc32c 11.9%; memmove, memcmp 4.9%; clock reads (harness) 3.0%; Status::ok() (out of line) 1.2%
+  leveldb  seekrandom  1539 samples; crc32c 40.9%; engine and harness code 28.7%; malloc, free, memset 17.7%; memmove, memcmp 6.8%; clock reads (harness) 5.8%
+
+5. The calling thread and the background thread by call stack (not compacted)
+------------------------------------------------------------
+'inclusive' is the samples in the named function and what it called; 'self' lines are the top of the
+stack, those of 3% or more. Thread lines say how many samples the thread had in all.
+
+shale fillseq (the first thread is the one that calls Put, the second is the background thread):
+  --- thread 'Thread   DispatchQueue_1: com.apple.main-thread  (se': 1548 samples
+    self    917  59.2%  write
+    self    173  11.2%  __psynch_mutexwait
+    self    168  10.9%  __fcntl
+    inclusive    170  11.0%  SwitchMemTable
+    inclusive     95   6.1%  PosixWritableFile::Sync
+    inclusive     73   4.7%  PosixEnv::SyncDir
+    inclusive   1217  78.6%  CommitGroup
+    inclusive    178  11.5%  std::mutex::lock
+    inclusive      0   0.0%  LogAndApply
+    inclusive      0   0.0%  FlushImmutable
+  --- thread 'Thread': 1548 samples
+    self   1156  74.7%  __psynch_cvwait
+    self    307  19.8%  __fcntl
+    inclusive      0   0.0%  SwitchMemTable
+    inclusive    254  16.4%  PosixWritableFile::Sync
+    inclusive     53   3.4%  PosixEnv::SyncDir
+    inclusive      0   0.0%  CommitGroup
+    inclusive      0   0.0%  std::mutex::lock
+    inclusive    170  11.0%  LogAndApply
+    inclusive    274  17.7%  FlushImmutable
+
+shale overwrite (the first thread is the one that calls Put, the second is the background thread):
+  --- thread 'Thread   DispatchQueue_1: com.apple.main-thread  (se': 3070 samples
+    self   1956  63.7%  write
+    self    281   9.2%  __fcntl
+    self    208   6.8%  __semwait_signal
+    self    114   3.7%  __psynch_mutexwait
+    self    113   3.7%  shale::SkipList<char const*, shale::MemTable::KeyComparator>::Insert(char const* const&)
+    inclusive    287   9.3%  SwitchMemTable
+    inclusive    221   7.2%  PosixWritableFile::Sync
+    inclusive     60   2.0%  PosixEnv::SyncDir
+    inclusive   2356  76.7%  CommitGroup
+    inclusive    120   3.9%  std::mutex::lock
+    inclusive      0   0.0%  LogAndApply
+    inclusive      0   0.0%  FlushImmutable
+    inclusive      0   0.0%  BackgroundCompaction
+  --- thread 'Thread': 3070 samples
+    self   1404  45.7%  __fcntl
+    self    204   6.6%  write
+    self    160   5.2%  shale::Status::ok() const
+    self    160   5.2%  __psynch_cvwait
+    inclusive      0   0.0%  SwitchMemTable
+    inclusive   1000  32.6%  PosixWritableFile::Sync
+    inclusive    421  13.7%  PosixEnv::SyncDir
+    inclusive      0   0.0%  CommitGroup
+    inclusive     13   0.4%  std::mutex::lock
+    inclusive    111   3.6%  LogAndApply
+    inclusive    389  12.7%  FlushImmutable
+    inclusive   2815  91.7%  BackgroundCompaction
+
+leveldb overwrite (the same threads):
+  --- thread 'Thread   DispatchQueue_1: com.apple.main-thread  (se': 2314 samples
+    self   1838  79.4%  write
+    self    144   6.2%  leveldb::SkipList<char const*, leveldb::MemTable::KeyComparator>::FindGreaterOrEqual(char const* const&, level
+  --- thread 'Thread': 2314 samples
+    self   1003  43.3%  __fcntl
+    self    398  17.2%  __psynch_cvwait
+    self    370  16.0%  write
+    self     76   3.3%  leveldb::crc32c::Extend(unsigned int, char const*, unsigned long)
+
+shale readseq (not compacted), the largest shares of the calling thread:
+  --- thread 'Thread   DispatchQueue_1: com.apple.main-thread  (se': 4645 samples
+    self    580  12.5%  shale::Status::ok() const
+    self    373   8.0%  pread
+    self    333   7.2%  shale::(anonymous namespace)::BoundedBlockIterator::Valid() const
+    self    269   5.8%  shale::crc32c::Extend(unsigned int, char const*, unsigned long)
+    self    226   4.9%  shale::Block::Iter::Valid() const
+    self    213   4.6%  shale::(anonymous namespace)::TwoLevelIterator::key() const
+    self    207   4.5%  shale::(anonymous namespace)::MergingIterator::Next()
+    self    179   3.9%  shale::(anonymous namespace)::NamedTableIterator::Valid() const
+    self    168   3.6%  _platform_memcmp
+    self    168   3.6%  shale::(anonymous namespace)::TwoLevelIterator::Valid() const
+    self    145   3.1%  shale::CompareInternalKey(std::basic_string_view<char>, std::basic_string_view<char>)
+    self    138   3.0%  _platform_memmove
+    self    119   2.6%  shale::(anonymous namespace)::OrderedIterator::Valid() const
+
+leveldb readseq (not compacted), the largest shares of the calling thread:
+  --- thread 'Thread   DispatchQueue_1: com.apple.main-thread  (se': 4639 samples
+    self   1131  24.4%  leveldb::crc32c::Extend(unsigned int, char const*, unsigned long)
+    self    629  13.6%  _platform_memcmp
+    self    280   6.0%  leveldb::IteratorWrapper::Next()
+    self    263   5.7%  leveldb::Block::Iter::ParseNextKey()
+    self    261   5.6%  leveldb::(anonymous namespace)::MergingIterator::FindSmallest()
+    self    237   5.1%  _platform_memmove
+    self    128   2.8%  std::basic_string<char>::resize(unsigned long, char)
+    self    123   2.7%  leveldb::InternalKeyComparator::Compare(leveldb::Slice const&, leveldb::Slice const&) const
+    self    119   2.6%  DYLD-STUB$$memcmp
+    self    107   2.3%  std::basic_string<char>::append(char const*, unsigned long)
+    self    104   2.2%  leveldb::(anonymous namespace)::DBIter::ParseKey(leveldb::ParsedInternalKey*)
+    self     90   1.9%  leveldb::(anonymous namespace)::BytewiseComparatorImpl::Compare(leveldb::Slice const&, leveldb::Slice const&)
+    self     85   1.8%  leveldb::(anonymous namespace)::DBIter::FindNextUserEntry(bool, std::basic_string<char>*)
+
+6. Sources of the probe and of the counting library
+------------------------------------------------------------
+--- probe.cc ---
+// A scratch probe, not part of the repository: runs the shale_bench workloads once through the
+// same functions, on shale or on LevelDB, and prints the engine's own counters after each
+// benchmark, so that a row can be explained from what the engine says it did.
+#include <leveldb/cache.h>
+#include <leveldb/db.h>
+#include <leveldb/filter_policy.h>
+#include <leveldb/options.h>
+
+#include <dlfcn.h>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "bench_engine.h"
+#include "bench_workloads.h"
+#include "shale/db.h"
+#include "shale/iterator.h"
+#include "shale/options.h"
+
+using namespace shale;
+
+static void Snap(const std::string& label) {
+  using Fn = void (*)(const char*);
+  static Fn fn = reinterpret_cast<Fn>(dlsym(RTLD_DEFAULT, "interpose_snapshot"));
+  if (fn) fn(label.c_str());
+}
+
+class ShaleProbe : public BenchEngine {
+ public:
+  std::string Name() const override { return "shale"; }
+  Status Open(const std::string& path, bool fresh) override {
+    Close();
+    Options o;
+    o.create_if_missing = true;
+    if (fresh) {
+      Status s = DestroyDB(path, o);
+      if (!s.ok()) return s;
+    }
+    Status r = DB::Open(o, path, &db_);
+    std::printf("MARK opened fresh=%d\n", fresh ? 1 : 0); std::fflush(stdout);
+    return r;
+  }
+  Status Put(std::string_view k, std::string_view v, bool sync) override {
+    WriteOptions w;
+    w.sync = sync;
+    return db_->Put(w, k, v);
+  }
+  Status Get(std::string_view k, std::string* v) override { return db_->Get(ReadOptions(), k, v); }
+  Status Scan(std::string_view from, size_t limit, size_t* seen) override {
+    std::unique_ptr<Iterator> it = db_->NewIterator(ReadOptions());
+    if (from.empty()) it->SeekToFirst(); else it->Seek(from);
+    size_t n = 0;
+    for (; it->Valid() && (limit == 0 || n < limit); it->Next()) { (void)it->key(); (void)it->value(); n++; }
+    *seen = n;
+    return it->status();
+  }
+  Status CompactAll() override { return db_->CompactRange(std::nullopt, std::nullopt); }
+  std::string WriteAmplification() override { std::string s; db_->GetProperty("shale.write-amplification", &s); return s; }
+  void Close() override { db_.reset(); }
+  std::string Props() {
+    std::string s, t;
+    db_->GetProperty("shale.stats", &s);
+    return s;
+  }
+ private:
+  std::unique_ptr<DB> db_;
+};
+
+static Status Conv(const leveldb::Status& s) {
+  if (s.ok()) return Status::OK();
+  if (s.IsNotFound()) return Status::NotFound("leveldb");
+  return Status::IOError("leveldb", s.ToString());
+}
+
+class LevelDBProbe : public BenchEngine {
+ public:
+  LevelDBProbe() : filter_(leveldb::NewBloomFilterPolicy(10)) {
+    o_.create_if_missing = true;
+    o_.write_buffer_size = 4 << 20;
+    o_.block_size = 4096;
+    o_.filter_policy = filter_.get();
+    o_.max_open_files = 1000;
+    o_.compression = leveldb::kNoCompression;
+  }
+  std::string Name() const override { return "leveldb"; }
+  Status Open(const std::string& path, bool fresh) override {
+    Close();
+    cache_.reset(leveldb::NewLRUCache(8 << 20));
+    o_.block_cache = cache_.get();
+    if (fresh) leveldb::DestroyDB(path, o_);
+    leveldb::DB* db = nullptr;
+    auto s = leveldb::DB::Open(o_, path, &db);
+    db_.reset(db);
+    std::printf("MARK opened fresh=%d\n", fresh ? 1 : 0); std::fflush(stdout);
+    return Conv(s);
+  }
+  Status Put(std::string_view k, std::string_view v, bool sync) override {
+    leveldb::WriteOptions w; w.sync = sync;
+    return Conv(db_->Put(w, leveldb::Slice(k.data(), k.size()), leveldb::Slice(v.data(), v.size())));
+  }
+  Status Get(std::string_view k, std::string* v) override {
+    leveldb::ReadOptions r; r.verify_checksums = true;
+    return Conv(db_->Get(r, leveldb::Slice(k.data(), k.size()), v));
+  }
+  Status Scan(std::string_view from, size_t limit, size_t* seen) override {
+    leveldb::ReadOptions r; r.verify_checksums = true;
+    std::unique_ptr<leveldb::Iterator> it(db_->NewIterator(r));
+    if (from.empty()) it->SeekToFirst(); else it->Seek(leveldb::Slice(from.data(), from.size()));
+    size_t n = 0;
+    for (; it->Valid() && (limit == 0 || n < limit); it->Next()) { (void)it->key(); (void)it->value(); n++; }
+    *seen = n;
+    return Conv(it->status());
+  }
+  Status CompactAll() override { db_->CompactRange(nullptr, nullptr); return Status::OK(); }
+  std::string WriteAmplification() override { return "n/a"; }
+  void Close() override { db_.reset(); }
+  std::string Props() {
+    std::string s;
+    db_->GetProperty("leveldb.stats", &s);
+    return s;
+  }
+ private:
+  std::unique_ptr<const leveldb::FilterPolicy> filter_;
+  leveldb::Options o_;
+  std::unique_ptr<leveldb::Cache> cache_;
+  std::unique_ptr<leveldb::DB> db_;
+};
+
+int main(int argc, char** argv) {
+  if (argc < 5) { std::fprintf(stderr, "probe <shale|leveldb> <num> <db> <bench,bench...> [pause_ms_before_each]\n"); return 2; }
+  const std::string engine_name = argv[1];
+  WorkloadOptions options;
+  options.num = std::strtoull(argv[2], nullptr, 10);
+  options.sync_num = 10000;
+  options.value_size = 100;
+  options.seed = 301;
+  options.db = argv[3];
+  std::vector<Benchmark> list;
+  { std::string l = argv[4]; size_t st = 0; while (true) { size_t c = l.find(',', st); auto n = FindBenchmark(l.substr(st, c == std::string::npos ? c : c - st)); if (!n) { std::fprintf(stderr, "bad benchmark\n"); return 2; } list.push_back(*n); if (c == std::string::npos) break; st = c + 1; } }
+  const int pause_ms = argc > 5 ? std::atoi(argv[5]) : 0;
+  const int loops = argc > 6 ? std::atoi(argv[6]) : 1;
+  ShaleProbe sp; LevelDBProbe lp;
+  BenchEngine* e = engine_name == "shale" ? static_cast<BenchEngine*>(&sp) : &lp;
+  std::optional<Populated> source;
+  bool compacted = false;
+  for (Benchmark b : list) {
+    RunResult r;
+    Status s;
+    if (pause_ms) std::this_thread::sleep_for(std::chrono::milliseconds(pause_ms));
+    Snap(std::string("before ") + BenchmarkName(b));
+    if (BenchmarkWrites(b)) {
+      Populated p;
+      s = RunWriteBenchmark(e, options, b, &p, &r);
+      source = std::move(p);
+    } else {
+      if (std::getenv("PROBE_COMPACT") != nullptr && !compacted) {
+        Status c = e->CompactAll();
+        compacted = true;
+        std::printf("MARK compacted %s\n", c.ok() ? "ok" : c.ToString().c_str()); std::fflush(stdout);
+      }
+      std::printf("MARK loop %s x%d\n", BenchmarkName(b), loops); std::fflush(stdout);
+      Snap(std::string("loop start ") + BenchmarkName(b));
+      for (int i = 0; i < loops; i++) {
+        s = RunReadBenchmark(e, options, b, *source, &r);
+        if (!s.ok()) break;
+      }
+      Snap(std::string("after ") + std::to_string(loops) + " x " + BenchmarkName(b));
+    }
+    if (!s.ok()) { std::printf("%s failed: %s\n", BenchmarkName(b), s.ToString().c_str()); return 1; }
+    std::printf("== %s %s: %.0f ops/s, %.3f s, engine %.3f s, wa %s\n", engine_name.c_str(), BenchmarkName(b), r.OpsPerSecond(), r.seconds, r.engine_seconds, r.write_amplification ? r.write_amplification->c_str() : "-");
+    if (r.latency) std::printf("   p50 %.2f p99 %.2f p99.9 %.2f us, avg %.2f us\n", r.latency->p50, r.latency->p99, r.latency->p999, r.latency->average);
+    std::string props = engine_name == "shale" ? sp.Props() : lp.Props();
+    std::printf("%s\n", props.c_str());
+    if (engine_name == "shale") { std::string c; // counters
+      /* shale.counters is private to stats text above */ }
+  }
+  return 0;
+}
+
+--- interpose.c ---
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+#include <stdatomic.h>
+
+static atomic_long fullfsync, fsync_calls, fcntl_other;
+static atomic_long fullfsync_fail;
+static atomic_long n_pread, n_read, n_write, n_pwrite, n_mmap, n_munmap;
+static atomic_long b_pread, b_write;
+
+#define DYLD_INTERPOSE(_replacement, _replacee) \
+  __attribute__((used)) static struct { const void* replacement; const void* replacee; } \
+  _interpose_##_replacee __attribute__((section("__DATA,__interpose"))) = { \
+    (const void*)(unsigned long)&_replacement, (const void*)(unsigned long)&_replacee };
+
+static int my_fcntl(int fd, int cmd, ...) {
+  va_list ap;
+  va_start(ap, cmd);
+  long arg = va_arg(ap, long);
+  va_end(ap);
+  int r = fcntl(fd, cmd, arg);
+  if (cmd == F_FULLFSYNC) {
+    atomic_fetch_add(&fullfsync, 1);
+    if (r != 0) atomic_fetch_add(&fullfsync_fail, 1);
+  } else {
+    atomic_fetch_add(&fcntl_other, 1);
+  }
+  return r;
+}
+static int my_fsync(int fd) {
+  atomic_fetch_add(&fsync_calls, 1);
+  return fsync(fd);
+}
+static ssize_t my_pread(int fd, void* b, size_t n, off_t o) { ssize_t r = pread(fd, b, n, o); atomic_fetch_add(&n_pread, 1); if (r > 0) atomic_fetch_add(&b_pread, r); return r; }
+static ssize_t my_read(int fd, void* b, size_t n) { atomic_fetch_add(&n_read, 1); return read(fd, b, n); }
+static ssize_t my_write(int fd, const void* b, size_t n) { ssize_t r = write(fd, b, n); atomic_fetch_add(&n_write, 1); if (r > 0) atomic_fetch_add(&b_write, r); return r; }
+static ssize_t my_pwrite(int fd, const void* b, size_t n, off_t o) { atomic_fetch_add(&n_pwrite, 1); return pwrite(fd, b, n, o); }
+static void* my_mmap(void* a, size_t l, int p, int f, int fd, off_t o) { atomic_fetch_add(&n_mmap, 1); return mmap(a, l, p, f, fd, o); }
+static int my_munmap(void* a, size_t l) { atomic_fetch_add(&n_munmap, 1); return munmap(a, l); }
+DYLD_INTERPOSE(my_fcntl, fcntl)
+DYLD_INTERPOSE(my_pread, pread)
+DYLD_INTERPOSE(my_read, read)
+DYLD_INTERPOSE(my_write, write)
+DYLD_INTERPOSE(my_pwrite, pwrite)
+DYLD_INTERPOSE(my_mmap, mmap)
+DYLD_INTERPOSE(my_munmap, munmap)
+DYLD_INTERPOSE(my_fsync, fsync)
+
+static long last[12];
+void interpose_snapshot(const char* label) {
+  long cur[12] = {atomic_load(&n_pread), atomic_load(&b_pread), atomic_load(&n_read), atomic_load(&n_write), atomic_load(&b_write), atomic_load(&n_pwrite), atomic_load(&n_mmap), atomic_load(&n_munmap), atomic_load(&fullfsync), atomic_load(&fsync_calls), 0, 0};
+  fprintf(stderr, "SNAP %-28s pread=%ld (%ld B) read=%ld write=%ld (%ld B) pwrite=%ld mmap=%ld munmap=%ld F_FULLFSYNC=%ld fsync=%ld\n", label,
+          cur[0]-last[0], cur[1]-last[1], cur[2]-last[2], cur[3]-last[3], cur[4]-last[4], cur[5]-last[5], cur[6]-last[6], cur[7]-last[7], cur[8]-last[8], cur[9]-last[9]);
+  for (int k = 0; k < 12; k++) last[k] = cur[k];
+}
+
+__attribute__((destructor)) static void report(void) {
+  fprintf(stderr, "interpose: pread=%ld (%ld bytes) read=%ld write=%ld (%ld bytes) pwrite=%ld mmap=%ld munmap=%ld\n", atomic_load(&n_pread), atomic_load(&b_pread), atomic_load(&n_read), atomic_load(&n_write), atomic_load(&b_write), atomic_load(&n_pwrite), atomic_load(&n_mmap), atomic_load(&n_munmap));
+  fprintf(stderr, "interpose: F_FULLFSYNC=%ld (failed %ld) fsync=%ld other_fcntl=%ld\n",
+          atomic_load(&fullfsync), atomic_load(&fullfsync_fail), atomic_load(&fsync_calls),
+          atomic_load(&fcntl_other));
+}
+
