@@ -107,7 +107,8 @@ done
 out_has "all benchmarks: the table has a header" "write-amp"
 out_has "all benchmarks: the output says where it ran" "# machine:"
 out_has "all benchmarks: the output says how it was built" "# build:"
-out_has "all benchmarks: the output says the clock's tick" "# clock: steady_clock tick "
+out_has "all benchmarks: the output says what its clock figure is" \
+  "# clock: steady_clock, nominal period 1 ns, smallest step seen between two readings "
 
 # The machine is named by the system's name, release and architecture, which is what uname -srm
 # prints, and by nothing that names the owner of the machine: not the host name, and not the
@@ -139,8 +140,8 @@ fi
 SYSTEM="$system" OUT="$tmp/out" json_has "the JSON of all benchmarks" "$tmp/all.json" '
 import statistics
 
-def close(a, b):
-    return abs(a - b) <= 1e-5 * max(1.0, abs(b))
+def close(a, b, rel=1e-5):
+    return abs(a - b) <= rel * max(1.0, abs(b))
 
 assert d["tool"] == "shale_bench" and d["engine"] == "shale", d["engine"]
 c = d["config"]
@@ -156,7 +157,9 @@ assert c["benchmarks"] == want, c["benchmarks"]
 m = d["machine"]
 assert m["uname"] == os.environ["SYSTEM"], m["uname"]
 assert m["cpu"] and m["logical_cores"] >= 1, m
-assert isinstance(m["clock_resolution_ns"], int) and 1 <= m["clock_resolution_ns"] <= 100000, m
+assert m["clock_nominal_period_ns"] == 1, m
+assert isinstance(m["clock_smallest_step_ns"], int) and 1 <= m["clock_smallest_step_ns"] <= 100000, m
+assert "clock_resolution_ns" not in m, "what is measured is a step between readings, not a resolution"
 b = d["build"]
 assert b["compiler_id"] and b["compiler_version"] and b["build_type"], b
 assert b["coverage"] in (True, False) and isinstance(b["flaw"], str), b
@@ -174,8 +177,11 @@ for r in d["results"]:
     for x in r["runs"]:
         assert x["operations"] > 0, (r["name"], x)
         # The rates of a run are its operations and bytes over its time, with a megabyte of 2^20.
-        assert close(x["ops_per_sec"], x["operations"] / x["seconds"]), (r["name"], x)
-        assert close(x["mb_per_sec"], x["bytes"] / 1048576 / x["seconds"]), (r["name"], x)
+        # `seconds` is written to a nanosecond, which is a relative error of 5e-10 / seconds in the
+        # rate that is worked out from it.
+        slack = 1e-5 + 1e-9 / x["seconds"]
+        assert close(x["ops_per_sec"], x["operations"] / x["seconds"], slack), (r["name"], x)
+        assert close(x["mb_per_sec"], x["bytes"] / 1048576 / x["seconds"], slack), (r["name"], x)
         # The time inside the engine is part of the time of the loop, and a scan is all of it.
         assert 0 < x["engine_seconds"] <= x["seconds"] * (1 + 1e-6), (r["name"], x)
         if r["name"] == "readseq":
@@ -331,7 +337,8 @@ out_has "--help says why fillsync is where it is" "fillsync where the reads stil
 out_has "--help says what a read after fillsync reads" "placed after fillsync reads at most --sync_num keys"
 out_has "--help defines the spread" "(fastest - slowest) / median of the runs' ops/s"
 out_has "--help says that the repeats of a read are warm" "the median is a warm run"
-out_has "--help says what the latencies are quantized to" "the run prints the tick"
+out_has "--help says what the printed clock figure is" "smallest step it saw between two readings"
+out_has "--help says that a fine clock's step is the cost of a read" "what one reading costs"
 out_has "--help says that ops/s is wall time" "wall-clock time of its"
 out_has "--help says where the time inside the engine is" "engine_seconds"
 out_has "--help says that the database is named by its last component" "last component"

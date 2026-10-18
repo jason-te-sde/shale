@@ -532,8 +532,7 @@ TEST(BenchWorkloadsTest, AnErrorOfTheEngineIsReturnedAsItIsAndNotTakenForAnAnswe
   EXPECT_TRUE(s.IsIOError()) << s.ToString();
 }
 
-// ---- What a run says about itself.
-// ----------------------------------------------------------------
+// ---- What a run says about itself. --------------------------------------------------------------
 
 TEST(BenchWorkloadsTest, TheRatesAreTheOperationsAndTheBytesOverTheTimeWithAMegabyteOf2To20) {
   RunResult result;
@@ -565,9 +564,11 @@ TEST(BenchWorkloadsTest, TheTimeInsideTheEngineIsTheTimeOfItsCallsAndNoMore) {
   Populated populated;
   RunResult result;
   ASSERT_OK(RunWriteBenchmark(&engine, Options(), Benchmark::kFillSeq, &populated, &result));
-  // Sixty puts of 200 us each. A tenth is allowed to go missing: the steady_clock of libstdc++ on
-  // macOS ticks in whole microseconds, and a spin that it reads as 199 us once in a while has been
-  // seen to leave the sum a fraction of a percent short.
+  // Sixty puts of 200 us each. A call takes at least its spin, so 200 us a call is the least the
+  // sum should be, and the tenth of slack is only for rounding. Once, in a GCC build, this test
+  // came out 0.3% short of it (0.05984 s against 0.06 s) in 28 of 40 repeats, and has not in 160
+  // more: that failure was seen once and is unexplained. The bound is still worth having: it goes
+  // red when engine_seconds is zero, as the identity below goes red when it is the whole loop.
   EXPECT_GE(result.engine_seconds, 0.9 * 60 * kDelayMicros * 1e-6);
   EXPECT_LE(result.engine_seconds, result.seconds * (1 + 1e-9));
   // It is the sum of the latencies, which the loop's own work is not part of.
@@ -591,8 +592,7 @@ TEST(BenchWorkloadsTest, TheTimeInsideTheEngineIsTheTimeOfItsCallsAndNoMore) {
   EXPECT_EQ(result.engine_seconds, result.seconds) << "a scan is one call, and the whole loop";
 }
 
-// ---- Every put says which put it is.
-// ---------------------------------------------------------------
+// ---- Every put says which put it is. ------------------------------------------------------------
 
 uint64_t StampOf(const PutCall& put) { return DecodeFixed64(put.value.data()); }
 
