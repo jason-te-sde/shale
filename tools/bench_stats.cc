@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -43,6 +44,12 @@ std::string MedianFigure(const std::vector<std::string>& figures) {
   std::snprintf(text.data(), text.size(), "%.2f",
                 (numbers[middle - 1].first + numbers[middle].first) / 2);
   return text.data();
+}
+
+bool IsRepresentativeBuild(std::string_view build_type, std::string_view sanitizer, bool coverage,
+                           std::string_view flaw) {
+  return (build_type == "Release" || build_type == "RelWithDebInfo") && sanitizer.empty() &&
+         !coverage && flaw.empty();
 }
 
 }  // namespace shale
