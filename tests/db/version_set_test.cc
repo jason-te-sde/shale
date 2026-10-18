@@ -783,6 +783,32 @@ TEST_F(VersionSetTest, CorruptManifestRecordIsCorruption) {
   }
 }
 
+TEST_F(VersionSetTest, ALengthDamagedPastTheEndOfTheManifestIsCorruptionNotATornTail) {
+  // The edit of a flush or a compaction whose length a flipped bit made longer than the rest of
+  // the file looked like an edit that a crash cut short, and recovery went on without it, and
+  // without every edit after it: the files they name were then not in the version, and the files
+  // they deleted were. The bytes that are there are a whole edit with its checksum, which a crash
+  // never leaves, so recovery refuses the MANIFEST, whichever record it is.
+  const auto versions = NewVersionSet();
+  ASSERT_OK(versions->CreateNew());
+  for (const char* key : {"a", "c", "e", "g"}) {
+    ASSERT_OK(versions->LogAndApply(AddFile(0, Meta(versions->NewFileNumber(), key, key))));
+  }
+  const ManifestRecords records = ReadManifest(1);
+  ASSERT_EQ(records.offsets.size(), 5u);
+  const std::string intact = env_.FileContents(DescriptorFileName(kDb, 1));
+  for (const size_t record : {size_t{1}, size_t{3}, size_t{4}}) {  // a middle one, and the last
+    SCOPED_TRACE("record " + std::to_string(record));
+    std::string damaged = intact;
+    damaged[static_cast<size_t>(records.offsets[record]) + 5] ^= 0x04;  // 1024 bytes longer
+    env_.SetFileContents(DescriptorFileName(kDb, 1), damaged);
+    const auto recovered = NewVersionSet();
+    const Status s = recovered->Recover();
+    EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+    EXPECT_TRUE(Names(s, ManifestName(1)));
+  }
+}
+
 TEST_F(VersionSetTest, ManifestCutAnywhereAfterItsFirstRecordRecoversTheRecordsBeforeTheCut) {
   // A crash while an edit was being appended leaves a record cut short, at any byte of it: in its
   // header or in its payload. The edit was never acknowledged, because its Sync() had not returned,

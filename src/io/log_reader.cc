@@ -157,6 +157,14 @@ Reader::Physical Reader::ReadPhysicalRecord(RecordType* type, std::string_view* 
       // The fragment fits in its block but the file ends before it does: the writer died while
       // writing it. A block that was read in full cannot end here, so this is the last block.
       SHALE_CHECK(eof_, "a full block ended inside a fragment that fits in it");
+      // Or the length is damaged, and the fragment is whole. A crash leaves a prefix of the
+      // fragment, and a prefix is no fragment with the checksum in the header, short of a
+      // collision of 32 bits (about one in 2^32 for each byte that is left, of a file that a
+      // crash really cut). A whole fragment is. So where the bytes that are here are a fragment
+      // that the stored checksum vouches for, the end of the file is not what this is.
+      if (checksum_ && HoldsAWholeFragmentShorterThan(header, length)) {
+        return DropRestOfBlock("bad record length");
+      }
       buffer_ = std::string_view();
       return Physical::kEof;
     }
@@ -175,6 +183,27 @@ Reader::Physical Reader::ReadPhysicalRecord(RecordType* type, std::string_view* 
     *payload = std::string_view(header + kHeaderSize, length);
     buffer_.remove_prefix(kHeaderSize + length);
     return Physical::kRecord;
+  }
+}
+
+bool Reader::HoldsAWholeFragmentShorterThan(const char* header, size_t length) const {
+  // What is left after the header, which is fewer bytes than `length` claims. The fragment that was
+  // written may have been any length up to that, the last of them ending with the file.
+  const size_t available = buffer_.size() - kHeaderSize;
+  SHALE_CHECK(available < length, "the fragment is not claimed to run past the end of the file");
+  const uint32_t expected = crc32c::Unmask(DecodeFixed32(header));
+  // The checksum covers the type byte and then the payload, so it is taken over the one and
+  // extended a byte at a time, and compared at every length: one pass over what is left.
+  uint32_t crc = crc32c::Value(header + 6, 1);
+  const char* payload = header + kHeaderSize;
+  for (size_t candidate = 0;; candidate++) {
+    if (crc == expected) {
+      return true;
+    }
+    if (candidate == available) {
+      return false;
+    }
+    crc = crc32c::Extend(crc, payload + candidate, 1);
   }
 }
 
