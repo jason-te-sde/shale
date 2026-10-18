@@ -294,13 +294,12 @@ bool VersionSet::CurrentMayNameNewManifest() {
     return true;  // not known, and deleting the file that CURRENT names would be the worst answer
   }
   // Only what proves that the rename did not happen lets the new file go: CURRENT is read to be
-  // the MANIFEST that was open before it. A read that matches nothing is not proof of that, since
-  // CURRENT has no checksum and a read can come back wrong, and what the rename that went through
-  // made of it cannot be undone by a read that is wrong: the new file stays, and a later sweep
-  // deletes it if CURRENT turns out not to name it.
+  // the contents that name the MANIFEST that was open before it. A read that matches nothing is not
+  // proof of that, since a read can come back wrong, and what the rename that went through made of
+  // it cannot be undone by a read that is wrong: the new file stays, and a later sweep deletes it
+  // if CURRENT turns out not to name it.
   if (manifest_file_number_ != 0) {
-    const std::string previous = DescriptorFileName(dbname_, manifest_file_number_);
-    return contents != previous.substr(dbname_.size() + 1) + "\n";
+    return contents != CurrentFileContents(dbname_, manifest_file_number_);
   }
   return true;
 }
@@ -339,17 +338,10 @@ Status VersionSet::Recover() {
   if (!s.ok()) {
     return s;
   }
-  if (current.empty() || current.back() != '\n') {
-    return Status::Corruption("CURRENT file does not end with newline");
-  }
-  current.pop_back();
   uint64_t number = 0;
-  FileType type = FileType::kCurrentFile;
-  // The name must be the one SetCurrentFile() writes: a number spelled another way names the same
-  // file to the parser and a different one to the directory.
-  if (!ParseFileName(current, &number, &type) || type != FileType::kDescriptorFile ||
-      DescriptorFileName(dbname_, number) != dbname_ + "/" + current) {
-    return Status::Corruption("CURRENT names an invalid file");
+  s = ParseCurrentFile(dbname_, current, &number);
+  if (!s.ok()) {
+    return WithFileName(s, CurrentFileName(dbname_));
   }
 
   const std::string manifest = DescriptorFileName(dbname_, number);

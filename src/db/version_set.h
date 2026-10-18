@@ -12,6 +12,11 @@
 //  2. CURRENT is switched to a new MANIFEST by renaming a synced file over it and syncing the
 //     directory, so a crash leaves it naming the old MANIFEST or the new one, whole.
 //
+// CURRENT is two lines, the name of the MANIFEST and "crc32c:" and the masked CRC32C of that line
+// in eight hex digits (see CurrentFileContents() in db/filename_io.h). Recover() accepts that form
+// and nothing else, so that a read of CURRENT that comes back with a bit flipped is refused and is
+// never taken for the name of another MANIFEST that is in the directory.
+//
 // The pure rules of what an edit may do live in core/version_state.h. This file adds the files.
 
 #include <cstdint>
@@ -103,10 +108,11 @@ inline constexpr uint64_t kMaxFileNumber = uint64_t{1} << 56;
 ///
 /// The MANIFEST is a log of VersionEdits, written with log::Writer. Its first record is a snapshot
 /// of the whole state and each later one an edit; replaying them in order rebuilds the current
-/// version. CURRENT names the live MANIFEST. A database is opened by Recover(), which reads it, and
-/// then by WriteNewManifest(), which starts a new MANIFEST: the one that was read may end in a torn
-/// record, which cannot be appended to, and a new one is a snapshot, which also keeps the log from
-/// growing for ever. After that, every change is LogAndApply().
+/// version. CURRENT names the live MANIFEST, with a checksum of the name. A database is opened by
+/// Recover(), which reads it, and then by WriteNewManifest(), which starts a new MANIFEST: the one
+/// that was read may end in a torn record, which cannot be appended to, and a new one is a
+/// snapshot, which also keeps the log from growing for ever. After that, every change is
+/// LogAndApply().
 ///
 /// A new database is CreateNew() and then LogAndApply().
 ///
