@@ -21,17 +21,19 @@ namespace shale {
 /// design this small: the only thing a reader can race with is a node being linked in, and the
 /// ordering below covers that.
 ///
-/// Memory ordering. A node is built completely, key and links, with relaxed stores, and only then
-/// linked into the list with a release store of the pointer that makes it reachable. A reader loads
-/// every pointer it follows with acquire, so whichever node it arrives at, it sees that node's
-/// fields as the writer left them. A node is linked one level at a time, bottom up, and each of its
-/// own links is stored before the node is published at that level or any above it. A reader that
-/// arrives at a node through a link of level L reads that node's links at level L and below and
-/// no others, so every link it reads has been stored; the ones above L, which may not be yet, it
-/// never looks at. `max_height_` is only a hint
-/// for where a search starts: a reader that sees a stale value starts lower than it could, and one
-/// that sees a new value before the node that raised it finds only null links at the new levels,
-/// and drops down. So it needs no ordering at all.
+/// Memory ordering. A node's key is written when the node is made, before the node is reachable.
+/// Its links are stored one level at a time, bottom up: for each level the writer stores the
+/// node's own link with a relaxed store, and then publishes the node at that level with a release
+/// store of the pointer in the node before it. So the node's link at a level is stored just before
+/// the node becomes reachable through that level, and the node is already reachable through the
+/// levels below. A reader loads every pointer it follows with acquire, so whichever node it
+/// arrives at, it sees that node's key and its links at the level it came by and below as the
+/// writer left them. A reader that arrives at a node through a link of level L reads that node's
+/// links at level L and below and no others, so every link it reads has been stored; the ones
+/// above L, which may not be yet, it never looks at. `max_height_` is only a hint for where a
+/// search starts: a reader that sees a stale value starts lower than it could, and one that sees a
+/// new value before the node that raised it finds only null links at the new levels, and drops
+/// down. So it needs no ordering at all.
 ///
 /// Writers. At most one thread may be inside Insert() at a time, and Insert() aborts if two are:
 /// the node heights come from one generator, and the writer reads links back with relaxed loads on

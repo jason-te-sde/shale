@@ -336,11 +336,14 @@ magic number.
 
 `Table::Open()` reads the footer, the index and the filter, and checks that the index is a sorted list
 of keys with one handle each, every handle naming a different block in the part of the file before the
-filter, in order. After that, whatever the bytes of a data block are, a read returns the entry that was
-written or a `Corruption`, never a crash, a read outside the buffer or a value that was not stored. An
-iterator over a table returns keys in strictly increasing order whatever the file holds, so that a
-table can be fed to a table builder, which aborts on a key that is not; a block with its keys out of
-order ends the iteration with `Corruption`. See [`src/io/table.h`](../src/io/table.h).
+filter, in order. After that, a table whose bytes were damaged after it was written is caught by the checksum of
+the block: a read returns the entry that was written or a `Corruption`, never a crash, a read outside the
+buffer or a value that was not stored. A file made by something that computes the checksums for whatever
+it writes has no such promise beyond staying inside its buffers: an iterator over a table returns keys in
+strictly increasing order whatever the file holds, so that a table can be fed to a table builder, which
+aborts on a key that is not, and a block with its keys out of order ends the iteration with `Corruption`;
+but a lookup does not walk a block, so in such a block it can land on another entry and return its value.
+See [`src/io/table.h`](../src/io/table.h).
 
 ## The MANIFEST and version edits
 

@@ -24,11 +24,13 @@ as one record, syncs it if any member asked, inserts it into the memtable, takes
 the new last sequence number, and wakes the group with one status. That is **group commit**: the cost of
 the sync is shared by the writers that queued while the previous group was being written.
 
-**The memtable is single-writer, multi-reader, and lock-free to read.** A skip list in an arena. A node
-is built completely and then linked in level by level with a release store, and every pointer a reader
-follows is loaded with acquire, so whatever node a reader reaches, it sees that node as the writer left
-it. Nothing is ever removed. Only the leader inserts, and **the class refuses to be misused**: `Insert`
-and `MemTable::Add` abort, naming the class, if two threads are inside at once.
+**The memtable is single-writer, multi-reader, and lock-free to read.** A skip list in an arena. A
+node's key is written first. Its links are stored level by level, bottom up, each with a relaxed store
+just before the release store that publishes the node at that level, and every pointer a reader follows
+is loaded with acquire, so whatever node a reader reaches, it sees its key and the links it reads (those
+of the level it came by and below) as the writer left them. Nothing is ever removed. Only the leader
+inserts, and **the class refuses to be misused**: `Insert` and `MemTable::Add` abort, naming the class,
+if two threads are inside at once.
 
 **Versions are immutable and shared.** A `Version` is a value (the files of each level). A read takes a
 `std::shared_ptr<const Version>`; a flush or a compaction makes a new one and installs it; an old one

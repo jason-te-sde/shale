@@ -73,9 +73,12 @@ struct TableGetResult {
 /// each, every handle naming a different block in the part of the file before the filter, in
 /// order. After that, whatever the bytes of the data blocks are, a read returns the entry that
 /// was written or a Corruption status, never a crash, an out-of-bounds read or a value that
-/// was not stored. What a checksum cannot show, a file written by something that computes a
+/// was not stored, for a table whose bytes were damaged after it was written: the checksum of the
+/// block shows it. What a checksum cannot show, a file written by something that computes a
 /// checksum for whatever it writes, is handled by the decoders staying inside their buffers, and
-/// that is all that can be promised for it.
+/// that is all that can be promised for it: an iterator still returns its keys in order, but a
+/// lookup does not walk a block, so in a block whose keys are out of order it may land on another
+/// entry and return that one's value.
 ///
 /// A Table is immutable once opened and every method may be called from any number of threads at
 /// once. It is owned by shared pointers, and an iterator holds one, so a table is closed when the
