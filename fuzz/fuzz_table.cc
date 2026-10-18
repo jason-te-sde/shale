@@ -158,11 +158,13 @@ class ExactChecks {
     filter_ = std::string(bytes.substr(static_cast<size_t>(offset), static_cast<size_t>(size)));
   }
 
-  // Checks the lookup of, and the seek to, entries that are spread over the table, and keys that
-  // are before all of it, just after each of those entries, and after all of it.
+  // Checks the lookup of, and the seek to, every entry of the table, and keys that are before all
+  // of it, just after each entry, and after all of it. These checks run only on a table whose
+  // checksums hold, which in practice is a seed of a few dozen entries, so every entry costs little
+  // and no bug can hide between samples.
   void Run() const {
     const size_t n = walk_.entries.size();
-    for (const size_t i : Sample(n)) {
+    for (size_t i = 0; i < n; i++) {
       CheckGetEntry(i);
       CheckNewest(i);
       CheckSeek(walk_.entries[i].first);
@@ -187,20 +189,6 @@ class ExactChecks {
   }
 
  private:
-  // Returns the indexes to check: the first and the last entry, and about fourteen in between.
-  static std::vector<size_t> Sample(size_t n) {
-    std::vector<size_t> indexes;
-    if (n == 0) {
-      return indexes;
-    }
-    const size_t step = n / 16 + 1;
-    for (size_t i = 0; i < n; i += step) {
-      indexes.push_back(i);
-    }
-    indexes.push_back(n - 1);
-    return indexes;
-  }
-
   // The lookup of entry `i`'s own key returns that entry. The one answer that is not it is "not
   // found", and only the filter can give it: a filter says no for a user key it does not hold, and
   // that is all it may say no to.

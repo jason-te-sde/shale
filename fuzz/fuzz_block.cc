@@ -9,8 +9,9 @@
 // That is all this target holds a block to: memory safety, ending, and the kind of status. It does
 // not compare what Seek() finds with what the walk found, because it cannot: Seek() assumes the
 // comparison orders the keys as the block was built, and a block whose restart array is out of
-// order or whose restart entry shares bytes with a key before it makes Seek() land where
-// SeekToFirst() never goes. That is documented behaviour of a damaged block and no finding. A block
+// order makes Seek() land where SeekToFirst() never goes. (A restart entry that shares bytes with
+// the key before it is refused as Corruption.) That is documented behaviour of a damaged block and
+// no finding. A block
 // that is intact is held to its seeks by fuzz_table, whose checksums say that its blocks are as
 // written.
 

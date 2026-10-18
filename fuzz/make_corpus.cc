@@ -357,6 +357,15 @@ void SeedVersionSet(const std::string& corpus_dir) {
   counters.hostile_index = 3;
   out.Write("counters_near_the_ceiling", fuzz::EncodeVersionSetInput(counters));
 
+  // Counters one past each ceiling, which the recovery refuses as Corruption. Without these the
+  // fuzzer reaches the two refusals only by mutating an eight-byte varint into place, which a
+  // sixty-second run sometimes does not do.
+  counters.hostile_index = 8;  // none
+  counters.records = {CounterEdit(1, 5, kMaxSequenceNumber + 1)};
+  out.Write("sequence_above_the_ceiling", fuzz::EncodeVersionSetInput(counters));
+  counters.records = {CounterEdit(1, kMaxFileNumber + 1, 5)};
+  out.Write("file_number_above_the_ceiling", fuzz::EncodeVersionSetInput(counters));
+
   // CURRENT that is not what the engine writes: no checksum line.
   fuzz::VersionSetInput no_checksum = all;
   no_checksum.current_valid = false;

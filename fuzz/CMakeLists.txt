@@ -49,9 +49,10 @@ function(shale_add_fuzz_target name)
   shale_set_warnings(${name})
 endfunction()
 
-# The targets are listed in fuzz_targets.txt, which the CI job and scripts/preflight.sh read as well.
-# A line starts with the name of a target, and the rest of it is what the target links.
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/fuzz_targets.txt")
+# The targets are listed in fuzz_targets.txt, which the CI job and scripts/preflight.sh read as
+# well. A line starts with the name of a target, and the rest of it is what the target links.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/fuzz_targets.txt")
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/fuzz_targets.txt" SHALE_FUZZ_TARGET_LINES REGEX "^[a-z]")
 foreach(line IN LISTS SHALE_FUZZ_TARGET_LINES)
   separate_arguments(words UNIX_COMMAND "${line}")

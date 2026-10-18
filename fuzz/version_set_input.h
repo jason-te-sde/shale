@@ -12,15 +12,15 @@
 //
 //   byte 0   layout:
 //              bit 0     CURRENT is valid: it names MANIFEST-<n> as the engine writes it, with its
-//                        crc32c line, where n is picked by bits 1 to 3 from ManifestNumber();
+//                        crc32c line, where n is picked by bits 1 to 3 from kManifestNumbers;
 //                        clear, CURRENT is the bytes that follow
-//              bits 1-3  the index into ManifestNumber()
+//              bits 1-3  the index into kManifestNumbers
 //              bit 4     the MANIFEST is a log of records, each a varint32 length and that many
 //                        bytes, which the target frames and checksums; clear, the MANIFEST is the
 //                        rest of the input as it is
 //              bits 5-7  how many records go to the MANIFEST: 1 + 2 * these; the records after
 //                        them are edits applied to what the recovery gives, one by one
-//   byte 1   an index into HostileNumber(), the file number that the recovered version set is told
+//   byte 1   an index into kHostileNumbers, the file number that the recovered version set is told
 //            was used; a value outside the table says none
 //   then, if bit 0 of the layout is clear: one byte n, and n bytes of CURRENT
 //   then the MANIFEST: the records, or the bytes.

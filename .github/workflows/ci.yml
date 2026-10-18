@@ -181,11 +181,12 @@ jobs:
           path: build/flaw-${{ matrix.flaw }}/sim-output.log
           if-no-files-found: ignore
 
-  # The engine under a real kill: a writer process that puts and deletes keys is stopped with SIGKILL
-  # at a random moment, and the database that is opened again must hold exactly what the writer was
-  # told was done. The simulator cannot show this, since its filesystem is not the real one, and the
-  # unit tests never kill a process. macOS is here because it is a different kernel and a different
-  # filesystem under the same engine; a kill of the process cannot tell how the writes are synced.
+  # The engine under a real kill: a writer process that puts and deletes keys is stopped with
+  # SIGKILL at a random moment, and the database that is opened again must hold exactly what the
+  # writer was told was done. The simulator cannot show this, since its filesystem is not the real
+  # one, and the unit tests never kill a process. macOS is here because it is a different kernel and
+  # a different filesystem under the same engine; a kill of the process cannot tell how the writes
+  # are synced.
   crash:
     name: crash (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -219,13 +220,14 @@ jobs:
         run: cmake --build build/crash --target shale_crashtest
 
       # The seed changes with every run, so that the kill delays and the keys differ. It does not
-      # repeat a run: where in the engine's work a kill lands depends on timing, so the database that
-      # a failed run leaves, uploaded below, is what to look at. --min_compactions=1 makes a run that
-      # never saw a table removed, so that no kill reached a compaction that merged, fail instead of
-      # passing. The second run puts the fsync calls in the path as well: it is slower, and meant
-      # only to be killed in them now and then. Two hundred rounds take about a minute. Two flaws
-      # injected by hand, each open only for the width of one MANIFEST edit, were each caught in one
-      # of six local runs of twenty rounds, and in four and five of six runs of up to 150.
+      # repeat a run: where in the engine's work a kill lands depends on timing, so the database
+      # that a failed run leaves, uploaded below, is what to look at. --min_compactions=1 makes a
+      # run that never saw a table removed, so that no kill reached a compaction that merged, fail
+      # instead of passing. The second run puts the fsync calls in the path as well: it is slower,
+      # and meant only to be killed in them now and then. Two hundred rounds take about a minute.
+      # Two flaws injected by hand, each open only for the width of one MANIFEST edit, were each
+      # caught in one of six local runs of twenty rounds, and in four and five of six runs of up to
+      # 150.
       - name: Kill the writer two hundred times, and check the database each time
         env:
           SEED: ${{ github.run_number }}
@@ -250,11 +252,12 @@ jobs:
           if-no-files-found: ignore
 
   # Every decoder that reads bytes off a disk, the recovery of the table set from CURRENT and a
-  # MANIFEST, and the whole database under a random program of operations, under libFuzzer with AddressSanitizer and UndefinedBehaviorSanitizer. Sixty seconds
-  # a target is a smoke run, long enough to start from the seed corpus and to catch what a change has
-  # just made easy to reach; it is not a campaign, and a clean run says nothing about inputs it did
-  # not try. A crash is a bug in the engine, so the input that caused it is uploaded: the fuzz
-  # targets reproduce it, run with the file as their only argument.
+  # MANIFEST, and the whole database under a random program of operations, under libFuzzer with
+  # AddressSanitizer and UndefinedBehaviorSanitizer. Sixty seconds a target is a smoke run, long
+  # enough to start from the seed corpus and to catch what a change has just made easy to reach; it
+  # is not a campaign, and a clean run says nothing about inputs it did not try. A crash is a bug in
+  # the engine, so the input that caused it is uploaded: the fuzz targets reproduce it, run with the
+  # file as their only argument.
   fuzz:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -353,7 +356,8 @@ jobs:
   # Does the benchmark tool run, and do the micro benchmarks? The job asserts completion and nothing
   # else: a shared runner is too noisy for any number to be held to, so none is. What is asserted
   # about the tool's answers is its own: it checks every read against what it wrote, and exits with
-  # status 1 on a wrong one. The numbers go up as a file all the same, so that a run can be looked at.
+  # status 1 on a wrong one. The numbers go up as a file all the same, so that a run can be looked
+  # at.
   bench-smoke:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
