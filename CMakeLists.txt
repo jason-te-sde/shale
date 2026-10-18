@@ -33,6 +33,10 @@ if(SHALE_BUILD_TESTS)
   add_subdirectory(tests)
 endif()
 
+if(SHALE_BUILD_BENCH)
+  add_subdirectory(bench)
+endif()
+
 find_package(Doxygen QUIET)
 if(DOXYGEN_FOUND)
   # Doxygen resolves INPUT and OUTPUT_DIRECTORY against its working directory.
