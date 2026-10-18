@@ -15,24 +15,32 @@
 #include <cstdlib>
 #include <initializer_list>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "core/version_edit.h"
+#include "db/filename_io.h"
 #include "db_ops_program.h"
 #include "io/block_builder.h"
 #include "io/env_util.h"
 #include "io/log_format.h"
+#include "io/log_reader.h"
 #include "io/log_writer.h"
 #include "io/table_builder.h"
+#include "shale/db.h"
 #include "shale/env.h"
+#include "shale/options.h"
+#include "shale/scheduler.h"
 #include "shale/status.h"
 #include "util/coding.h"
 #include "util/crc32c.h"
 #include "util/dbformat.h"
+#include "util/filename.h"
 #include "util/random.h"
+#include "version_set_input.h"
 
 namespace shale {
 namespace {
@@ -236,6 +244,126 @@ void SeedVersionEdit(const std::string& corpus_dir) {
   out.Write("empty_edit", "");
 }
 
+// Runs a small database on `env`, on a scheduler that only this function drives, through enough
+// writes, flushes and a compaction that its MANIFEST holds a snapshot and an edit for each, and
+// returns the database's directory.
+std::string RunSmallDatabase(Env* env) {
+  ManualScheduler scheduler;
+  Options options;
+  options.env = env;
+  options.scheduler = &scheduler;
+  options.create_if_missing = true;
+  options.write_buffer_size = 16384;
+  options.l0_compaction_trigger = 2;
+  const std::string name = "/seed-db";
+  std::unique_ptr<DB> db;
+  Require(DB::Open(options, name, &db), "open the seed database");
+  for (int round = 0; round < 4; round++) {
+    for (int i = 0; i < 60; i++) {
+      Require(db->Put(WriteOptions(), NumberedKey(round * 40 + i), std::string(100, 'v')),
+              "put into the seed database");
+    }
+    Require(db->Flush(), "flush the seed database");
+    scheduler.RunPending();
+  }
+  Require(db->CompactRange(std::nullopt, std::nullopt), "compact the seed database");
+  scheduler.RunPending();
+  db.reset();
+  return name;
+}
+
+// What the MANIFEST that CURRENT names, in the database `name` on `env`, holds: its bytes, and its
+// records.
+struct ManifestOf {
+  std::string bytes;
+  std::vector<std::string> records;
+};
+
+ManifestOf ReadManifest(Env* env, const std::string& name) {
+  std::string current;
+  Require(ReadFileToString(env, CurrentFileName(name), &current), "read CURRENT");
+  uint64_t number = 0;
+  Require(ParseCurrentFile(name, current, &number), "parse CURRENT");
+  ManifestOf manifest;
+  const std::string fname = DescriptorFileName(name, number);
+  Require(ReadFileToString(env, fname, &manifest.bytes), "read the MANIFEST");
+
+  std::unique_ptr<SequentialFile> file;
+  Require(env->NewSequentialFile(fname, &file), "open the MANIFEST");
+  log::Reader reader(file.get(), nullptr, /*checksum=*/true);
+  std::string scratch;
+  std::string_view record;
+  while (reader.ReadRecord(&record, &scratch)) {
+    manifest.records.emplace_back(record);
+  }
+  return manifest;
+}
+
+// The encoding of an edit that sets the three counters.
+std::string CounterEdit(uint64_t log_number, uint64_t next_file_number, uint64_t last_sequence) {
+  VersionEdit edit;
+  edit.log_number = log_number;
+  edit.next_file_number = next_file_number;
+  edit.last_sequence = last_sequence;
+  std::string encoded;
+  edit.EncodeTo(&encoded);
+  return encoded;
+}
+
+void SeedVersionSet(const std::string& corpus_dir) {
+  const SeedWriter out(corpus_dir, "fuzz_version_set");
+
+  // The MANIFEST of a database that was written to, flushed and compacted: a snapshot, and the
+  // edits that the flushes and the compaction made.
+  const std::unique_ptr<Env> env = NewMemEnv();
+  const ManifestOf small = ReadManifest(env.get(), RunSmallDatabase(env.get()));
+
+  fuzz::VersionSetInput all;
+  all.current_valid = true;
+  all.framed = true;
+  all.manifest_records = 15;
+  all.records = small.records;
+  out.Write("small_db", fuzz::EncodeVersionSetInput(all));
+
+  // The same, with the records after the third applied to what the recovery gives, as a database
+  // does with the edits that follow its open.
+  fuzz::VersionSetInput split = all;
+  split.manifest_records = 3;
+  out.Write("small_db_then_edits", fuzz::EncodeVersionSetInput(split));
+
+  // And with a file number reported as found at the ceiling first, which leaves no number for the
+  // new MANIFEST: the start is refused, and nothing is applied.
+  split.hostile_index = 4;
+  out.Write("small_db_with_the_ceiling_found", fuzz::EncodeVersionSetInput(split));
+
+  // The bytes of the file itself, which reach the log reader with checksums that hold.
+  fuzz::VersionSetInput raw;
+  raw.current_valid = true;
+  raw.manifest = small.bytes;
+  out.Write("small_db_raw", fuzz::EncodeVersionSetInput(raw));
+
+  // A MANIFEST that the numbering refuses: named at the ceiling, and holding counters at it.
+  fuzz::VersionSetInput numbered = all;
+  numbered.manifest_number_index = 6;
+  out.Write("manifest_at_ceiling", fuzz::EncodeVersionSetInput(numbered));
+
+  fuzz::VersionSetInput counters;
+  counters.current_valid = true;
+  counters.framed = true;
+  counters.records = {CounterEdit(1, kMaxFileNumber, kMaxSequenceNumber)};
+  out.Write("counters_at_the_ceiling", fuzz::EncodeVersionSetInput(counters));
+  counters.records = {CounterEdit(1, kMaxFileNumber - 3, kMaxSequenceNumber - 1),
+                      CounterEdit(2, kMaxFileNumber - 2, kMaxSequenceNumber)};
+  counters.hostile_index = 3;
+  out.Write("counters_near_the_ceiling", fuzz::EncodeVersionSetInput(counters));
+
+  // CURRENT that is not what the engine writes: no checksum line.
+  fuzz::VersionSetInput no_checksum = all;
+  no_checksum.current_valid = false;
+  no_checksum.current = "MANIFEST-000001\n";
+  out.Write("current_without_checksum", fuzz::EncodeVersionSetInput(no_checksum));
+}
+
 // Appends one operation to `program`.
 void Emit(std::string* program, fuzz::DbOp op, std::initializer_list<unsigned> operands = {}) {
   program->push_back(static_cast<char>(static_cast<unsigned>(op)));
@@ -308,6 +436,7 @@ int main(int argc, char** argv) {
   shale::SeedBlock(corpus_dir);
   shale::SeedTable(corpus_dir);
   shale::SeedVersionEdit(corpus_dir);
+  shale::SeedVersionSet(corpus_dir);
   shale::SeedDbOps(corpus_dir);
   return 0;
 }

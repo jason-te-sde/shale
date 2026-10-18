@@ -18,8 +18,6 @@ CLANG_TIDY_VERSION=22.1.8
 # Clang from Homebrew's llvm. Set these for a Clang installed somewhere else.
 FUZZ_CC="${FUZZ_CC:-/opt/homebrew/opt/llvm/bin/clang}"
 FUZZ_CXX="${FUZZ_CXX:-/opt/homebrew/opt/llvm/bin/clang++}"
-# Keep these in step with the fuzz job in .github/workflows/ci.yml.
-FUZZ_TARGETS=(fuzz_log_reader fuzz_block fuzz_table fuzz_version_edit fuzz_db_ops)
 FUZZ_SECONDS=10
 
 # This repository must be its own working tree. If it is a subdirectory of a larger one, every path
@@ -129,12 +127,14 @@ CC="$FUZZ_CC" CXX="$FUZZ_CXX" cmake --preset fuzz
 cmake --build --preset fuzz --target fuzz_targets
 rm -rf build/fuzz/found
 mkdir -p build/fuzz/crashes
-for target in "${FUZZ_TARGETS[@]}"; do
+# The targets are those of fuzz/fuzz_targets.txt, as in the job: the name, then what it links.
+while read -r target _; do
+  case "$target" in '' | '#'*) continue ;; esac
   mkdir -p "build/fuzz/found/$target"
   build/fuzz/fuzz/"$target" -max_total_time="$FUZZ_SECONDS" -timeout=60 \
     -artifact_prefix="build/fuzz/crashes/$target-" \
-    "build/fuzz/found/$target" "build/fuzz/fuzz/corpus/$target"
-done
+    "build/fuzz/found/$target" "build/fuzz/fuzz/corpus/$target" </dev/null
+done < fuzz/fuzz_targets.txt
 
 # The bench-smoke job of .github/workflows/ci.yml, which asserts completion only. It has a build tree
 # of its own, because the micro benchmarks need Google Benchmark, which the other trees do not fetch.
