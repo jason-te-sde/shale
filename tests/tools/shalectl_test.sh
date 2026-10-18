@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs the shalectl binary against databases it makes in a directory of its own, and checks the
 # exit status and the output of every command: what it prints, what it refuses, and that `verify`
-# and the dumps leave the database as they found it.
+# and the dumps leave the files of a database as they found them.
 #
 # Usage: shalectl_test.sh <path to the shalectl binary>
 set -uo pipefail
@@ -53,6 +53,14 @@ err_has() {
   cases=$((cases + 1))
   if ! grep -qF -e "$2" "$tmp/err"; then
     fail "$1: standard error lacks '$2'" "$(cat "$tmp/err")"
+  fi
+}
+
+# err_lacks <description> <fragment>: standard error of the last check does not have the fragment.
+err_lacks() {
+  cases=$((cases + 1))
+  if grep -qF -e "$2" "$tmp/err"; then
+    fail "$1: standard error has '$2'" "$(cat "$tmp/err")"
   fi
 }
 
@@ -174,10 +182,44 @@ check "an empty flag name" 2 '' --db="$db" --=x get a
 check "--db without a value" 2 '' --db get a
 check "--from without a value" 2 '' --db="$db" scan --from
 check "--limit without a value" 2 '' --db="$db" scan --limit
+check "--db= with no path" 2 '' --db= get a
+err_has "--db= with no path" "--db"
+check "--db= with no path, for verify" 2 '' --db= verify
 check "flags the dumps do not take" 2 '' --db="$db" dump-sst "$tmp/none.sst"
 check "dump-sst without a file" 2 '' dump-sst
 check "dump-wal with two files" 2 '' dump-wal a b
 check "dump-manifest without a file" 2 '' dump-manifest
+
+# --- What came from the command line is shown escaped in an error, whatever it holds. -----------
+
+esc=$'\x1b'
+check "an unknown command with an escape byte" 2 '' --db="$db" "bad${esc}cmd"
+err_has "the command is shown escaped" 'bad\x1bcmd'
+err_lacks "the command is not shown raw" "$esc"
+check "a flag with an escape byte in its name" 2 '' --db="$db" stats "--no${esc}pe=1"
+err_has "the flag is shown escaped" 'no\x1bpe'
+err_lacks "the flag is not shown raw" "$esc"
+check "--limit with an escape byte" 2 '' --db="$db" scan "--limit=${esc}"
+err_has "--limit is shown escaped" '\x1b'
+err_lacks "--limit is not shown raw" "$esc"
+check "--create with an escape byte" 2 '' --db="$db" "--create=${esc}" get a
+err_has "--create is shown escaped" '\x1b'
+err_lacks "--create is not shown raw" "$esc"
+check "an empty flag name with an escape byte" 2 '' --db="$db" "--=${esc}" get a
+err_has "the flag is shown escaped" '\x1b'
+err_lacks "the empty flag is not shown raw" "$esc"
+
+# --- The usage says what each command does to a database. ----------------------------------------
+
+check "the usage" 2 ''
+err_has "the usage says which commands write" "opens the database for writing"
+err_has "the usage points at a copy" "on a copy"
+err_has "the usage says verify reads no log" "does not read the write-ahead logs"
+err_has "the usage says verify needs write access" "write access"
+err_has "the usage says verify makes a LOCK" "empty LOCK"
+err_has "the usage says what a damaged database is" "exit status 3"
+err_has "the usage says how to pass binary keys" "\\xNN"
+err_has "the usage says a NUL cannot be passed" "NUL"
 
 # --- A database that is not there is an engine error, and nothing is made for it. ----------------
 
@@ -226,7 +268,7 @@ err_has "dump-sst of CURRENT" "Corruption"
 check "dump-wal of a file that is not there" 3 '' dump-wal "$tmp/none.log"
 check "dump-manifest of a file that is not there" 3 '' dump-manifest "$tmp/none.manifest"
 
-# --- verify is read-only, and finds damage. ------------------------------------------------------
+# --- verify changes no file of a database that has a LOCK, and finds damage. -----------------------------------------------------------------------
 
 before="$(fingerprint "$db3")"
 check "verify of a flushed database" 0 $'ok\n' --db="$db3" verify
@@ -234,6 +276,12 @@ check "verify, a second time" 0 $'ok\n' --db="$db3" verify
 check "dump-sst" 0 '*' dump-sst "$sst1"
 check "dump-manifest" 0 '*' dump-manifest "$manifest"
 expect_eq "verify and the dumps changed no file" "$before" "$(fingerprint "$db3")"
+
+# A database that has no LOCK, a copy made without it, is checked, and gets the empty file that
+# taking the lock needs.
+rm "$db3/LOCK"
+check "verify of a database that has no LOCK" 0 $'ok\n' --db="$db3" verify
+expect_eq "verify made an empty LOCK" "0" "$(wc -c <"$db3/LOCK" | tr -d ' ')"
 
 db2="$tmp/db2"
 check "put in a database to damage" 0 '' --db="$db2" --create put a 1
@@ -248,8 +296,45 @@ out_has "verify names the table" "$(basename "$table")"
 expect_eq "verify of a damaged database changed no file" "$damaged" "$(fingerprint "$db2")"
 check "get from a damaged table is an error, not a miss" 3 '' --db="$db2" get a
 err_has "get from a damaged table" "Corruption"
+err_has "get names the damaged table" "$(basename "$table")"
+# Nothing is shown: the failure is found where the scan positions on the table. The error names the
+# table, which the table's own iterator does not.
+check "scan over a damaged table" 3 '' --db="$db2" scan
+err_has "scan over a damaged table" "Corruption"
+err_has "scan names the damaged table" "$(basename "$table")"
 check "dump-sst of a damaged table" 3 '*' dump-sst "$table"
 err_has "dump-sst of a damaged table" "Corruption"
+
+# On one stream, the problems come before the line that counts them, as on a terminal.
+"$shalectl" --db="$db2" verify >"$tmp/both" 2>&1
+cases=$((cases + 1))
+case "$(head -n 1 "$tmp/both")" in
+  Corruption*) ;;
+  *) fail "verify: the first line of the one stream is not a problem" "$(cat "$tmp/both")" ;;
+esac
+cases=$((cases + 1))
+case "$(tail -n 1 "$tmp/both")" in
+  *"verify found 1 problem(s)") ;;
+  *) fail "verify: the last line of the one stream is not the count" "$(cat "$tmp/both")" ;;
+esac
+
+# Output that cannot be written is an error, not a success that lost the output. The reader of the
+# pipe is gone before the scan prints, and with SIGPIPE ignored the write fails instead of ending
+# the process. A reader that is slow to start could still be there, so the case is tried again, and
+# a tool that ignores the failure fails every try.
+cases=$((cases + 1))
+for _ in 1 2 3; do
+  { trap '' PIPE; "$shalectl" --db="$db" scan 2>"$tmp/err"; } | true
+  got=${PIPESTATUS[0]}
+  [ "$got" -eq 3 ] && break
+done
+if [ "$got" -ne 3 ]; then
+  fail "scan into a closed pipe: exit status $got, wanted 3" "$(cat "$tmp/err")"
+fi
+cases=$((cases + 1))
+if ! grep -qF -e "standard output" "$tmp/err"; then
+  fail "scan into a closed pipe: standard error does not say what failed" "$(cat "$tmp/err")"
+fi
 
 # A damaged log and a damaged MANIFEST: the dumps say so and exit with status 3.
 db4="$tmp/db4"

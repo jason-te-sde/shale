@@ -23,7 +23,8 @@ Status ParseCliArgs(const std::vector<std::string>& argv, CliArgs* out) {
       const size_t equals = word.find('=', 2);
       const size_t name_length = equals == std::string::npos ? word.size() - 2 : equals - 2;
       if (name_length == 0) {
-        return Status::InvalidArgument("a flag has no name", word);
+        // The word came from the command line and is going to be shown, so it is shown escaped.
+        return Status::InvalidArgument("a flag has no name", EscapeBytes(word));
       }
       parsed.flags[word.substr(2, name_length)] =
           equals == std::string::npos ? "true" : word.substr(equals + 1);

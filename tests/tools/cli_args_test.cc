@@ -132,6 +132,17 @@ TEST(CliArgsTest, ErrorNamesTheWordAndLeavesTheOutputAlone) {
   EXPECT_EQ(args.flags, (std::map<std::string, std::string>{{"kept", "kept"}}));
 }
 
+TEST(CliArgsTest, ErrorShowsTheWordEscaped) {
+  // The word came from the command line and goes to a terminal, so a byte that is not printable
+  // is not passed on as it is.
+  CliArgs args;
+  const Status s = ParseCliArgs({"get", "--=\x1b[31m\tx"}, &args);
+  ASSERT_TRUE(s.IsInvalidArgument());
+  EXPECT_EQ(s.ToString().find('\x1b'), std::string::npos) << s.ToString();
+  EXPECT_EQ(s.ToString().find('\t'), std::string::npos) << s.ToString();
+  EXPECT_NE(s.ToString().find("--=\\x1b[31m\\x09x"), std::string::npos) << s.ToString();
+}
+
 TEST(CliArgsTest, ParsingReplacesWhatTheOutputHeld) {
   CliArgs args;
   args.command = "old";

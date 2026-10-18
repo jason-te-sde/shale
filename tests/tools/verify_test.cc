@@ -368,6 +368,18 @@ TEST_F(VerifyTest, RefusesADatabaseThatIsOpen) {
   EXPECT_EQ(value, "1");
 }
 
+TEST_F(VerifyTest, ADatabaseWithoutALockGetsAnEmptyLockAndNothingElse) {
+  MakeDatabase(2);
+  ASSERT_OK(env_->RemoveFile(LockFileName(kDb)));
+  auto expected = DirectoryContents();
+  ASSERT_EQ(expected.count("LOCK"), 0U);
+
+  EXPECT_TRUE(Problems().empty());
+  // Taking the lock needs the file, and the Env makes it. It is the one change.
+  expected["LOCK"] = "";
+  EXPECT_EQ(DirectoryContents(), expected);
+}
+
 TEST_F(VerifyTest, RefusesAPathWithNoDatabaseAndCreatesNothing) {
   std::vector<std::string> problems{"left over from before"};
   Status s = VerifyDatabase(env_.get(), kDb, &problems);
@@ -504,6 +516,36 @@ TEST_F(VerifyTest, ReportsATableWithAnEntryBelowItsRecordedRange) {
   const std::vector<std::string> problems = Problems();
   ASSERT_EQ(problems.size(), 1U);
   EXPECT_TRUE(Contains(problems[0], "smallest")) << problems[0];
+}
+
+// ---- The real Env: the lock is the operating system's. ---------------------------------------
+
+TEST(VerifyRealEnvTest, RefusesADatabaseThatIsOpenInTheSameProcess) {
+  // flock() belongs to the open file description, so a second open of LOCK in this process is
+  // refused as another process's would be.
+  const std::string dir = NewTempDir("shalectl_verify_");
+  Env* const env = Env::Default();
+  {
+    Options options;
+    options.create_if_missing = true;
+    std::unique_ptr<DB> db;
+    ASSERT_OK(DB::Open(options, dir, &db));
+    ASSERT_OK(db->Put(WriteOptions(), "a", "1"));
+
+    std::vector<std::string> problems{"left over from before"};
+    const Status s = VerifyDatabase(env, dir, &problems);
+    EXPECT_TRUE(s.IsIOError()) << s.ToString();
+    EXPECT_TRUE(Contains(s.ToString(), "LOCK")) << s.ToString();
+    EXPECT_TRUE(problems.empty());
+  }
+  // With the database closed the same call goes through, and the lock is let go of.
+  std::vector<std::string> problems;
+  EXPECT_OK(VerifyDatabase(env, dir, &problems));
+  EXPECT_TRUE(problems.empty());
+  std::unique_ptr<DB> db;
+  EXPECT_OK(DB::Open(Options(), dir, &db));
+  db.reset();
+  EXPECT_OK(DestroyDB(dir, Options()));
 }
 
 }  // namespace

@@ -2,7 +2,8 @@
 #define SHALE_TOOLS_VERIFY_H_
 
 // The offline check behind `shalectl verify`: reads every live table of a database that nothing has
-// open, and says what is wrong with it, without changing a byte of it.
+// open, and says what is wrong with it. It writes no byte of what the database holds, but it is not
+// read-only: it takes the LOCK, which needs write access to the directory. See VerifyDatabase().
 
 #include <string>
 #include <vector>
@@ -14,8 +15,10 @@
 
 namespace shale {
 
-/// Checks the database in `dbname` and never changes it: takes its LOCK, reads the MANIFEST that
-/// CURRENT names with VersionSet::Recover() and nothing that writes, and reads every table that the
+/// Checks the database in `dbname`, and changes no file of it but one: it takes its LOCK, creating
+/// the empty file if the directory has none, as DB::Open() would, so that it needs write access to
+/// the directory and cannot check a database on read-only media. Then it reads the MANIFEST that
+/// CURRENT names with VersionSet::Recover(), which writes nothing, and every table that the
 /// recovered state names, in full and with checksums on. Each defect found is one line appended to
 /// `*problems`: a MANIFEST or CURRENT that does not recover, and, for each table, the first of
 /// these that is wrong with it: it is not there, its size is not the one the MANIFEST records, it
@@ -27,7 +30,8 @@ namespace shale {
 /// what it found. Returns an error, with `*problems` empty, when it could not start:
 /// InvalidArgument for a directory that holds no database (it has no CURRENT, and nothing is
 /// created in it), and the IOError of a LOCK that another process or handle holds, which is a
-/// database that is open.
+/// database that is open, or that cannot be taken, which is a directory that cannot be written. A
+/// caller tells damage from that failure by which of the two it got.
 /// @param env the Env to read through.
 /// @param dbname the directory of the database.
 /// @param problems receives the defects found, one line each; cleared first.

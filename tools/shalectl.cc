@@ -54,20 +54,29 @@ constexpr char kUsage[] =
     "       shalectl dump-manifest FILE\n"
     "\n"
     "get prints the value; scan prints a line of key, a tab and value for each key from --from,\n"
-    "at most --limit of them; stats prints the database's statistics. Every key and value is "
-    "shown\n"
-    "as printable ASCII: a backslash as \\\\ and any byte that is not printable as \\xNN. A key "
-    "or\n"
-    "value that starts with -- is given after a lone --. --create makes the database if there is\n"
-    "none. Flags may come before the command or after it.\n"
+    "at most --limit of them; stats prints the database's statistics. Every key and value is\n"
+    "shown as printable ASCII: a backslash as \\\\ and any byte that is not printable as \\xNN.\n"
+    "A key or value that starts with -- is given after a lone --. A binary key can be given\n"
+    "with the shell's $'\\xNN' quoting; a NUL byte cannot be given on the command line.\n"
+    "--create makes the database if there is none. Flags may come before the command or after\n"
+    "it.\n"
     "\n"
-    "flush is a maintenance command. Opening a database turns the write-ahead log it finds into a\n"
-    "table, and flush then writes out whatever the memtable holds, so that nothing is left in a\n"
-    "log.\n"
+    "Every command except verify and the dumps opens the database for writing: it replays the\n"
+    "write-ahead log into a table, writes a new MANIFEST and deletes the files that are no\n"
+    "longer needed. To look at a database that must not be touched, run verify and the dumps\n"
+    "on a copy of it.\n"
     "\n"
-    "verify does not open the database for writing. It takes the LOCK, so it refuses a database\n"
-    "that is open, reads the MANIFEST and every table with checksums on, and prints ok or a line\n"
-    "for each defect found. It changes no file.\n"
+    "flush is a maintenance command. Opening a database turns the write-ahead log it finds\n"
+    "into a table, and flush then writes out whatever the memtable holds, so that nothing is\n"
+    "left in a log.\n"
+    "\n"
+    "verify changes no byte of what the database holds, but it is not read-only. It takes the\n"
+    "LOCK, so it refuses a database that is open; it creates an empty LOCK if the directory has\n"
+    "none; it needs write access to the directory, so it cannot check read-only media. It reads\n"
+    "the MANIFEST and every table with checksums on and does not read the write-ahead logs\n"
+    "(dump-wal does). It prints ok, or a line for each problem found on standard output and\n"
+    "exits with status 3. A failure to take the lock or to read at all is also exit status 3,\n"
+    "with the reason on standard error and nothing on standard output.\n"
     "\n"
     "dump-sst, dump-wal and dump-manifest print one entry of a table, a write-ahead log or a\n"
     "MANIFEST on each line, whatever database the file is from.\n"
@@ -76,7 +85,10 @@ constexpr char kUsage[] =
 
 void Print(std::string_view text) { std::fwrite(text.data(), 1, text.size(), stdout); }
 
+// Prints a line to standard error. What was printed to standard output is flushed first, so that on
+// a terminal, or one stream shared by both, the lines of a result come before the error about it.
 void PrintError(std::string_view text) {
+  std::fflush(stdout);
   std::fputs("shalectl: ", stderr);
   std::fwrite(text.data(), 1, text.size(), stderr);
   std::fputc('\n', stderr);
@@ -93,12 +105,15 @@ int EngineError(const Status& status) {
   return kExitEngine;
 }
 
-// The flags that take a value. A bare one is stored as "true", which would be taken for the path of
-// a database or the first key of a scan, and the usual way to get one is to write the value after a
-// space; so a bare one is refused before the command runs.
+// The flags that take a value. ParseCliArgs() stores a bare flag as "true", which would be taken
+// for the path of a database or the first key of a scan, and the usual way to give one is to write
+// the value after a space, which makes it a bare flag and the value a word; so a bare one is
+// refused before the command runs.
 constexpr std::array<std::string_view, 3> kFlagsWithValues = {"--db", "--from", "--limit"};
 
-// The first word before a lone `--` that is one of kFlagsWithValues spelled with no value.
+// The first word that is one of kFlagsWithValues spelled with no value. The search stops at the
+// first lone `--`, as ParseCliArgs() stops reading flags there: what follows it is a key or a
+// value, and one that is spelled `--db` is that and not a flag.
 std::optional<std::string> FindFlagWithoutValue(const std::vector<std::string>& words) {
   for (const std::string& word : words) {
     if (word == "--") {
@@ -113,22 +128,37 @@ std::optional<std::string> FindFlagWithoutValue(const std::vector<std::string>& 
   return std::nullopt;
 }
 
+// Reads --db into `*path`. Returns kExitOk, or kExitUsage, reported, if it is missing or empty: an
+// empty path would be a database in no directory at all, and is a slip of the shell, as in
+// --db=$DB with DB not set.
+int DatabasePath(const CliArgs& args, std::string* path) {
+  const auto flag = args.flags.find("db");
+  if (flag == args.flags.end()) {
+    return UsageError("--db=PATH is needed to say which database");
+  }
+  if (flag->second.empty()) {
+    return UsageError("--db needs a path, and it is empty");
+  }
+  *path = flag->second;
+  return kExitOk;
+}
+
 // Opens the database that --db names, with --create deciding whether to make it. Returns kExitOk,
 // or the exit status of the failure, which has been reported.
 int OpenDatabase(const CliArgs& args, std::unique_ptr<DB>* db) {
-  const auto path = args.flags.find("db");
-  if (path == args.flags.end()) {
-    return UsageError("--db=PATH is needed to say which database");
+  std::string path;
+  if (const int code = DatabasePath(args, &path); code != kExitOk) {
+    return code;
   }
   Options options;
   const auto create = args.flags.find("create");
   if (create != args.flags.end()) {
     if (create->second != "true" && create->second != "false") {
-      return UsageError("--create is true or false, not '" + create->second + "'");
+      return UsageError("--create is true or false, not '" + EscapeBytes(create->second) + "'");
     }
     options.create_if_missing = create->second == "true";
   }
-  const Status s = DB::Open(options, path->second, db);
+  const Status s = DB::Open(options, path, db);
   if (!s.ok()) {
     return EngineError(s);
   }
@@ -193,7 +223,8 @@ int RunScan(const CliArgs& args) {
   bool limit_valid = false;
   const std::optional<uint64_t> limit = ParseLimit(args, &limit_valid);
   if (!limit_valid) {
-    return UsageError("--limit is a whole number, not '" + args.flags.at("limit") + "'");
+    return UsageError("--limit is a whole number, not '" + EscapeBytes(args.flags.at("limit")) +
+                      "'");
   }
   std::unique_ptr<DB> db;
   if (const int code = OpenDatabase(args, &db); code != kExitOk) {
@@ -248,12 +279,12 @@ int RunFlush(const CliArgs& args) {
 }
 
 int RunVerify(const CliArgs& args) {
-  const auto path = args.flags.find("db");
-  if (path == args.flags.end()) {
-    return UsageError("--db=PATH is needed to say which database");
+  std::string path;
+  if (const int code = DatabasePath(args, &path); code != kExitOk) {
+    return code;
   }
   std::vector<std::string> problems;
-  const Status s = VerifyDatabase(Env::Default(), path->second, &problems);
+  const Status s = VerifyDatabase(Env::Default(), path, &problems);
   if (!s.ok()) {
     return EngineError(s);
   }
@@ -436,7 +467,7 @@ int Main(const std::vector<std::string>& words) {
     }
     for (const auto& [name, value] : args.flags) {
       if (!TakesFlag(command, name)) {
-        return UsageError(args.command + " does not take --" + name);
+        return UsageError(EscapeBytes(args.command) + " does not take --" + EscapeBytes(name));
       }
     }
     if (args.positional.size() != command.positional) {
@@ -445,13 +476,17 @@ int Main(const std::vector<std::string>& words) {
                         std::to_string(args.positional.size()));
     }
     const int code = command.run(args);
-    if (std::fflush(stdout) != 0 && code == kExitOk) {
+    // Output that did not get written is a failure, and a command that says OK after losing its
+    // output is worse than one that fails: flush, which can fail, and the stream's own error flag,
+    // which a write that failed before this point left set.
+    const bool flushed = std::fflush(stdout) == 0;
+    if ((!flushed || std::ferror(stdout) != 0) && code == kExitOk) {
       PrintError("cannot write to standard output");
       return kExitEngine;
     }
     return code;
   }
-  return UsageError("unknown command '" + args.command + "'");
+  return UsageError("unknown command '" + EscapeBytes(args.command) + "'");
 }
 
 }  // namespace
