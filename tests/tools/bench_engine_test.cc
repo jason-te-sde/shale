@@ -15,6 +15,7 @@
 
 #include "shale/env.h"
 #include "shale/options.h"
+#include "shale/scheduler.h"
 #include "shale/status.h"
 #include "testkit/fault_env.h"
 #include "testkit/test_util.h"
@@ -145,8 +146,12 @@ TEST_F(BenchEngineTest, TheSyncFlagDecidesWhetherTheLogIsSynced) {
   EXPECT_GT(faulty.injected_errors(), 0u);
 }
 
-TEST_F(BenchEngineTest, CompactAllKeepsEveryKey) {
-  // Small tables, so that the writes make several files and the compaction has work to do.
+TEST_F(BenchEngineTest, CompactAllDoesTheWorkOfACompactionAndKeepsEveryKey) {
+  // Small tables, so that the writes make several files and the compaction has work to do. The
+  // scheduler runs a task only when the database waits for one, so that nothing happens in the
+  // background between the two readings of the write amplification below.
+  ManualScheduler scheduler;
+  options_.scheduler = &scheduler;
   options_.write_buffer_size = 16384;
   options_.target_file_size = 16384;
   const std::unique_ptr<BenchEngine> engine = OpenFresh();
@@ -155,7 +160,13 @@ TEST_F(BenchEngineTest, CompactAllKeepsEveryKey) {
     ASSERT_OK(engine->Put(Key(i), std::string(100, static_cast<char>('a' + i % 26)), false));
   }
 
+  // A compaction writes: what is left in the memtable becomes a table, and the tables are merged.
+  // An engine whose CompactAll() returned at once would leave the figure where it was.
+  const std::string before = engine->WriteAmplification();
   ASSERT_OK(engine->CompactAll());
+  const std::string after = engine->WriteAmplification();
+  EXPECT_GT(std::stod(after), std::stod(before))
+      << "write amplification " << before << " and then " << after;
 
   EXPECT_EQ(Seen(engine.get(), "", 0), static_cast<size_t>(kKeys));
   std::string value;

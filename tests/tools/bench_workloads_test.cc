@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -18,8 +19,10 @@
 #include <vector>
 
 #include "bench_engine.h"
+#include "histogram.h"
 #include "shale/status.h"
 #include "testkit/test_util.h"
+#include "util/coding.h"
 
 namespace shale {
 namespace {
@@ -27,13 +30,14 @@ namespace {
 // What a fake engine does wrong. Each is one way that an engine can give a wrong answer, or fail.
 enum class Flaw {
   kNone,
-  kLosesKeys,         // Get says NotFound for the keys that end in 7
-  kInventsKeys,       // Get returns a value for a key that was never written
-  kShortValues,       // Get returns the value without its last byte
-  kScanCountsExtra,   // Scan reports one entry more than it visited
-  kSeekFindsNothing,  // Scan of one entry reports none
-  kPutFails,          // Put returns an IOError from the third on
-  kGetFails,          // Get returns an IOError for a key that is there
+  kLosesKeys,             // Get says NotFound for the keys that end in 7
+  kInventsKeys,           // Get returns a value for a key that was never written
+  kShortValues,           // Get returns the value without its last byte
+  kScanCountsExtra,       // Scan reports one entry more than it visited
+  kSeekFindsNothing,      // Scan of one entry reports none
+  kPutFails,              // Put returns an IOError from the third on
+  kGetFails,              // Get returns an IOError for a key that is there
+  kKeepsTheFirstVersion,  // Put of a key that is there does nothing, so Get serves a stale value
 };
 
 struct PutCall {
@@ -63,15 +67,20 @@ class FakeEngine final : public BenchEngine {
   }
 
   Status Put(std::string_view key, std::string_view value, bool sync) override {
+    Delay();
     puts.push_back({std::string(key), std::string(value), sync});
     if (flaw_ == Flaw::kPutFails && puts.size() >= 3) {
       return Status::IOError("the disk is full");
+    }
+    if (flaw_ == Flaw::kKeepsTheFirstVersion && data_.count(std::string(key)) != 0) {
+      return Status::OK();
     }
     data_[std::string(key)] = std::string(value);
     return Status::OK();
   }
 
   Status Get(std::string_view key, std::string* value) override {
+    Delay();
     gets.emplace_back(key);
     const auto it = data_.find(std::string(key));
     if (it == data_.end()) {
@@ -95,6 +104,7 @@ class FakeEngine final : public BenchEngine {
   }
 
   Status Scan(std::string_view from, size_t limit, size_t* seen) override {
+    Delay();
     scans.push_back({std::string(from), limit});
     size_t visited = 0;
     for (auto it = data_.lower_bound(std::string(from)); it != data_.end(); ++it) {
@@ -132,8 +142,21 @@ class FakeEngine final : public BenchEngine {
     size_t limit;
   };
   std::vector<ScanCall> scans;
+  // How long each Put, Get and Scan takes at least, in microseconds, so that a test can tell the
+  // time inside the engine from the rest of the loop.
+  uint64_t call_delay_micros = 0;
 
  private:
+  void Delay() const {
+    if (call_delay_micros == 0) {
+      return;
+    }
+    const auto until =
+        std::chrono::steady_clock::now() + std::chrono::microseconds(call_delay_micros);
+    while (std::chrono::steady_clock::now() < until) {
+    }
+  }
+
   const Flaw flaw_;
   std::map<std::string, std::string> data_;
 };
@@ -309,11 +332,7 @@ TEST(BenchWorkloadsTest, AWriteRunAccountsForItsOperationsBytesAndLatencies) {
 
   EXPECT_EQ(result.operations, 60u);
   EXPECT_EQ(result.bytes, 60u * (16 + 24));
-  EXPECT_GT(result.seconds, 0.0);
-  EXPECT_GT(result.OpsPerSecond(), 0.0);
-  ASSERT_TRUE(result.latency.has_value());
-  EXPECT_LE(result.latency->p50, result.latency->p99);
-  EXPECT_LE(result.latency->p99, result.latency->p999);
+  EXPECT_TRUE(result.latency.has_value());
   EXPECT_FALSE(result.found.has_value());
   EXPECT_EQ(result.write_amplification, "1.50") << "the engine's figure, as the engine gave it";
 }
@@ -439,8 +458,7 @@ TEST(BenchWorkloadsTest, ReadsOfASparseDatabaseFollowWhatItHolds) {
   EXPECT_EQ(result.operations, written.populated.entries);
 }
 
-// ---- A wrong answer is a failure that names what was wrong.
-// --------------------------------------
+// ---- A wrong answer is a failure that names what was wrong. -------------------------------------
 
 bool Mentions(const Status& s, const std::string& text) {
   return s.ToString().find(text) != std::string::npos;
@@ -469,7 +487,11 @@ TEST(BenchWorkloadsTest, AKeyThatWasNeverWrittenAndIsFoundIsCaughtByReadMissing)
   const Status s = Read(&written, Benchmark::kReadMissing, &result);
   EXPECT_TRUE(s.IsCorruption()) << s.ToString();
   EXPECT_TRUE(Mentions(s, "readmissing")) << s.ToString();
-  EXPECT_TRUE(Mentions(s, ".")) << s.ToString();
+  // The run stops at the first answer that is wrong, so the key it asked for last is the one named.
+  ASSERT_FALSE(written.engine.gets.empty());
+  EXPECT_EQ(written.engine.gets.back().size(), 17u);
+  EXPECT_TRUE(Mentions(s, "key " + written.engine.gets.back() + " was found and was never written"))
+      << s.ToString();
 }
 
 TEST(BenchWorkloadsTest, AValueOfTheWrongSizeIsCaught) {
@@ -508,6 +530,109 @@ TEST(BenchWorkloadsTest, AnErrorOfTheEngineIsReturnedAsItIsAndNotTakenForAnAnswe
   RunResult result;
   const Status s = Read(&written, Benchmark::kReadRandom, &result);
   EXPECT_TRUE(s.IsIOError()) << s.ToString();
+}
+
+// ---- What a run says about itself.
+// ----------------------------------------------------------------
+
+TEST(BenchWorkloadsTest, TheRatesAreTheOperationsAndTheBytesOverTheTimeWithAMegabyteOf2To20) {
+  RunResult result;
+  result.operations = 3000;
+  result.bytes = 6 * 1048576;
+  result.seconds = 2.0;
+  EXPECT_DOUBLE_EQ(result.OpsPerSecond(), 1500.0);
+  EXPECT_DOUBLE_EQ(result.MbPerSecond(), 3.0);
+}
+
+TEST(BenchWorkloadsTest, TheLatenciesAreTheMedianTheNinetyNinthAndTheNinetyNinePointNinth) {
+  // A thousand samples, so that the 99th percentile (the 990th), the 99.9th (the 999th) and the
+  // percentiles near them are all different samples.
+  Histogram histogram;
+  for (int micros = 1; micros <= 1000; micros++) {
+    histogram.Add(micros);
+  }
+  const Latency latency = SummarizeLatencies(histogram);
+  EXPECT_EQ(latency.p50, 500);
+  EXPECT_EQ(latency.p99, 990);
+  EXPECT_EQ(latency.p999, 999);
+  EXPECT_DOUBLE_EQ(latency.average, 500.5);
+}
+
+TEST(BenchWorkloadsTest, TheTimeInsideTheEngineIsTheTimeOfItsCallsAndNoMore) {
+  constexpr uint64_t kDelayMicros = 200;
+  FakeEngine engine;
+  engine.call_delay_micros = kDelayMicros;
+  Populated populated;
+  RunResult result;
+  ASSERT_OK(RunWriteBenchmark(&engine, Options(), Benchmark::kFillSeq, &populated, &result));
+  // Sixty puts of 200 us each. A tenth is allowed to go missing: the steady_clock of libstdc++ on
+  // macOS ticks in whole microseconds, and a spin that it reads as 199 us once in a while has been
+  // seen to leave the sum a fraction of a percent short.
+  EXPECT_GE(result.engine_seconds, 0.9 * 60 * kDelayMicros * 1e-6);
+  EXPECT_LE(result.engine_seconds, result.seconds * (1 + 1e-9));
+  // It is the sum of the latencies, which the loop's own work is not part of.
+  ASSERT_TRUE(result.latency.has_value());
+  EXPECT_NEAR(result.engine_seconds, result.latency->average * 60 * 1e-6, 1e-9);
+
+  for (const Benchmark benchmark :
+       {Benchmark::kReadRandom, Benchmark::kReadMissing, Benchmark::kSeekRandom}) {
+    Written written(Flaw::kNone);
+    written.engine.call_delay_micros = kDelayMicros;
+    ASSERT_OK(Read(&written, benchmark, &result));
+    EXPECT_GE(result.engine_seconds, 0.9 * 300 * kDelayMicros * 1e-6) << BenchmarkName(benchmark);
+    EXPECT_LE(result.engine_seconds, result.seconds * (1 + 1e-9)) << BenchmarkName(benchmark);
+    ASSERT_TRUE(result.latency.has_value());
+    EXPECT_NEAR(result.engine_seconds, result.latency->average * 300 * 1e-6, 1e-9)
+        << BenchmarkName(benchmark);
+  }
+
+  Written written(Flaw::kNone);
+  ASSERT_OK(Read(&written, Benchmark::kReadSeq, &result));
+  EXPECT_EQ(result.engine_seconds, result.seconds) << "a scan is one call, and the whole loop";
+}
+
+// ---- Every put says which put it is.
+// ---------------------------------------------------------------
+
+uint64_t StampOf(const PutCall& put) { return DecodeFixed64(put.value.data()); }
+
+TEST(BenchWorkloadsTest, EveryPutCarriesItsNumberInItsFirstEightBytes) {
+  Populated populated;
+  RunResult result;
+  const FakeEngine engine = WriteOn(Benchmark::kOverwrite, Options(), &populated, &result);
+  ASSERT_EQ(engine.puts.size(), 120u);
+  for (size_t i = 0; i < engine.puts.size(); i++) {
+    // The load counts, so that an overwrite is told from the first value of its key.
+    EXPECT_EQ(StampOf(engine.puts[i]), i + 1) << "put " << i;
+  }
+}
+
+TEST(BenchWorkloadsTest, AValueShorterThanTheNumberCarriesTheLowBytesOfIt) {
+  WorkloadOptions options = Options(200);
+  options.value_size = 3;
+  Populated populated;
+  RunResult result;
+  FakeEngine engine;
+  ASSERT_OK(RunWriteBenchmark(&engine, options, Benchmark::kOverwrite, &populated, &result));
+  ASSERT_EQ(engine.puts.size(), 400u);
+  EXPECT_EQ(engine.puts[0].value, std::string("\x01\x00\x00", 3));
+  EXPECT_EQ(engine.puts[299].value, std::string("\x2c\x01\x00", 3)) << "put 300 is 0x012c";
+
+  // What is checked is the bytes there are, and an engine that tells the truth passes.
+  for (const Benchmark benchmark : {Benchmark::kReadRandom, Benchmark::kReadSeq}) {
+    ASSERT_OK(RunReadBenchmark(&engine, options, benchmark, populated, &result));
+  }
+}
+
+TEST(BenchWorkloadsTest, AValueThatIsNotTheOneLastPutToItsKeyIsCaught) {
+  // An engine that keeps the first value of a key serves, after an overwrite, a value of the right
+  // size that is a stale one.
+  Written written(Flaw::kKeepsTheFirstVersion, Benchmark::kOverwrite);
+  RunResult result;
+  const Status s = Read(&written, Benchmark::kReadRandom, &result);
+  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+  EXPECT_TRUE(Mentions(s, "readrandom")) << s.ToString();
+  EXPECT_TRUE(Mentions(s, "is not the value last put to it")) << s.ToString();
 }
 
 }  // namespace

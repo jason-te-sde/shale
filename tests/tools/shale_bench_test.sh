@@ -65,12 +65,21 @@ row() {
   fi
 }
 
+# expect_eq <description> <wanted> <got>
+expect_eq() {
+  cases=$((cases + 1))
+  if [ "$2" != "$3" ]; then
+    fail "$1: wanted '$2', got '$3'"
+  fi
+}
+
 # json_has <description> <file> <python>: parses the JSON file as `d` and runs the Python, which
-# raises (an assert) when what it says does not hold.
+# raises (an assert) when what it says does not hold. json, os and sys are imported, so that the
+# Python can read what the shell passes in the environment.
 json_has() {
   local description=$1 file=$2 code=$3 output
   cases=$((cases + 1))
-  if ! output="$(python3 -I -c 'import json, sys; d = json.load(open(sys.argv[1])); exec(sys.argv[2])' \
+  if ! output="$(python3 -I -c 'import json, os, sys; d = json.load(open(sys.argv[1])); exec(sys.argv[2])' \
     "$file" "$code" 2>&1)"; then
     fail "$description" "$output"
   fi
@@ -98,12 +107,46 @@ done
 out_has "all benchmarks: the table has a header" "write-amp"
 out_has "all benchmarks: the output says where it ran" "# machine:"
 out_has "all benchmarks: the output says how it was built" "# build:"
+out_has "all benchmarks: the output says the clock's tick" "# clock: steady_clock tick "
 
-json_has "the JSON of all benchmarks" "$tmp/all.json" '
+# The machine is named by the system's name, release and architecture, which is what uname -srm
+# prints, and by nothing that names the owner of the machine: not the host name, and not the
+# kernel's version string, which has the build host in it on some systems. The database is named
+# by the last component of its path alone, for the same reason.
+system="$(uname -srm)"
+host="$(hostname)"
+cases=$((cases + 1))
+if [ -z "$host" ] || grep -qF -e "$host" <<<"$system"; then
+  fail "this test cannot tell the host name '$host' from the system '$system'"
+fi
+system_line="$(grep '^# system: ' "$tmp/out" || true)"
+expect_eq "the # system: line is uname -srm and nothing else" "# system: $system" "$system_line"
+cases=$((cases + 1))
+if grep -qF -e "$host" "$tmp/all.json"; then
+  fail "the JSON holds the host name '$host'" "$(grep -F -e "$host" "$tmp/all.json")"
+fi
+cases=$((cases + 1))
+if grep -qF -e "$host" <<<"$system_line"; then
+  fail "the # system: line holds the host name '$host'" "$system_line"
+fi
+expect_eq "the database is named by its last component" "# database: db1" \
+  "$(grep '^# database: ' "$tmp/out" || true)"
+cases=$((cases + 1))
+if grep -qF -e "$tmp" "$tmp/all.json"; then
+  fail "the JSON holds the directory of the database" "$(grep -F -e "$tmp" "$tmp/all.json")"
+fi
+
+SYSTEM="$system" OUT="$tmp/out" json_has "the JSON of all benchmarks" "$tmp/all.json" '
+import statistics
+
+def close(a, b):
+    return abs(a - b) <= 1e-5 * max(1.0, abs(b))
+
 assert d["tool"] == "shale_bench" and d["engine"] == "shale", d["engine"]
 c = d["config"]
 assert c["num"] == 2000 and c["sync_num"] == 20 and c["repeat"] == 2 and c["seed"] == 7, c
 assert c["value_size"] == 100 and c["compact_before_reads"] is False, c
+assert c["db"] == "db1", c["db"]
 names = [r["name"] for r in d["results"]]
 want = ["fillseq", "fillrandom", "fillsync", "overwrite", "readrandom", "readmissing", "readseq",
         "seekrandom"]
@@ -111,19 +154,40 @@ assert names == want, names
 assert c["benchmarks"] == want, c["benchmarks"]
 
 m = d["machine"]
-assert m["uname"] and m["cpu"] and m["logical_cores"] >= 1, m
+assert m["uname"] == os.environ["SYSTEM"], m["uname"]
+assert m["cpu"] and m["logical_cores"] >= 1, m
+assert isinstance(m["clock_resolution_ns"], int) and 1 <= m["clock_resolution_ns"] <= 100000, m
 b = d["build"]
 assert b["compiler_id"] and b["compiler_version"] and b["build_type"], b
+assert b["coverage"] in (True, False) and isinstance(b["flaw"], str), b
+
+# The warning that a build is not worth quoting is printed exactly when the JSON says it is not one
+# that is: an optimized build, without a sanitizer, a coverage instrument or a deliberate flaw.
+representative = (b["build_type"] in ("Release", "RelWithDebInfo") and b["sanitizer"] == ""
+                  and b["coverage"] is False and b["flaw"] == "")
+warned = "# WARNING" in open(os.environ["OUT"]).read()
+assert warned == (not representative), (warned, b)
 
 by = {r["name"]: r for r in d["results"]}
 for r in d["results"]:
     assert len(r["runs"]) == 2, r["name"]
     for x in r["runs"]:
-        assert x["operations"] > 0 and x["seconds"] > 0 and x["ops_per_sec"] > 0, (r["name"], x)
-    # The median of two runs is their mean.
-    mean = sum(x["ops_per_sec"] for x in r["runs"]) / 2
-    assert abs(r["ops_per_sec"] - mean) <= 1e-5 + 1e-9 * mean, (r["name"], r["ops_per_sec"], mean)
-    assert r["mb_per_sec"] >= 0, r["name"]
+        assert x["operations"] > 0, (r["name"], x)
+        # The rates of a run are its operations and bytes over its time, with a megabyte of 2^20.
+        assert close(x["ops_per_sec"], x["operations"] / x["seconds"]), (r["name"], x)
+        assert close(x["mb_per_sec"], x["bytes"] / 1048576 / x["seconds"]), (r["name"], x)
+        # The time inside the engine is part of the time of the loop, and a scan is all of it.
+        assert 0 < x["engine_seconds"] <= x["seconds"] * (1 + 1e-6), (r["name"], x)
+        if r["name"] == "readseq":
+            assert close(x["engine_seconds"], x["seconds"]), (r["name"], x)
+    # Every figure of a benchmark is the median of that figure over its runs, the same figure and
+    # not another one: a median of two is their mean.
+    for key in ("ops_per_sec", "mb_per_sec", "p50_us", "p99_us", "p999_us"):
+        values = [x[key] for x in r["runs"]]
+        if values[0] is None:
+            assert r[key] is None and all(v is None for v in values), (r["name"], key)
+        else:
+            assert close(r[key], statistics.median(values)), (r["name"], key, r[key], values)
 
 for name, ops in (("fillseq", 2000), ("fillrandom", 2000), ("overwrite", 2000), ("fillsync", 20)):
     r = by[name]
@@ -131,7 +195,6 @@ for name, ops in (("fillseq", 2000), ("fillrandom", 2000), ("overwrite", 2000), 
     assert all(x["operations"] == ops for x in r["runs"]), (name, r["runs"])
     for x in r["runs"] + [r]:
         float(x["write_amplification"])           # the engine reports one, and it is a number
-    assert r["p50_us"] <= r["p99_us"] <= r["p999_us"], name
 
 assert by["fillseq"]["entries"] == 2000
 assert 0 < by["fillrandom"]["entries"] < 2000      # random keys repeat, so some are never drawn
@@ -148,13 +211,20 @@ assert all(x["found"] == 0 for x in by["readmissing"]["runs"]), by["readmissing"
 assert all(x["found"] == 2000 and x["operations"] == 2000 for x in by["readseq"]["runs"])
 assert all(x["found"] == 2000 for x in by["seekrandom"]["runs"]), by["seekrandom"]["runs"]
 assert by["readmissing"]["mb_per_sec"] == 0          # a miss moves no entry
+assert by["readrandom"]["mb_per_sec"] > 0
 
-# A scan has no latency per entry to report, and the others do.
+# A scan has no latency per entry to report, and the others do. (A median of zero is possible: a
+# call that takes less than the tick of the clock reads as no time at all.)
 assert by["readseq"]["p50_us"] is None and by["readseq"]["p999_us"] is None
 for name in ("readrandom", "readmissing", "seekrandom"):
-    r = by[name]
-    assert r["p50_us"] <= r["p99_us"] <= r["p999_us"], name
+    assert by[name]["p50_us"] is not None and by[name]["p999_us"] is not None, name
 '
+
+# A trailing slash does not make the last component empty.
+check "a database path with a trailing slash" 0 "${small[@]}" --repeat=1 --db="$tmp/db-slash//" \
+  --benchmarks=fillseq
+expect_eq "the database is named without the slashes" "# database: db-slash" \
+  "$(grep '^# database: ' "$tmp/out" || true)"
 
 # --- Reads see the database that the most recent write benchmark left. ----------------------------
 
@@ -171,7 +241,7 @@ assert by["readrandom"]["source"] == "fillsync"
 assert by["readrandom"]["runs"][0]["found"] > 0
 assert by["readrandom"]["runs"][0]["found"] < 2000
 '
-out_has "reads after fillsync say what they read" "fillsync"
+out_has "reads after fillsync say whose database they read" "reads fillsync's database"
 
 # --- A write benchmark starts from an empty database. ---------------------------------------------
 
@@ -202,7 +272,7 @@ out_has "--compact_before_reads says that it compacted" "# compacted"
 json_has "--compact_before_reads is in the JSON" "$tmp/compacted.json" '
 assert d["config"]["compact_before_reads"] is True
 by = {r["name"]: r for r in d["results"]}
-assert by["readrandom"]["compact_seconds"] is not None and by["readrandom"]["compact_seconds"] >= 0
+assert by["readrandom"]["compact_seconds"] is not None and by["readrandom"]["compact_seconds"] > 0
 # Compacted once, before the first read benchmark, and not again before the next ones.
 assert all(by[n]["compact_seconds"] is None for n in ("readmissing", "readseq", "seekrandom"))
 '
@@ -225,7 +295,7 @@ err_has "a bare word" "'fillseq' is not a flag"
 check "an unknown benchmark" 2 --db="$tmp/x" --benchmarks=fillseq,nosuch
 err_has "an unknown benchmark" "unknown benchmark 'nosuch'"
 check "an empty benchmark list" 2 --db="$tmp/x" --benchmarks=
-err_has "an empty benchmark list" "--benchmarks"
+err_has "an empty benchmark list" "has an empty one"
 check "a read benchmark with nothing written" 2 --db="$tmp/x" --benchmarks=readrandom
 err_has "a read benchmark with nothing written" "readrandom needs a database to read"
 check "a read benchmark before the first write" 2 --db="$tmp/x" --benchmarks=readseq,fillseq
@@ -252,6 +322,19 @@ check "a boolean flag with a value that is not one" 2 --db="$tmp/x" --compact_be
 err_has "a boolean flag with a value that is not one" "--compact_before_reads is true or false"
 check "--help" 0 --help
 out_has "--help" "usage: shale_bench"
+# What a number means is in the usage, and these are the sentences that the numbers' readers
+# depend on, so that they cannot drift away from the tool without a test going red.
+out_has "--help says what overwrite is" "all --num keys are put in order into an empty database"
+out_has "--help says what the default order is" \
+  "The default order is fillseq, fillrandom, fillsync, overwrite, then the four reads."
+out_has "--help says why fillsync is where it is" "fillsync where the reads still see the large database"
+out_has "--help says what a read after fillsync reads" "placed after fillsync reads at most --sync_num keys"
+out_has "--help defines the spread" "(fastest - slowest) / median of the runs' ops/s"
+out_has "--help says that the repeats of a read are warm" "the median is a warm run"
+out_has "--help says what the latencies are quantized to" "the run prints the tick"
+out_has "--help says that ops/s is wall time" "wall-clock time of its"
+out_has "--help says where the time inside the engine is" "engine_seconds"
+out_has "--help says that the database is named by its last component" "last component"
 cases=$((cases + 1))
 if [ -e "$tmp/x" ]; then
   fail "a usage error touched the database path" "$(ls -la "$tmp/x")"

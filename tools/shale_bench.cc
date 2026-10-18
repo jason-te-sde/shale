@@ -11,14 +11,19 @@
 // - Each benchmark is run --repeat times, and the table shows the median of each column over the
 //   runs. A run of a write benchmark starts from an empty database. Every run of a benchmark makes
 //   the same operations, so the runs differ only in how long they took, and that is what the
-//   spread column shows. The later runs of a read benchmark find the earlier runs' blocks in the
-//   cache and in the operating system's, which the median over the runs includes.
-// - ops/s is the operations of a run over its wall-clock time, as db_bench does: it includes
-//   making each key and value, the two clock reads around each call, and checking each answer,
-//   which is a fraction of a microsecond an operation, the same for every engine.
+//   spread in the notes shows: (fastest - slowest) / median of the runs' ops/s. The later runs of
+//   a read benchmark find the earlier runs' blocks in the engine's cache and in the operating
+//   system's, which the median over the runs includes: with --repeat=3 it is a warm run.
+// - ops/s is the operations of a run over the wall-clock time of its loop, as db_bench does. The
+//   loop also makes each key and value, reads the clock twice around each call and checks each
+//   answer, which is a few percent of the time at the default value size and more at a large one,
+//   the same for every engine. The JSON gives engine_seconds, the time inside the engine's calls,
+//   next to seconds for every run, so that the share of the harness can be seen.
 // - The latency columns are the nearest-rank percentiles of the time of the engine call alone, from
-//   a clock read before it to one after, over every operation of a run. readseq has none: a scan
-//   is one call, and the engine's interface does not say when each entry arrived.
+//   a clock read before it to one after, over every operation of a run. A latency is a multiple of
+//   the steady clock's tick, which the output and the JSON give: about 42 ns on Apple Silicon,
+//   where a call of a few ticks is a few ticks. readseq has no latencies: a scan is one call, and
+//   the engine's interface does not say when each entry arrived.
 // - MB/s is the key and value bytes of the entries an operation wrote, returned or visited, over
 //   the same wall-clock time, with a megabyte of 2^20 bytes as in db_bench. A lookup of a key that
 //   is not there moves no entry, so readmissing is 0.
@@ -27,10 +32,15 @@
 //   over the bytes the callers wrote. The reads show none.
 //
 // What is checked, since a benchmark of an engine that gives wrong answers measures nothing: the
-// write benchmarks record which keys they wrote, and every read is compared with the record. A key
-// that was written and is not found, a key that was never written and is, a value of the wrong
-// size, a scan that visits another number of entries than the database holds, and a seek that
-// lands where it should not, all end the run with status 1 and name the key.
+// write benchmarks record which keys they wrote and which put wrote each value, and every read is
+// compared with the record. A key that was written and is not found, a key that was never written
+// and is, a value of the wrong size, a value that is not the one last put to its key, a scan that
+// visits another number of entries than the database holds, and a seek that lands where it should
+// not, all end the run with status 1 and name the key.
+//
+// What the output names of the machine is its system, release and architecture, its CPU and the
+// tick of its clock, and of the database the last component of its path: nothing that says whose
+// machine it was.
 //
 // Run it with --help for the usage.
 
@@ -54,6 +64,7 @@
 #include <cstring>
 #include <exception>
 #include <fstream>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -84,6 +95,12 @@
 #ifndef SHALE_BENCH_SANITIZER
 #define SHALE_BENCH_SANITIZER ""
 #endif
+#ifndef SHALE_BENCH_COVERAGE
+#define SHALE_BENCH_COVERAGE 0
+#endif
+#ifndef SHALE_BENCH_FLAW
+#define SHALE_BENCH_FLAW ""
+#endif
 
 namespace shale {
 namespace {
@@ -106,8 +123,11 @@ constexpr char kUsage[] =
     "has no other kind.\n"
     "\n"
     "PATH is destroyed and made again by every write benchmark: give it a directory that holds\n"
-    "nothing you want. Keys are 16 digits, \"%016llu\"; values are --value_size bytes of seeded\n"
-    "pseudo-random data. The same flags make the same operations in the same order.\n"
+    "nothing you want. The output and the JSON name it by the last component of PATH alone.\n"
+    "Keys are 16 digits, \"%016llu\". Values are --value_size bytes of seeded pseudo-random data,\n"
+    "the first eight of which are the number of the put that wrote them, so that a read can tell\n"
+    "a stale value, or another key's, from the right one. The same flags make the same\n"
+    "operations in the same order.\n"
     "\n"
     "--benchmarks is a comma-separated list, run in the order given; the default is all of them:\n"
     "  fillseq      --num puts of the keys 0, 1, 2, ... in order, into an empty database\n"
@@ -122,18 +142,36 @@ constexpr char kUsage[] =
     "  readseq      one scan of the whole database, from the first key to the last\n"
     "  seekrandom   --num seeks to random keys, each reading the entry it lands on\n"
     "\n"
-    "A read benchmark reads the database that the most recent write benchmark before it in the\n"
-    "list left, and its line says which. fillsync leaves at most --sync_num keys, so a read\n"
-    "benchmark that follows it measures a database that small: put it before the others.\n"
+    "The default order is fillseq, fillrandom, fillsync, overwrite, then the four reads.\n"
+    "It runs fillsync where the reads still see the large database written before it: they\n"
+    "follow overwrite, and read all --num keys. A read benchmark reads the database that the\n"
+    "most recent write benchmark before it in the list left, and its line says which; one\n"
+    "placed after fillsync reads at most --sync_num keys, a database that small.\n"
     "--compact_before_reads compacts the database once between a write benchmark and the first\n"
     "read benchmark after it; that is not timed, and is in no line. The reads are checked\n"
     "against a record of what was written, and a wrong answer ends the run with status 1.\n"
     "\n"
-    "--json=FILE writes the same figures, every run's own numbers, the machine (uname, CPU\n"
-    "brand, logical cores), and the compiler and build type, to FILE. A build that is not an\n"
-    "optimized one with no sanitizer says so in the output: its numbers are not worth quoting.\n"
-    "FILE is made when the run starts, so that a path that cannot be written is known at once;\n"
-    "a run that fails leaves it empty.\n"
+    "How the figures are made. ops/s is the operations of a run over the wall-clock time of its\n"
+    "loop, which also makes each key and value and checks each answer; the JSON gives\n"
+    "engine_seconds, the time inside the engine's calls, next to seconds for every run. A\n"
+    "latency is the time of one engine call, a difference of two std::chrono::steady_clock\n"
+    "readings, so it is a multiple of the clock's tick: the run prints the tick (Apple\n"
+    "Silicon's is about 42 ns), and a latency of a few ticks is a few ticks. MB/s counts the\n"
+    "entries moved, and readmissing moves none, so it shows 0. readseq shows no latencies: a\n"
+    "scan is one call.\n"
+    "\n"
+    "Each benchmark runs --repeat times, every run from the same keys and values. The notes\n"
+    "show the spread of the runs: (fastest - slowest) / median of the runs' ops/s, in percent.\n"
+    "The runs of a read benchmark follow one another, so the later ones find the blocks of the\n"
+    "earlier ones in the engine's cache and in the operating system's: with --repeat=3\n"
+    "the median is a warm run, and only --repeat=1 is a cold one.\n"
+    "\n"
+    "--json=FILE writes the same figures, every run's own numbers, the machine (the system's\n"
+    "name, release and architecture, the CPU brand, the logical cores, the clock's tick) and\n"
+    "the compiler and build type, to FILE, and no host name. A build that is not an optimized\n"
+    "one without a sanitizer, coverage or a flaw says so in the output: its numbers are not\n"
+    "worth quoting. FILE is made when the run starts, so that a path that cannot be written is\n"
+    "known at once; a run that fails leaves it empty.\n"
     "\n"
     "exit status: 0 every benchmark ran, 1 a benchmark failed or answered wrongly, 2 usage error\n";
 
@@ -296,9 +334,12 @@ void PrintRow(const Summary& summary, const Config& config) {
 // ---- Where it ran. ------------------------------------------------------------------------------
 
 struct Machine {
+  // The system's name, release and architecture, as `uname -srm` prints them.
   std::string uname;
   std::string cpu;
   unsigned logical_cores = 0;
+  // The smallest step of the steady clock, in nanoseconds.
+  uint64_t clock_resolution_ns = 0;
 };
 
 #if defined(__APPLE__)
@@ -329,26 +370,58 @@ std::string CpuBrand() {
 }
 #endif
 
+// The smallest step that std::chrono::steady_clock takes, in nanoseconds: the shortest time, over
+// many tries, for which the clock goes from one reading to the next. Every latency is a multiple of
+// it.
+uint64_t ClockTickNanos() {
+  uint64_t tick = std::numeric_limits<uint64_t>::max();
+  for (int i = 0; i < 1000; i++) {
+    const Clock::time_point first = Clock::now();
+    Clock::time_point next = Clock::now();
+    while (next == first) {
+      next = Clock::now();
+    }
+    tick = std::min(
+        tick, static_cast<uint64_t>(
+                  std::chrono::duration_cast<std::chrono::nanoseconds>(next - first).count()));
+  }
+  return tick;
+}
+
 Machine DescribeMachine() {
   Machine machine;
-  // The fields that `uname -a` prints, in its order.
+  // The system's name, release and architecture, which `uname -srm` prints. The host name is not
+  // among them, nor is the kernel's version string, which names the host that built it on some
+  // systems: a result that is quoted must not say whose machine it ran on.
   utsname names{};
   if (::uname(&names) == 0) {
-    machine.uname = std::string(names.sysname) + " " + names.nodename + " " + names.release + " " +
-                    names.version + " " + names.machine;
+    machine.uname = std::string(names.sysname) + " " + names.release + " " + names.machine;
   } else {
     machine.uname = "unknown";
   }
   machine.cpu = CpuBrand();
   machine.logical_cores = std::thread::hardware_concurrency();
+  machine.clock_resolution_ns = ClockTickNanos();
   return machine;
 }
 
-// Whether the numbers of this build are worth quoting: an optimized build with no sanitizer.
+// Whether the numbers of this build are worth quoting.
 bool IsRepresentative() {
-  const std::string_view build_type = SHALE_BENCH_BUILD_TYPE;
-  return (build_type == "Release" || build_type == "RelWithDebInfo") &&
-         std::string_view(SHALE_BENCH_SANITIZER).empty();
+  return IsRepresentativeBuild(SHALE_BENCH_BUILD_TYPE, SHALE_BENCH_SANITIZER,
+                               SHALE_BENCH_COVERAGE != 0, SHALE_BENCH_FLAW);
+}
+
+// The last component of `path`: what follows the last slash, trailing slashes not counted. A path
+// is how a result would say whose account and directory it ran in, and the last component is what
+// is needed to tell one database from another.
+std::string LastComponent(const std::string& path) {
+  const size_t end = path.find_last_not_of('/');
+  if (end == std::string::npos) {
+    return path.empty() ? "" : "/";
+  }
+  const size_t slash = path.find_last_of('/', end);
+  const size_t start = slash == std::string::npos ? 0 : slash + 1;
+  return path.substr(start, end - start + 1);
 }
 
 // ---- The JSON. ----------------------------------------------------------------------------------
@@ -382,7 +455,7 @@ class JsonWriter {
   // A number that is not finite cannot be said in JSON, so it is null.
   void Number(double value) {
     Separate();
-    text_ += std::isfinite(value) ? Fixed(value, 6) : "null";
+    text_ += std::isfinite(value) ? Fixed(value, 9) : "null";
   }
 
   void Bool(bool value) {
@@ -523,7 +596,7 @@ std::string BuildJson(const Config& config, const Machine& machine,
   json.Key("seed");
   json.Integer(config.workload.seed);
   json.Key("db");
-  json.String(config.workload.db);
+  json.String(LastComponent(config.workload.db));
   json.Key("compact_before_reads");
   json.Bool(config.compact_before_reads);
   json.EndObject();
@@ -536,6 +609,8 @@ std::string BuildJson(const Config& config, const Machine& machine,
   json.String(machine.cpu);
   json.Key("logical_cores");
   json.Integer(machine.logical_cores);
+  json.Key("clock_resolution_ns");
+  json.Integer(machine.clock_resolution_ns);
   json.EndObject();
 
   json.Key("build");
@@ -548,6 +623,10 @@ std::string BuildJson(const Config& config, const Machine& machine,
   json.String(SHALE_BENCH_BUILD_TYPE);
   json.Key("sanitizer");
   json.String(SHALE_BENCH_SANITIZER);
+  json.Key("coverage");
+  json.Bool(SHALE_BENCH_COVERAGE != 0);
+  json.Key("flaw");
+  json.String(SHALE_BENCH_FLAW);
   json.EndObject();
 
   json.Key("megabyte_bytes");
@@ -587,6 +666,8 @@ std::string BuildJson(const Config& config, const Machine& machine,
       json.Integer(run.bytes);
       json.Key("seconds");
       json.Number(run.seconds);
+      json.Key("engine_seconds");
+      json.Number(run.engine_seconds);
       json.Key("ops_per_sec");
       json.Number(run.OpsPerSecond());
       json.Key("mb_per_sec");
@@ -651,15 +732,29 @@ void PrintHeader(const Config& config, const Machine& machine) {
       static_cast<unsigned long long>(config.workload.value_size),
       static_cast<unsigned long long>(config.repeat),
       static_cast<unsigned long long>(config.workload.seed));
-  std::printf("# database: %s\n", config.workload.db.c_str());
-  std::printf("# build: %s, %s %s%s%s\n", SHALE_BENCH_BUILD_TYPE, SHALE_BENCH_COMPILER_ID,
-              SHALE_BENCH_COMPILER_VERSION,
-              std::string_view(SHALE_BENCH_SANITIZER).empty() ? "" : ", ", SHALE_BENCH_SANITIZER);
+  std::printf("# database: %s\n", LastComponent(config.workload.db).c_str());
+  // What the build has that changes what is measured is named after the compiler, each if it is
+  // there.
+  std::string extras;
+  if (!std::string_view(SHALE_BENCH_SANITIZER).empty()) {
+    extras += std::string(", sanitizer ") + SHALE_BENCH_SANITIZER;
+  }
+  if (SHALE_BENCH_COVERAGE != 0) {
+    extras += ", coverage";
+  }
+  if (!std::string_view(SHALE_BENCH_FLAW).empty()) {
+    extras += std::string(", flaw ") + SHALE_BENCH_FLAW;
+  }
+  std::printf("# build: %s, %s %s%s\n", SHALE_BENCH_BUILD_TYPE, SHALE_BENCH_COMPILER_ID,
+              SHALE_BENCH_COMPILER_VERSION, extras.c_str());
   std::printf("# machine: %s, %u logical cores\n", machine.cpu.c_str(), machine.logical_cores);
   std::printf("# system: %s\n", machine.uname.c_str());
+  std::printf("# clock: steady_clock tick %llu ns, so a latency is a multiple of it\n",
+              static_cast<unsigned long long>(machine.clock_resolution_ns));
   if (!IsRepresentative()) {
     std::printf(
-        "# WARNING: this build is not an optimized one with no sanitizer: do not quote it\n");
+        "# WARNING: this build is not an optimized one with no sanitizer, coverage or flaw: do not "
+        "quote it\n");
   }
   std::fflush(stdout);
 }

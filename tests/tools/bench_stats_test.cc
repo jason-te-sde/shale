@@ -54,5 +54,22 @@ TEST(MedianFigureTest, AFigureThatIsNotANumberMakesItTheFirstRunsAsItStands) {
   EXPECT_EQ(MedianFigure({"2.0x", "1.0"}), "2.0x") << "a figure with text after the number";
 }
 
+TEST(IsRepresentativeBuildTest, AnOptimizedBuildWithNothingElseInItIs) {
+  EXPECT_TRUE(IsRepresentativeBuild("Release", "", false, ""));
+  EXPECT_TRUE(IsRepresentativeBuild("RelWithDebInfo", "", false, ""));
+}
+
+TEST(IsRepresentativeBuildTest, EverythingThatChangesWhatIsMeasuredIsNotWorthQuoting) {
+  EXPECT_FALSE(IsRepresentativeBuild("Debug", "", false, ""));
+  EXPECT_FALSE(IsRepresentativeBuild("MinSizeRel", "", false, ""));
+  EXPECT_FALSE(IsRepresentativeBuild("unknown", "", false, "")) << "a build that does not say";
+  EXPECT_FALSE(IsRepresentativeBuild("", "", false, ""));
+  EXPECT_FALSE(IsRepresentativeBuild("Release", "address,undefined", false, ""));
+  EXPECT_FALSE(IsRepresentativeBuild("Release", "thread", false, ""));
+  EXPECT_FALSE(IsRepresentativeBuild("Release", "", true, "")) << "instrumented for coverage";
+  EXPECT_FALSE(IsRepresentativeBuild("Release", "", false, "skip_wal_sync"))
+      << "a deliberate flaw, whose fillsync would measure nothing";
+}
+
 }  // namespace
 }  // namespace shale

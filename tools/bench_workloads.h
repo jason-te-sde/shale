@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "bench_engine.h"
+#include "histogram.h"
 #include "shale/status.h"
 
 namespace shale {
@@ -73,25 +74,34 @@ struct WorkloadOptions {
   uint64_t seed = 0;
 };
 
-/// What a write benchmark left in the database: which of the keys 0 ... num - 1 are there. The read
-/// benchmarks are checked against it.
+/// What a write benchmark left in the database: which of the keys 0 ... num - 1 are there, and
+/// which put wrote the value each one has. The read benchmarks are checked against it.
+///
+/// The puts of a run are numbered from 1 in the order they are made, the load of overwrite before
+/// its timed puts, and every value begins with the number of its put as a fixed64 (its low bytes,
+/// if the value is shorter than eight). So a value of the right size that is another key's, or an
+/// older version of its own key, is told from the right one by its first bytes.
 struct Populated {
   /// The benchmark that wrote the database.
   Benchmark written_by = Benchmark::kFillSeq;
-  /// Whether each key, by index, is in the database.
-  std::vector<bool> present;
+  /// For each key, by index, the number of the put that wrote the value it has now, or 0 if the
+  /// key is not in the database.
+  std::vector<uint64_t> stamp;
   /// How many keys are in it.
   uint64_t entries = 0;
   /// The largest index that is in it, or -1 if none: a seek to a key above it finds nothing.
   int64_t last_present = -1;
 
-  /// Records that the key `index` was written.
-  void Mark(uint64_t index) {
-    if (!present[index]) {
-      present[index] = true;
+  /// Returns whether the key `index` is in the database.
+  bool Has(uint64_t index) const { return stamp[index] != 0; }
+
+  /// Records that put number `put_number`, which is not 0, wrote the key `index`.
+  void Mark(uint64_t index, uint64_t put_number) {
+    if (stamp[index] == 0) {
       entries++;
       last_present = std::max(last_present, static_cast<int64_t>(index));
     }
+    stamp[index] = put_number;
   }
 };
 
@@ -107,14 +117,23 @@ struct Latency {
   double average = 0;
 };
 
+/// Returns the latencies of `histogram`: the nearest-rank 50th, 99th and 99.9th percentiles and the
+/// mean. Aborts if it has no samples.
+/// @param histogram the latencies of the engine's calls in a run, in microseconds.
+Latency SummarizeLatencies(const Histogram& histogram);
+
 /// One run of a benchmark.
 struct RunResult {
   /// The operations that were timed. For readseq, the entries that the scan visited.
   uint64_t operations = 0;
   /// The key and value bytes of the entries that the operations wrote, returned or visited.
   uint64_t bytes = 0;
-  /// The wall-clock time of the loop, which is never zero.
+  /// The wall-clock time of the loop, which is never zero. It holds making each key and value and
+  /// checking each answer as well as the engine's calls.
   double seconds = 0;
+  /// The time inside the engine's calls: the sum of their latencies, and for readseq, which is one
+  /// call, all of `seconds`. It is never more than `seconds`.
+  double engine_seconds = 0;
   /// The latency of each call of the engine, if the benchmark times each: not readseq.
   std::optional<Latency> latency;
   /// The engine's write amplification as it reported it, after a write benchmark.
