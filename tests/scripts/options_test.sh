@@ -120,7 +120,13 @@ accepts "coverage" "" "" ON OFF "--coverage"
 compiler_id="$(sed -n 's/^set(CMAKE_CXX_COMPILER_ID "\(.*\)")$/\1/p' \
   "$build"/CMakeFiles/*/CMakeCXXCompiler.cmake | head -n 1)"
 if [ "$compiler_id" = Clang ]; then
-  accepts "fuzzing with Clang" "" "" OFF ON
+  # Fuzzing needs AddressSanitizer and the tests' subdirectory (fuzz_db_ops links the test kit,
+  # which needs GoogleTest), and every case here turns the tests off so that nothing is fetched. So
+  # these cases show that each check is there, in that order, and the fuzz job of the CI and the
+  # preflight's fuzz stage configure and build the real thing.
+  rejects "fuzzing without sanitizers" "" "" OFF ON "SHALE_SANITIZE=address,undefined"
+  rejects "fuzzing with the thread sanitizer" "" "thread" OFF ON "SHALE_SANITIZE=address,undefined"
+  rejects "fuzzing without the tests" "" "address,undefined" OFF ON "SHALE_BUILD_TESTS=ON"
 else
   rejects "fuzzing with $compiler_id" "" "" OFF ON "Clang"
 fi
