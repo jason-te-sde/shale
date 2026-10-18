@@ -43,8 +43,11 @@ tables, so the picker never has to be shown a compaction that is in flight, and 
 files can ask whether a table was begun while it was away.
 
 **The mutex is given up for the slow parts and held for the decisions.** The leader gives it up for the
-log append and sync; a flush and a compaction give it up while they build tables; the sweep gives it up
-to list and delete files.
+log append and sync, and, for the first synced write after a memtable switch, for the syncs of the old
+log and the directory first. A flush and a compaction give it up while they build tables and while they
+append an edit to the MANIFEST and sync it: `LogAndApply` checks the edit and encodes it with the mutex
+held, appends and syncs with it given up, and takes it again to install the version. The sweep gives it
+up to list and delete files.
 
 **The discipline is checked, not remembered.**
 
@@ -61,7 +64,11 @@ to list and delete files.
   times under ThreadSanitizer (the single-threaded simulator and its determinism test once, at 20 seeds).
 - Misuse that no lock can make safe aborts with a message and does not corrupt: closing a database with
   a live iterator or snapshot, releasing a snapshot twice or on another database, a `ManualScheduler`
-  entered from two threads at once.
+  entered from two threads at once, and a second writer of the MANIFEST while one is between giving up
+  the mutex and installing its version (`VersionSetDeathTest.ASecondManifestWriterIsRefused`). The
+  sweep of obsolete files aborts if it starts while an edit is being written, since the edit names
+  tables that no version names yet, and the install checks that the version the edit was prepared
+  against is still the current one.
 
 ## Consequences
 
@@ -73,10 +80,11 @@ immutable versions, one background task. Each part has a check that fails when i
 - **One background thread bounds the write rate the engine can sustain.** If compaction cannot keep up,
   level 0 fills and writes slow and then wait; `write_slowdowns` and `write_stops` count it. More threads
   would need a picker that knows which files are already being compacted.
-- **Some I/O happens with the mutex held.** The memtable switch syncs the old log, creates the new one and
-  syncs the directory under the mutex, and `LogAndApply` appends to and syncs the MANIFEST under it, so a
-  read that needs the mutex to take its view waits for those syncs. They happen once per memtable and
-  once per flush or compaction, and not per write.
+- **Little I/O happens with the mutex held.** A memtable switch creates the new log under the mutex and
+  syncs nothing: the first synced write after it syncs the old log and the directory, with the mutex
+  given up. `LogAndApply` prepares an edit under the mutex, gives it up to append to and sync the
+  MANIFEST, and takes it again to install the version. There is one writer at a time, and the version
+  set aborts a second. A new MANIFEST and `CURRENT` are written only at open, with nothing else running.
 - **Writes are serialised through the memtable.** The leader inserts the whole group. A concurrent skip
   list would let writers insert in parallel, at the price of a much harder argument.
 - **Thread-safety analysis needs Clang.** The annotations expand to nothing under GCC, so the compile-time

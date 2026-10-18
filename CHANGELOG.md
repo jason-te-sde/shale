@@ -25,7 +25,9 @@ The first release.
   a synced write survives a crash of the process and of the machine, a batch is atomic, a read never
   returns a wrong value, and a log that is damaged is not guessed at.
 - **Recovery** that tells the torn tail of a crashed log from corruption, refuses the second by default
-  (`paranoid_checks`) and, when told to be lenient, keeps what it did not apply as `.dropped` files.
+  (`paranoid_checks`) and, when told to be lenient, keeps what it did not apply as `.dropped` files. A log
+  that begins after a gap in the sequence numbers, which a power loss leaves because a memtable switch
+  does not sync the old log, is set aside the same way by any open; nothing acknowledged as synced is in it.
 - **Tools**: `shalectl` (put, get, delete, scan, stats, flush, verify and the dumps of tables, logs and
   MANIFESTs), `shale_bench` (db_bench-style workloads) and `shale_crashtest` (a real process killed with
   `SIGKILL`).

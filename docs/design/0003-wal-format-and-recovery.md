@@ -39,12 +39,21 @@ where a reader that has met a defect can always start again. The exact bytes are
 | What the reader says | `paranoid_checks = true` (default) | `paranoid_checks = false` |
 | --- | --- | --- |
 | nothing, or a record cut by the end of the file | the writes before it are recovered | the same |
+| a first write beyond the one after the newest write of the tables and of the logs before it (a gap) | the writes before the gap are recovered; that log and every later one are renamed `<name>.dropped`, never deleted, and the `LOG` says which and why | the same |
 | a defect in the contents | `Open` fails with `Corruption`, naming the file | the writes before the defect are recovered, nothing after it is applied, in that log or in any later one; the logs from the defect on are renamed `<name>.dropped`, never deleted, and the `LOG` says which and why |
 | a read error | `Open` fails with `IOError` | `Open` fails with `IOError` |
 
 A read that failed says nothing about what the log holds, so it is never taken for a defect of the
-contents. A log that is read lenient is never deleted: the data may be there, and may be the operator's
+contents. A log that is set aside is never deleted: the data may be there, and may be the operator's
 only copy.
+
+The gap is the one case in which recovery drops writes although no byte is damaged, and it is treated
+as what a power loss leaves, whatever `paranoid_checks` says. A memtable switch does not sync the old
+log ([ADR 0004](0004-durability.md), rule 2), so a power loss can take the unsynced end of the old log
+and keep unsynced writes of the new one; writes are numbered one after another, so the gap shows at the
+new log's first write. Nothing in the logs set aside was acknowledged as synced, because a synced write
+syncs the earlier log first. To check the first log too, an edit of the MANIFEST records the newest
+write that its tables hold, and not the newest the database had made.
 
 Four further rules:
 
@@ -56,7 +65,8 @@ Four further rules:
 3. **Replay checks what it applies.** A batch that does not decode is applied not at all; a batch whose
    sequence number does not come after the last one, or would run past 2^56, is `Corruption`. (The
    memtable aborts on a repeated sequence number, so a log that repeats one is refused before it gets
-   there.)
+   there.) The first batch of each log must also be at most one past the newest write of the tables and
+   of the logs before it, or it is a gap (the table above).
 4. **A failed or interrupted open loses nothing.** A file that a failed open made is removed only where the
    code can show that nothing names it (a new MANIFEST when `CURRENT` is seen to name the old one, a table
    that failed to seal, an empty new log). Any other is left, because the MANIFEST may name it; the next
@@ -87,7 +97,12 @@ Four further rules:
   one log, not shown over crashes.
 - **Without checksums nothing is found.** The reader's check of a damaged length needs the checksum; a
   caller that turns checksums off gets the older, silent behaviour. The engine never does.
-- **Lenient mode leaves `.dropped` files** that someone must remove by hand, or `DestroyDB()` does.
+- **`.dropped` files accumulate.** A lenient open leaves them, and so does any open after a power loss that
+  leaves a gap, one or more each time, each as large as a log. Someone must remove them by hand, or
+  `DestroyDB()` does; the engine never does.
+- **A gap that damage made is treated as a power loss's.** A log deleted by hand, or truncated at a record
+  boundary, also leaves a gap, and recovery now stops there, where before it replayed straight past,
+  which made a hole. The data after the gap is intact, so it is kept, renamed.
 
 ## Alternatives considered
 

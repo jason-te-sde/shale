@@ -121,20 +121,25 @@ are in [ADR 0006](design/0006-concurrency-model.md).
    4. If the previous memtable (`imm_`) is still waiting to be written out, wait for the background
       task, and start again. This is a **write stop** (`write_stops` counts it).
    5. If level 0 holds `l0_stop_trigger` files or more, wait the same way.
-   6. Otherwise `SwitchMemTable()`: sync the old log if anything was appended since its last sync;
-      take a new file number; create the new log; **sync the directory** so that the new log's entry
-      is durable before a write is acknowledged in it; make the memtable `imm_`; start a new one;
-      `MaybeScheduleBackgroundWork()`. Any failure of this is a background error.
+   6. Otherwise `SwitchMemTable()`: take a new file number and create the new log; keep the old log
+      open if it holds unsynced writes (`unsynced_log_`), and mark the new log's directory entry as not
+      yet durable (the first synced write after the switch syncs both before it is acknowledged, and
+      the flush of the old memtable makes both unnecessary); note the newest write so far, which the
+      flush will record (`imm_last_sequence_`); make the memtable `imm_`; start a new one;
+      `MaybeScheduleBackgroundWork()`. **Nothing is synced.** A failure to create the log is a
+      background error.
 4. **Form a group.** `CommitGroup` first refuses a leader whose batch alone needs more sequence
    numbers than are left (`Corruption`, which stops no other write). `BuildBatchGroup` then takes the
    writers queued behind the leader, in order, while the group stays within 1 MiB (the leader's size
    plus 128 KiB if its batch is 128 KiB or less), while the sequence numbers last, and **never a
    writer that asks for a sync behind a leader that does not**; a request to flush ends a group.
    Every batch of the group is numbered after the one before it, and the group's batch is theirs joined.
-5. **Log, sync, apply.** With the mutex given up, so that readers and the next writers are not held,
-   the leader appends the group's batch to the log as one record (`log::Writer::AddRecord`,
-   `src/io/log_writer.cc`), calls `Sync()` on the log file if it asked for a sync, and inserts the
-   batch into the memtable (`WriteBatchInternal::InsertInto`, `src/io/write_batch.cc`, then
+5. **Log, sync, apply.** With the mutex given up, so that readers and the next writers are not held, a
+   leader whose group asks for a sync first makes every earlier write durable: if the last switch left an
+   old log with unsynced writes it syncs that log and closes it, and if the new log's directory entry is
+   not yet durable it syncs the directory. Then the leader appends the group's batch to the log as one
+   record (`log::Writer::AddRecord`, `src/io/log_writer.cc`), calls `Sync()` on the log file if it asked
+   for a sync, and inserts the batch into the memtable (`WriteBatchInternal::InsertInto`, `src/io/write_batch.cc`, then
    `MemTable::Add`, `src/io/memtable.cc`). The log comes first: a write that a reader can see is one
    that the log holds. Only the leader inserts, and the memtable aborts if two overlap.
 6. **Publish.** With the mutex held again the leader counts the group, and if the append or the sync
@@ -199,14 +204,21 @@ compaction because a write may be stalled for it.
    filter, the index, the footer.
 3. `SealTableFile`: `Sync()` the file, close it, **open it again through the table cache** to see that
    it is a table that can be read, and only then sync the directory. Any failure removes the file.
-4. With the mutex held again, `VersionSet::LogAndApply` an edit that adds the table to level 0 and sets
-   `log_number` to the current log, which makes every earlier log obsolete.
+4. With the mutex held again, `VersionSet::LogAndApply` an edit that adds the table to level 0, sets
+   `log_number` to the current log, which makes every earlier log obsolete, and sets `last_sequence` to
+   the newest write of the memtable (taken at the switch), which is what recovery holds the first log it
+   replays to. `LogAndApply` prepares the edit with the mutex held, gives the mutex up while it writes
+   the MANIFEST, and takes it again to install the version:
    1. `ApplyEdit` (`src/core/version_state.cc`) checks the edit against the state and refuses an
       illegal one with `Corruption`.
-   2. The edit is appended to the MANIFEST and the MANIFEST is **synced**.
-   3. Only then is the new `Version` installed. A version that readers can see is one that a crash
-      will not take back.
-5. Clear `imm_`, wake writers that were waiting for it, update the counters.
+   2. The edit is appended to the MANIFEST and the MANIFEST is **synced**, with the mutex given up.
+      There is one MANIFEST writer at a time, and the version set aborts a second.
+   3. Only then, with the mutex held again, is the new `Version` installed, after a check that the
+      version the edit was prepared against is still the current one. A version that readers can see is
+      one that a crash will not take back.
+5. Close the old log if no synced write has taken it, and clear the mark that the new log's directory
+   entry is not yet durable (the directory was synced by step 3, after the switch made the new log).
+   Clear `imm_`, wake writers that were waiting for it, update the counters.
 6. `DeleteObsoleteFiles()`: the log of the memtable just written is now below `log_number` and goes.
 
 ## Compaction
@@ -251,9 +263,9 @@ compaction because a write may be stalled for it.
       out `imm_` (`FlushBetweenOutputs`), so that a write stalled for the flush does not wait for the
       whole compaction. Before each new output it asks whether the database is closing, and if so
       removes what it made and stops without an error.
-5. **Install.** With the mutex held again, `LogAndApply` an edit that deletes every input, adds every
-   output at the next level and moves the compact pointer, in the same order as a flush: check, append,
-   sync, install. If that fails, the outputs are **not** deleted, because the MANIFEST may hold the
+5. **Install.** `LogAndApply` an edit that deletes every input, adds every output at the next level and
+   moves the compact pointer (it leaves `last_sequence` as it was), in the same order as a flush: check
+   with the mutex held, append and sync with it given up, install with it held again. If that fails, the outputs are **not** deleted, because the MANIFEST may hold the
    edit all the same.
 6. `DeleteObsoleteFiles()` removes the inputs, unless a reader still holds a Version that names them.
 
@@ -276,13 +288,17 @@ compaction because a write may be stalled for it.
    order. Every log and table number found in the directory is marked as used, so that a stray file
    is never overwritten.
 5. `ReplayLog` each into **one** memtable (`ApplyRecoveredBatch`: a batch is applied whole or not
-   at all, and a batch whose sequence number does not come after the last one is `Corruption`). What
-   the reader reports decides the rest: nothing for a log that merely ends short, as a crash leaves it;
+   at all, and a batch whose sequence number does not come after the last one is `Corruption`). The
+   first batch of each log must be at most one past the newest write of the tables (the MANIFEST's
+   `last_sequence`) and of the logs before it. If it is beyond that, a power loss took the end of an
+   earlier log: replay stops, and that log and every later one are renamed `.dropped`, whatever
+   `paranoid_checks` says. What the reader reports decides the rest: nothing for a log that merely ends short, as a crash leaves it;
    otherwise `paranoid_checks` (the default) fails the open with `Corruption`, and without it replay
    stops at the first defect, applies nothing after it, and the logs from there on are **renamed to
    `.dropped`, never deleted**. A log that cannot be *read* fails the open with `IOError` whatever
    `paranoid_checks` says.
-6. Move `last_sequence` to the larger of the MANIFEST's and the replay's.
+6. Move `last_sequence` to the larger of the MANIFEST's and the replay's. (The MANIFEST's is the newest
+   write that its tables hold, so it is also what the first log was held to.)
 7. Create a **new** log and sync the directory. A replayed log is never appended to: it may end in a
    torn record, which a writer cannot continue.
 8. If anything was recovered, write it to a **level 0 table** (`WriteRecoveredMemTable`) *before* the
@@ -291,8 +307,9 @@ compaction because a write may be stalled for it.
 9. `VersionSet::WriteNewManifest`: a new MANIFEST whose first record is a snapshot of the whole state
    including that table, synced, directory synced, `CURRENT` switched to it (a `.dbtmp` file written,
    synced and renamed over `CURRENT`, then the directory synced).
-10. If a lenient open set logs aside, now rename them (the later logs first, so a failure part-way never
-    leaves a later log replayable behind one that was set aside) and move `log_number` past them.
+10. If replay stopped at a gap or, in a lenient open, at a defect, the logs from there on are set aside
+    now: rename them (the later logs first, so a failure part-way never leaves a later log replayable
+    behind one that was set aside) and move `log_number` past them.
 11. `DeleteObsoleteFiles()`, and a check of whether the new level 0 table makes a compaction due.
 
 ## Deleting obsolete files
@@ -325,8 +342,9 @@ moment the iterator is destroyed.
 
 The destructor aborts if an iterator or a snapshot is still alive, or if a write or a flush is still
 in progress, since they point into what is about to be freed. It then sets `shutting_down_`, waits for
-the background task that is running (a compaction stops at its next output), closes the log and
-releases the lock. **Closing does not flush**: what the memtables hold is in the logs, which the next
+the background task that is running (a compaction stops at its next output), closes the log, and an old
+log that is still waiting for a sync without syncing it (no acknowledgement depends on it, and a power loss
+afterwards leaves a gap that the next open handles), and releases the lock. **Closing does not flush**: what the memtables hold is in the logs, which the next
 open replays. That is deliberate, and it is why a copy of a closed database needs no more than the next
 open to be whole (see [operations](operations.md#backup)).
 

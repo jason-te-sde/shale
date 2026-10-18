@@ -77,7 +77,7 @@ copies for snapshots):
 | | Checks |
 | --- | --- |
 | **I1** | Every key reads back as the model says, at a snapshot or not, and a scan returns exactly the model's entries in order: nothing missing, nothing extra, nothing out of place. While read corruption is armed, an OK read must still be right. |
-| **I2** | The version is sound: levels in order and disjoint below 0, every live file present with the size the MANIFEST gives, the sequence number never going back, and nothing in the tables that the database has not seen. |
+| **I2** | The version is sound: levels in order and disjoint below 0, every live file present with the size the MANIFEST gives, the sequence number never going back (and, after a reopen, not below the durable floor: the last sequence number of the newest synced write), and nothing in the tables that the database has not seen. |
 | **I3** | When background work is idle and nothing can explain a leftover, the directory holds no table that no live version names. |
 | **I4** | After every crash and reopen, the database holds the state after some **prefix** of the writes, at least as long as the last synced write, and a batch is never half there (D1, D2 and D3 of [ADR 0004](design/0004-durability.md)). Held in full after an open that read corrupted bytes and worked. |
 | **I5** | An error is allowed only where an injected fault that fired explains it, and, where only calls were failed, the error must say it was injected. |
@@ -163,7 +163,7 @@ or builds but passes, is a red job.
 
 | Flaw | Where | What it breaks | First reported by |
 | --- | --- | --- | --- |
-| `skip_wal_sync` | `src/db/db_write.cc` (the sync of a write), `src/db/db_background.cc` (the sync of the old log at a switch) | an acknowledged synced write is not durable | I2 (I4 on some seeds) |
+| `skip_wal_sync` | `src/db/db_write.cc` (the sync of a write, and of the old log by the first synced write after a memtable switch) | an acknowledged synced write is not durable | I2 (I4 on some seeds) |
 | `skip_dir_sync` | `src/db/filename_io.cc` (`SyncDirectory`) | a new file's directory entry is not durable | I2 |
 | `skip_manifest_sync` | `src/db/version_set.cc` (`LogAndApply`) | an edit is installed before it is durable | I2 (I4 on some seeds) |
 | `drop_tombstones_early` | `src/core/compaction_filter.cc` | a deletion is dropped although a deeper level may hold the key, so the old value comes back | I1 |

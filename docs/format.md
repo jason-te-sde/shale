@@ -80,7 +80,7 @@ full, as the second table row shows. **Only that spelling is a name.** `9.log`, 
 | `LOCK` | Locked with `flock` while a process has the database open. Empty. |
 | `LOG`, `LOG.old` | A text log of what the database did, for people. Not read by the engine. `LOG` of the previous run is renamed to `LOG.old` when the database opens. |
 | `NNNNNN.dbtmp` | A file being written that has not been renamed into place. `CURRENT` is replaced through one, which takes the number of the MANIFEST it names. |
-| `NNNNNN.log.dropped` | A log that a lenient open (`paranoid_checks = false`) set aside. The engine never reads or deletes it again; `DestroyDB()` does. |
+| `NNNNNN.log.dropped` | A log that an open set aside: after a defect, in a lenient open (`paranoid_checks = false`), or, in any open, a log that begins after a gap in the sequence numbers that a power loss left. The engine never reads or deletes it again; `DestroyDB()` does. |
 
 File numbers come from one counter, so a number is used once for a log, a table or a MANIFEST and
 never again. The counter is bounded: a database refuses a MANIFEST numbered at or above 2^56, and
@@ -358,15 +358,15 @@ with no field set is the empty string. The tag is a varint32.
 | --- | --- | --- |
 | 1 | `log_number` | varint64: the number of the oldest log that still holds writes not in a table |
 | 2 | `next_file_number` | varint64: the next number to give a file |
-| 3 | `last_sequence` | varint64: the sequence number the database had reached when the edit was written, which counts writes that are still only in a log; recovery takes the larger of it and the last number it finds in the logs |
+| 3 | `last_sequence` | varint64: the sequence number of the newest write that the tables hold. A flush records the newest write of the memtable it wrote; every other edit repeats the current value; the first record of a new MANIFEST, written at open, records the database's last sequence number then, when the recovered writes are in a table. Recovery holds the first write of the logs it replays to the one after it |
 | 4 | `compact_pointer` | varint32 level, length-prefixed internal key: where the next compaction of the level starts |
 | 5 | `deleted_file` | varint32 level, varint64 file number |
 | 6 | `new_file` | varint32 level, varint64 file number, varint64 file size, length-prefixed smallest internal key, length-prefixed largest internal key |
 
 The encoder writes the fields in tag order, and a field may repeat (a compaction deletes many files
 and adds many), so one edit has one encoding. Every record that the database appends carries
-`next_file_number` and `last_sequence`, taken from the counters of the database at that moment, so that the
-last record is always enough to know them.
+`next_file_number`, taken from the counter at that moment, and `last_sequence`, so that the last record
+is always enough to know them.
 
 <!-- example:version_edit -->
 ```text

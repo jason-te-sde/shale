@@ -16,12 +16,15 @@ In short, measured on 2026-10-18 with both engines in the same session:
 - **Reads.** LevelDB is faster at reading what is there: `readrandom` 0.70 and 0.74, `readseq` 0.28 and 0.46,
   `seekrandom` 0.28 and 0.68 (first pass, and compacted before the reads). shale is faster at keys that
   are not there: `readmissing` 1.21 and 2.49.
-- **The changes.** Four inefficiencies that the first measurement found were fixed, without weakening any
-  durability guarantee. Inlining `Status::ok()` and the key comparison made `readseq` 9% faster in the compacted
-  pass, and the first-pass reads 7% to 59% faster in runs that are less steady; reading blocks into buffers that are
-  not zero-filled, 2% on the point reads and seeks; writing the MANIFEST without the database mutex held, nothing
-  measurable on its own; taking the syncs of a memtable switch off the writer's path, 4% to 13% on the write rows in the
-  interleaved rounds.
+- **The changes.** Four inefficiencies that the first measurement found were fixed. A synced write still
+  survives a power loss with every write acknowledged before it, and a power loss still leaves a prefix of
+  the writes. Since a memtable switch no longer syncs, recovery now also sets aside a log that begins after
+  a gap that a power loss left, whatever `paranoid_checks` says
+  ([durability](design/0004-durability.md), D6). Inlining `Status::ok()` and the key comparison made `readseq`
+  9% faster in the compacted pass, and the first-pass reads 7% to 59% faster in runs that are less steady;
+  reading blocks into buffers that are not zero-filled, 2% on the point reads and seeks; writing the MANIFEST
+  without the database mutex held, nothing measurable on its own; taking the syncs of a memtable switch off
+  the writer's path, 4% to 13% on the write rows in the interleaved rounds.
   Each is below, with its figures.
 
 ## What was measured

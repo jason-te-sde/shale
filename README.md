@@ -209,7 +209,7 @@ keeps the crash argument short. The steps of every path are in
 
 ## What it promises
 
-<!-- durability contract -->
+<!-- table:contract -->
 | | The promise |
 | --- | --- |
 | **D1** | With `sync = true` (**the default**), a `Write` that returns OK is present after a crash of the process and after a loss of power (assuming the device honours `fsync`; macOS uses `F_FULLFSYNC`). |
@@ -217,8 +217,9 @@ keeps the crash argument short. The steps of every path are in
 | **D3** | A `WriteBatch` is entirely visible or entirely invisible after any crash. |
 | **D4** | A read returns the right value or an error. Never a wrong value, even after a bit flips on disk. |
 | **D5** | After a background I/O error every write returns that error until the database is reopened. Reads keep working. |
-| **D6** | The only trace of a crash silently tolerated in a log is a record cut off by the end of the file. Any other defect fails `Open` (`paranoid_checks = true`, the default). |
+| **D6** | Two traces of a crash are tolerated in the logs whatever `paranoid_checks` says: a record cut off by the end of a file, and a gap in the sequence numbers at the start of a log, which is what a power loss leaves when it takes the unsynced end of one log and keeps unsynced writes of the next (that log and the later ones are set aside as `.dropped` files, never deleted). Neither drops a write that was acknowledged as synced. Any other defect fails `Open` (`paranoid_checks = true`, the default). |
 | **D7** | One `DB` per directory at a time, enforced with `flock`. |
+<!-- /table:contract -->
 
 How each is checked, and the order of syncs that makes it true, is in
 [ADR 0004](docs/design/0004-durability.md). `sync = true` is the default on purpose, the opposite of
@@ -229,7 +230,9 @@ LevelDB and RocksDB: the default that cannot lose a confirmed write.
 <!-- benchmarks:begin (copied from docs/benchmarks.md: replace everything up to the end marker) -->
 shale and LevelDB on one machine, through the same workloads and the same code (`shale_bench`). **A ratio
 under 1 means shale is slower.** Each figure is the median of three runs, with the lowest and the highest in
-brackets. Every read was checked against a record of what was written.
+brackets. Every read was checked against a record of what was written. The figures of shale are those of
+the final build, after four changes that a first measurement led to
+([docs/benchmarks.md](docs/benchmarks.md) has the figures before them).
 
 **Machine.** Apple M2, 8 cores (4 performance, 4 efficiency), 16 GiB, macOS 26.6.2 (build 25G83), `Darwin 25.6.0
 arm64`; shale a Release build with Apple clang 21.0.0; LevelDB 1.23, the Homebrew bottle `leveldb 1.23_2`;
@@ -253,27 +256,38 @@ The commands as given:
 
 | benchmark | shale ops/s | LevelDB ops/s | shale / LevelDB |
 | --- | ---: | ---: | ---: |
-| fillseq | 380,882 (375,414 to 382,323) | 448,481 (448,045 to 448,695) | 0.85 |
-| fillrandom | 259,365 (153,575 to 264,247) | 284,893 (282,502 to 287,338) | 0.91 |
-| fillsync | 345 (344 to 345) | 335 (332 to 336) | 1.03 |
-| overwrite | 190,098 (189,162 to 210,303) | 277,799 (271,681 to 279,394) | 0.68 |
-| readrandom | 280,939 (277,569 to 281,703) | 434,082 (365,583 to 434,339) | 0.65 |
-| readmissing | 1,125,959 (1,125,691 to 1,134,390) | 1,072,933 (1,069,143 to 1,073,601) | 1.05 |
-| readseq | 2,819,038 (2,682,553 to 2,828,695) | 12,422,399 (12,419,712 to 12,436,747) | 0.23 |
-| seekrandom | 79,349 (79,338 to 79,524) | 365,534 (363,088 to 366,201) | 0.22 |
+| fillseq | 441,200 (435,705 to 441,654) | 408,109 (403,560 to 413,307) | 1.08 |
+| fillrandom | 290,445 (288,418 to 291,838) | 247,073 (243,598 to 253,134) | 1.18 |
+| fillsync | 345 (344 to 346) | 337 (336 to 337) | 1.02 |
+| overwrite | 239,958 (235,260 to 240,642) | 237,847 (234,719 to 240,619) | 1.01 |
+| readrandom | 304,512 (297,775 to 304,775) | 431,943 (369,074 to 434,236) | 0.70 |
+| readmissing | 1,294,124 (1,293,920 to 1,297,000) | 1,065,736 (1,065,329 to 1,067,809) | 1.21 |
+| readseq | 3,478,488 (3,477,337 to 3,486,352) | 12,453,332 (12,437,695 to 12,484,537) | 0.28 |
+| seekrandom | 103,190 (103,153 to 103,327) | 366,458 (364,424 to 366,875) | 0.28 |
 
 The same, with `--compact_before_reads` (the database is compacted once, before the reads):
 
 | benchmark | shale ops/s | LevelDB ops/s | shale / LevelDB |
 | --- | ---: | ---: | ---: |
-| fillseq | 332,033 (326,376 to 337,998) | 411,985 (409,310 to 412,266) | 0.81 |
-| fillrandom | 217,485 (208,302 to 221,172) | 244,493 (219,171 to 252,626) | 0.89 |
-| fillsync | 345 (344 to 346) | 335 (329 to 336) | 1.03 |
-| overwrite | 188,068 (186,516 to 190,241) | 244,763 (241,648 to 267,016) | 0.77 |
-| readrandom | 363,602 (363,516 to 364,085) | 508,784 (507,812 to 510,388) | 0.71 |
-| readmissing | 4,183,217 (4,169,409 to 4,196,415) | 1,672,947 (1,670,665 to 1,678,121) | 2.50 |
-| readseq | 5,553,271 (5,514,200 to 5,558,331) | 13,265,656 (13,213,924 to 13,290,634) | 0.42 |
-| seekrandom | 276,667 (275,732 to 276,686) | 423,984 (422,747 to 424,570) | 0.65 |
+| fillseq | 377,485 (372,644 to 380,806) | 413,846 (404,282 to 415,407) | 0.91 |
+| fillrandom | 242,763 (242,581 to 246,257) | 249,546 (248,928 to 252,725) | 0.97 |
+| fillsync | 345 (342 to 346) | 337 (336 to 344) | 1.03 |
+| overwrite | 212,334 (209,492 to 213,469) | 245,928 (240,790 to 250,904) | 0.86 |
+| readrandom | 375,821 (375,674 to 376,086) | 505,382 (504,340 to 505,730) | 0.74 |
+| readmissing | 4,111,598 (4,108,292 to 4,117,099) | 1,651,735 (1,648,003 to 1,659,988) | 2.49 |
+| readseq | 6,062,353 (6,058,940 to 6,066,268) | 13,299,420 (13,227,572 to 13,319,319) | 0.46 |
+| seekrandom | 287,504 (287,476 to 287,849) | 424,286 (423,382 to 425,101) | 0.68 |
+
+The write rows of this machine move by up to 16% from one run to the next, so the figure to use for them is the
+one of three rounds that ran the builds one after the other, each run after a check for a quiet machine
+(ops/s, the median of the three rounds' medians; "before" is the build with the first two changes, which do not
+touch writing, and without the MANIFEST and switch changes; "with both" is the final build):
+
+| benchmark | shale before | with the MANIFEST change | with both | LevelDB | before / LevelDB | after / LevelDB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| fillseq | 388,887 | 390,531 | 441,871 | 447,959 | 0.87 | 0.99 |
+| fillrandom | 262,190 | 266,595 | 287,276 | 292,827 | 0.90 | 0.98 |
+| overwrite | 233,344 | 232,679 | 242,683 | 289,526 | 0.81 | 0.84 |
 
 What each row is, how the two engines were matched, where shale is slower and why, and what these numbers do not
 say are in [docs/benchmarks.md](docs/benchmarks.md), with the latency and write-amplification tables.
@@ -304,7 +318,8 @@ proof, and the next section says what is outside them.
   leaves the page cache behind. Neither models a drive that acknowledges a flush it has not done.
 - **How a controller or a filesystem reorders writes**, beyond what the simulator's model of ordered
   directory changes and prefix-only loss says. What it also leaves out: files with zero-filled or garbage
-  tails after a power loss, durable-at-once `CreateDir`, and bytes that change at rest.
+  tails after a power loss (which, since a memtable switch syncs nothing, can be in either of the last two
+  logs), durable-at-once `CreateDir`, and bytes that change at rest.
 - **Runs longer or bigger than CI's**: 50 seeds of 2000 steps, 200 killed writers, 60 seconds a fuzz target.
   Tens of gigabytes and months of uptime have not been run.
 - **Other filesystems and platforms**: ext4 and APFS only, x86-64 Linux and arm64 macOS only.

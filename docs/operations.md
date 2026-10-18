@@ -137,7 +137,22 @@ of `paranoid_checks`.
 
 **A filesystem that left zeros at the end of a log after a power loss** (a tail of `0x00`) is reported
 as a defect, so the default refuses the open. If you know that was a power loss and not damage, open
-with `paranoid_checks = false`; the writes before the zeros are recovered.
+with `paranoid_checks = false`; the writes before the zeros are recovered. A memtable switch does not
+sync the old log, so after a power loss such a tail can be in either of the last two logs.
+
+**A `.dropped` file that you did not ask for, and a `LOG` line that says a log "lost the end of an
+earlier log".** This is not a failure: `Open` succeeded. After a power loss with unsynced writes (made
+with `sync = false`), the end of one log can be gone while unsynced writes of the next log are still on
+the disk. Writes are numbered one after another,
+so the open sees that the first write of the later log is not the one after the last write before it:
+a gap. It recovers everything before the gap, applies nothing from there on, and renames that log and
+every later one to `NNNNNN.log.dropped`, with `paranoid_checks` on or off, because this is what a power
+loss leaves and not damage. The database is a consistent prefix of the writes, which is what D2 promises.
+What is in the dropped files is **only** writes made after the last one acknowledged as synced:
+nothing that was acknowledged as synced is in them. The engine never reads or deletes a `.dropped` file
+again. You may delete it when you have decided that you do not want those unsynced writes; until then,
+`shalectl dump-wal NNNNNN.log.dropped` prints them. One or more such files can appear after each power
+loss that leaves a gap, and they take the space of the logs they were.
 
 ## Corruption found while reading
 
@@ -374,6 +389,7 @@ that matter:
 | `replayed N log(s), M operation(s), last sequence number S` | recovery found writes in N logs. |
 | `wrote the recovered writes to table N, B byte(s)` | recovery turned them into a level 0 table. |
 | `WAL FILE: dropped N byte(s), <defect>; nothing after this is replayed` and `WAL FILE kept as FILE.dropped, not replayed: ...` | a lenient open (`paranoid_checks = false`) stopped at a defect and set logs aside. |
+| `WAL FILE: its first write is sequence number N, and the writes from M were lost with the end of an earlier log; nothing from here on is replayed`, then `WAL FILE kept as FILE.dropped, not replayed: ...` | an open found the gap that a power loss leaves when it takes the unsynced end of one log and keeps writes of the next. Nothing that was acknowledged as synced is in the dropped logs. Any open does this, strict or lenient. |
 | `flushed a memtable to table N, B byte(s)` | a flush finished. |
 | `compacted A table(s) of level L and B of level L+1 into C table(s) of level L+1: ...` | a compaction finished, with bytes read and written and the entries it dropped. |
 | `moved table N from level L to level L+1` | a trivial move. |
@@ -435,6 +451,6 @@ zero.
 | `MANIFEST-NNNNNN`, `CURRENT` | The list of live tables. Never touch. |
 | `LOCK` | The lock. Leave it; it is not a sign that the database is open. |
 | `LOG`, `LOG.old` | The text log. Safe to read, to copy and to remove when the database is closed. |
-| `NNNNNN.log.dropped` | A log a lenient open set aside. Never read again by the engine; **it holds writes that were not recovered.** Keep it until you have decided you do not want them; `DestroyDB()` removes it. |
+| `NNNNNN.log.dropped` | A log that an open set aside. After a gap that a power loss left (any open), it holds no write that was acknowledged as synced, only writes made with `sync = false` after the last synced one. After a defect (a lenient open), **it holds writes that were not recovered, possibly acknowledged ones.** Never read again by the engine. Keep it until you have decided you do not want them; `DestroyDB()` removes it. One or more such files can appear after each power loss that leaves a gap. |
 | `NNNNNN.dbtmp` | A file that was being written when a crash came. The next open deletes it. |
 | anything else | Not the database's. The engine never reads, renames or deletes a file whose name it does not recognise. |
