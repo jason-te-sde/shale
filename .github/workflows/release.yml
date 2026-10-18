@@ -58,7 +58,12 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      # The token that can write is not left in .git/config, where the scripts of the tagged
+      # commit would run next to it. gh gets it from GH_TOKEN, and git archive reads only the
+      # local repository.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       # The version is what the script reads from CMakeLists.txt, after it has said that the tag is
       # that version. Later steps take it from the environment, from which it cannot be misread.
@@ -67,12 +72,14 @@ jobs:
           scripts/release-check.sh check "$GITHUB_REF_NAME"
           echo "VERSION=$(scripts/release-check.sh version)" >> "$GITHUB_ENV"
 
-      # The archive is made from the tag and not from the checkout, so that it holds the commit the
-      # tag names and none of the files this job wrote. The checksum file names the archive without a
-      # directory, so that `sha256sum --check` works from wherever both are downloaded to.
+      # The archive is of the commit this run was triggered for: the commit that verify tested and,
+      # as the checkout has verified, the one the tag names. It is not named by a ref, since how a
+      # checkout creates the ref of a tag has differed between its major versions.
+      # The checksum file names the archive without a directory, so that `sha256sum --check` works
+      # from wherever both are downloaded to.
       - name: Make the source archive and its checksum
         run: |
-          git archive --prefix="shale-$VERSION/" -o "shale-$VERSION.tar.gz" "refs/tags/$GITHUB_REF_NAME"
+          git archive --prefix="shale-$VERSION/" -o "shale-$VERSION.tar.gz" "$GITHUB_SHA"
           sha256sum "shale-$VERSION.tar.gz" > "shale-$VERSION.tar.gz.sha256"
           sha256sum --check "shale-$VERSION.tar.gz.sha256"
 

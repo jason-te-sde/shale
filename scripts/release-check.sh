@@ -16,7 +16,9 @@
 # --root DIR is the tree to read (default: the repository this script is in). --link-base URL makes
 # notes rewrite every relative link to URL followed by the path: a release page is not a file of the
 # repository, so a link such as docs/format.md is a dead link there. Links that have a scheme,
-# links that are only a #fragment, and links inside a fenced block are left as they are.
+# links that are only a #fragment, and links inside a fenced block are left as they are. An image is a
+# link like the others, so a relative image becomes the address of its page in the repository and not
+# of the picture: a release that shows one needs an absolute URL for it.
 #
 # The version is read from the project() call, and from nowhere else:
 #   - the command name is matched in any case, and commands that only end in "project" are not it;

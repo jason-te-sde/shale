@@ -35,7 +35,7 @@ The version is written in one place, `project(shale VERSION x.y.z ...)` in `CMak
 4. **Tag the merged commit** and push the tag. The tag is `v` and the version, annotated. The first two
    commands ask the questions that the workflow asks, so that a mistake is found here and not on the
    Actions page: the first says whether the tag is the version of `CMakeLists.txt`, and the second prints
-   what the release page will say.
+   the text of the release page (the workflow also makes its relative links absolute).
 
    ```
    git switch main && git pull
@@ -53,7 +53,7 @@ The version is written in one place, `project(shale VERSION x.y.z ...)` in `CMak
      `cmake --build --preset release` and `ctest --preset release`.
    - `publish` runs only when `verify` passed, and is the only job with write access to the repository
      (`contents: write`). It checks the tag again and makes `git archive --prefix=shale-X.Y.Z/` of the
-     tag, as `shale-X.Y.Z.tar.gz`, and its checksum as `shale-X.Y.Z.tar.gz.sha256`, in the format
+     tagged commit, as `shale-X.Y.Z.tar.gz`, and its checksum as `shale-X.Y.Z.tar.gz.sha256`, in the format
      `sha256sum --check` reads. It unpacks the archive and asks the same question of its
      `CMakeLists.txt`, and then creates the GitHub release with both files attached and the changelog
      entry as its notes, its links pointing at the tagged tree.
