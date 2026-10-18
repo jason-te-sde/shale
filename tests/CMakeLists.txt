@@ -123,6 +123,12 @@ target_compile_definitions(readme_test PRIVATE
   SHALE_README_PATH="${PROJECT_SOURCE_DIR}/README.md"
   SHALE_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples")
 
+# The durability contract is stated in the README and in ADR 0004, and the tests that back it are
+# named in the documents: the two statements are held to each other and the names to the tests.
+shale_add_test(durability_doc SOURCES docs/durability_doc_test.cc LIBS shale_testkit)
+target_compile_definitions(durability_doc_test PRIVATE
+  SHALE_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+
 # The deterministic simulator's reference model and the checkers of its invariants. Each checker is
 # tested against a database that lies, so that it is seen to alarm as well as to stay quiet.
 shale_add_test(model_db SOURCES sim/model_db_test.cc LIBS shale_testkit)
