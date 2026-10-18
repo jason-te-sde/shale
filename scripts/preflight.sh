@@ -14,6 +14,14 @@ cd "$(dirname "$0")/.."
 CLANG_FORMAT_VERSION=23.1.3
 CLANG_TIDY_VERSION=22.1.8
 
+# The fuzz targets need libFuzzer, which Apple's Clang does not ship, so they are built with the
+# Clang from Homebrew's llvm. Set these for a Clang installed somewhere else.
+FUZZ_CC="${FUZZ_CC:-/opt/homebrew/opt/llvm/bin/clang}"
+FUZZ_CXX="${FUZZ_CXX:-/opt/homebrew/opt/llvm/bin/clang++}"
+# Keep these in step with the fuzz job in .github/workflows/ci.yml.
+FUZZ_TARGETS=(fuzz_log_reader fuzz_block fuzz_table fuzz_version_edit fuzz_db_ops)
+FUZZ_SECONDS=10
+
 # This repository must be its own working tree. If it is a subdirectory of a larger one, every path
 # and every push is pointing somewhere unintended, so fail before anything runs.
 if [ "$(git rev-parse --show-toplevel)" != "$(pwd -P)" ]; then
@@ -71,10 +79,19 @@ build_and_test() {
   ctest --preset "$1"
 }
 
+# require_executable <path> <how to get it>: a compiler that is named by its path must be there.
+require_executable() {
+  if [ ! -x "$1" ]; then
+    echo "preflight: $1 is not installed; $2" >&2
+    exit 1
+  fi
+}
+
 require_tool clang-format "$CLANG_FORMAT_VERSION"
 require_tool clang-tidy "$CLANG_TIDY_VERSION"
 require_tool doxygen
 require_compiler gcc-16 g++-16
+require_executable "$FUZZ_CXX" "run: brew install llvm, or set FUZZ_CC and FUZZ_CXX"
 
 stage "clang-format"
 git ls-files -z -- '*.h' '*.cc' | xargs -0 -r clang-format --dry-run --Werror
@@ -102,6 +119,22 @@ crash_dir="$(mktemp -d)"
 build/gcc/tools/shale_crashtest --rounds=20 --seed=7 --min_compactions=1 --db="$crash_dir/db"
 build/gcc/tools/shale_crashtest --rounds=6 --seed=7 --sync --db="$crash_dir/db-sync"
 rm -rf "$crash_dir"
+
+# The fuzz job of .github/workflows/ci.yml, at ten seconds a target and not sixty. A crash leaves its
+# input in build/fuzz/crashes, and the target reproduces it when it is run with that file. What a run
+# finds goes to a directory that starts empty, so that the run is the seed corpus and ten seconds, not
+# also every earlier run: a target replays everything it is given before the time limit starts.
+stage "fuzz"
+CC="$FUZZ_CC" CXX="$FUZZ_CXX" cmake --preset fuzz
+cmake --build --preset fuzz --target fuzz_targets
+rm -rf build/fuzz/found
+mkdir -p build/fuzz/crashes
+for target in "${FUZZ_TARGETS[@]}"; do
+  mkdir -p "build/fuzz/found/$target"
+  build/fuzz/fuzz/"$target" -max_total_time="$FUZZ_SECONDS" -timeout=60 \
+    -artifact_prefix="build/fuzz/crashes/$target-" \
+    "build/fuzz/found/$target" "build/fuzz/fuzz/corpus/$target"
+done
 
 stage "clang-tidy"
 # The standalone clang-tidy does not ask Xcode where the SDK is, so it cannot find <string>.
