@@ -46,6 +46,15 @@ class Writer {
   /// @param record the bytes to append; may be empty.
   Status AddRecord(std::string_view record);
 
+  /// Returns how many bytes this Writer has handed to the file so far: the headers, the payloads,
+  /// and the zeros that fill the end of a block too short for a header, which are counted with the
+  /// record that follows them, the one that has to skip them. It counts what the file accepted,
+  /// so a record that failed part of the way has added the fragments that went in before the
+  /// failure, and nothing more is added after it. It does not count what the file held when a
+  /// Writer was made to continue it. The difference between two calls around an AddRecord() is
+  /// what that record cost the log on disk, which is more than its size.
+  uint64_t bytes_written() const { return bytes_written_; }
+
  private:
   Status AppendFragments(std::string_view record);
   Status EmitPhysicalRecord(RecordType type, const char* data, size_t length);
@@ -55,7 +64,8 @@ class Writer {
   // The CRC32C of each type byte alone. A fragment's checksum extends one of these over the
   // payload, so that the type byte is not hashed again for every fragment.
   std::array<uint32_t, kMaxRecordType + 1> type_crc_;
-  Status status_;  // the first failure, or OK
+  uint64_t bytes_written_ = 0;  // what the file has accepted from this Writer
+  Status status_;               // the first failure, or OK
 };
 
 }  // namespace shale::log

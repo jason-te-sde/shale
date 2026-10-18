@@ -47,3 +47,21 @@ shale_add_library(shale_core
     core/version_edit.cc
     core/version_state.cc
   LIBS shale_util)
+
+# The database proper: the files a database directory holds and the in-memory view of them. Unlike
+# the layers below it, it may use all of them, so it links the kernel and the I/O layer both.
+shale_add_library(shale_db
+  SOURCES
+    db/builder.cc
+    db/compaction_job.cc
+    db/db_background.cc
+    db/db_impl.cc
+    db/db_iter.cc
+    db/db_write.cc
+    db/filename_io.cc
+    db/info_log.cc
+    db/named_status.cc
+    db/options.cc
+    db/table_cache.cc
+    db/version_set.cc
+  LIBS shale_core shale_io)

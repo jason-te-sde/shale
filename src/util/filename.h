@@ -61,7 +61,10 @@ std::string TempFileName(const std::string& dbname, uint64_t number);
 /// Recognises a file name. `filename` is the bare name, with no directory part. On success it
 /// stores the kind in `*type` and the file number in `*number`, which is 0 for the kinds that
 /// have none, and returns true. A name that is not exactly one of the forms above returns false
-/// and leaves both outputs untouched; that includes a number that does not fit in 64 bits.
+/// and leaves both outputs untouched; that includes a number that does not fit in 64 bits, and a
+/// number that is not spelled as the functions above print it: `9.log` and `0009.log` are not
+/// names, `000009.log` is. A name that parsed to the number of a file it is not would send whoever
+/// reads it to a file that is not there.
 bool ParseFileName(std::string_view filename, uint64_t* number, FileType* type);
 
 }  // namespace shale

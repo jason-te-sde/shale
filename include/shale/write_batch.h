@@ -6,17 +6,10 @@
 #include <string>
 #include <string_view>
 
+#include "shale/options.h"
 #include "shale/status.h"
 
 namespace shale {
-
-/// The longest key the database accepts, in bytes. A key above it makes a write fail with
-/// InvalidArgument.
-inline constexpr size_t kMaxKeySize = 65536;
-
-/// The longest value the database accepts, in bytes. A value above it makes a write fail with
-/// InvalidArgument.
-inline constexpr size_t kMaxValueSize = 67108864;
 
 /// A group of updates that are applied together or not at all.
 ///
@@ -25,9 +18,10 @@ inline constexpr size_t kMaxValueSize = 67108864;
 /// it is there or none of it. The same bytes are what the write-ahead log stores, which is why
 /// the batch keeps its operations in their encoded form instead of in a vector.
 ///
-/// The limits on key and value size are not checked when an operation is added, since adding
-/// cannot fail: the batch notes the violation, and the write that is handed the batch returns
-/// InvalidArgument and applies none of it. A WriteBatch is not thread-safe.
+/// The limits on key and value size, kMaxKeySize and kMaxValueSize, are not checked when an
+/// operation is added, since adding cannot fail: the batch notes the violation, and the write that
+/// is handed the batch returns InvalidArgument and applies none of it. A WriteBatch is not
+/// thread-safe.
 class WriteBatch {
  public:
   /// Creates an empty batch.
@@ -54,9 +48,9 @@ class WriteBatch {
   ~WriteBatch() = default;
 
   /// Adds an operation that sets `key` to `value`. The bytes are copied. Neither may exceed the
-  /// limits above, but if one does the entry is accepted here and the write is refused. An entry
-  /// too large to encode at all, 4 GiB or more in the key or the value, is not stored, and is not
-  /// counted by Count(); it makes the write fail the same way.
+  /// limits kMaxKeySize and kMaxValueSize, but if one does the entry is accepted here and the write
+  /// is refused. An entry too large to encode at all, 4 GiB or more in the key or the value, is not
+  /// stored, and is not counted by Count(); it makes the write fail the same way.
   ///
   /// Aborts if the batch already holds 2^32 - 1 operations, which is all its 32-bit count can
   /// say. That is unlike an oversized entry, which returns InvalidArgument when written: an
@@ -66,8 +60,9 @@ class WriteBatch {
   /// @param value the new value; may be empty.
   void Put(std::string_view key, std::string_view value);
 
-  /// Adds an operation that deletes `key`. The key is copied. The limit on its size applies as it
-  /// does for Put(), and so does the abort when the batch already holds 2^32 - 1 operations.
+  /// Adds an operation that deletes `key`. The key is copied. The limit on its size, kMaxKeySize,
+  /// applies as it does for Put(), and so does the abort when the batch already holds 2^32 - 1
+  /// operations.
   /// @param key the key to delete; may be empty.
   void Delete(std::string_view key);
 

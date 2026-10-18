@@ -36,6 +36,19 @@ struct CompactionOptions {
   uint64_t target_file_size = 2 << 20;
 };
 
+/// How many target-sized files of the level below its output's a compaction's output may overlap,
+/// and how many a file may have as grandparents and still be moved down whole, before it is too
+/// much for the next compaction of that level to merge at once. The bound LevelDB uses.
+inline constexpr uint64_t kMaxGrandparentOverlapTargets = 10;
+
+/// Returns the most bytes of grandparent files, those two levels below a compaction's input, that
+/// an output of the compaction may overlap, and that a file may have and still be moved down whole:
+/// kMaxGrandparentOverlapTargets times `target_file_size`, or UINT64_MAX if that is too big for 64
+/// bits. The picker's trivial move and the job that writes the outputs both use it, so that the two
+/// cannot disagree about how much overlap is too much.
+/// @param target_file_size the size a compaction aims for in each file it writes, in bytes.
+uint64_t MaxGrandparentOverlapBytes(uint64_t target_file_size);
+
 /// One compaction: what to read and where the result goes.
 struct CompactionPlan {
   /// The inputs come from this level and the one below it; the outputs go to level + 1.

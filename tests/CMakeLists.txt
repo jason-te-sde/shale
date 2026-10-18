@@ -71,6 +71,31 @@ shale_add_test(version_state SOURCES core/version_state_test.cc LIBS shale_core)
 shale_add_test(compaction_picker SOURCES core/compaction_picker_test.cc LIBS shale_core)
 shale_add_test(compaction_filter SOURCES core/compaction_filter_test.cc LIBS shale_core)
 
+# The database layer's tests run against the fault-injecting Env, which the test kit provides.
+shale_add_test(builder SOURCES db/builder_test.cc LIBS shale_db shale_testkit)
+shale_add_test(compaction_job SOURCES db/compaction_job_test.cc LIBS shale_db shale_testkit)
+shale_add_test(version_set SOURCES db/version_set_test.cc LIBS shale_db shale_testkit)
+shale_add_test(options SOURCES db/options_test.cc LIBS shale_db)
+shale_add_test(snapshot_list SOURCES db/snapshot_list_test.cc LIBS shale_db)
+shale_add_test(info_log SOURCES db/info_log_test.cc LIBS shale_db shale_testkit)
+
+# The fixture that the tests of the open database share: a database over the fault-injecting Env and
+# a scheduler that only the test drives. It links shale_db and the test kit, so a test that links it
+# names neither.
+shale_add_library(shale_dbtest
+  SOURCES
+    db/db_test_util.cc
+  LIBS shale_db shale_testkit)
+
+shale_add_test(db_basic SOURCES db/db_basic_test.cc LIBS shale_dbtest)
+shale_add_test(db_recovery SOURCES db/db_recovery_test.cc LIBS shale_dbtest)
+shale_add_test(db_flush SOURCES db/db_flush_test.cc LIBS shale_dbtest)
+shale_add_test(db_compaction SOURCES db/db_compaction_test.cc LIBS shale_dbtest)
+shale_add_test(db_iter SOURCES db/db_iter_test.cc LIBS shale_dbtest)
+shale_add_test(db_snapshot SOURCES db/db_snapshot_test.cc LIBS shale_dbtest)
+shale_add_test(db_write SOURCES db/db_write_test.cc LIBS shale_dbtest)
+shale_add_test(db_properties SOURCES db/db_properties_test.cc LIBS shale_dbtest)
+
 # Clang's thread-safety analysis is what makes SHALE_GUARDED_BY more than a comment, and nothing
 # else would notice if it silently stopped working. So the build itself is tested: one translation
 # unit that reads a guarded member without the lock must be rejected, and the same unit with the

@@ -1,0 +1,489 @@
+#ifndef SHALE_DB_DB_IMPL_H_
+#define SHALE_DB_DB_IMPL_H_
+
+// The database: opening it and recovering what a previous run left, the write path, point reads,
+// snapshots and iterators. The other files of src/db that belong to DBImpl are db_write.cc, the
+// write path, and db_background.cc, the memtable switch and the background work. The user view
+// that an iterator shows is made in db_iter.cc.
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "core/compaction_picker.h"
+#include "core/version_edit.h"
+#include "core/version_state.h"
+#include "db/info_log.h"
+#include "db/snapshot_list.h"
+#include "db/table_cache.h"
+#include "db/version_set.h"
+#include "io/log_writer.h"
+#include "io/memtable.h"
+#include "io/table.h"
+#include "io/table_builder.h"
+#include "shale/db.h"
+#include "shale/env.h"
+#include "shale/iterator.h"
+#include "shale/options.h"
+#include "shale/scheduler.h"
+#include "shale/status.h"
+#include "shale/write_batch.h"
+#include "util/dbformat.h"
+#include "util/mutex.h"
+#include "util/thread_annotations.h"
+
+namespace shale {
+
+/// What the database has done, counted, for tests to look at and for the properties that report it.
+///
+/// `wal_bytes_written` is what the log writer handed to the log file, which is what the log takes
+/// on disk: each record with its headers, and the zeros that fill the end of a block. It is what
+/// was written, and not what was acknowledged: a group whose sync failed counts, since its bytes
+/// are in the file, and so does the part of a record that went in before an append failed. The
+/// write amplification is built on it, as the bytes that writing costs the disk.
+struct DBCounters {
+  uint64_t flushes = 0;                   ///< Memtables written out as level 0 tables.
+  uint64_t compactions = 0;               ///< Compactions that merged files.
+  uint64_t trivial_moves = 0;             ///< Files moved to the next level as they were.
+  uint64_t tombstones_dropped = 0;        ///< Deletion entries that a compaction dropped.
+  uint64_t shadowed_dropped = 0;          ///< Entries a compaction dropped for a newer one.
+  uint64_t user_bytes_written = 0;        ///< Key and value bytes of the writes that were made.
+  uint64_t wal_bytes_written = 0;         ///< Bytes the log writer handed to the log file.
+  uint64_t flush_bytes_written = 0;       ///< Bytes of the tables that flushes wrote.
+  uint64_t compaction_bytes_read = 0;     ///< Bytes of the tables that compactions read.
+  uint64_t compaction_bytes_written = 0;  ///< Bytes of the tables that compactions wrote.
+  uint64_t write_groups = 0;              ///< Groups of writes that shared one log record.
+  uint64_t wal_syncs = 0;                 ///< Syncs of the log that a group of writes asked for.
+  uint64_t write_slowdowns = 0;           ///< Writes (groups) slowed for level 0 being full.
+  uint64_t write_stops = 0;               ///< Waits of a write for level 0 or the flush.
+  uint64_t bg_errors = 0;                 ///< Errors that stopped writes.
+};
+
+/// The implementation of DB.
+///
+/// Everything the database changes is guarded by `mutex_`: the memtables and the log the newer one
+/// is written to, the version set, the snapshots and the first error of the log. A read holds it
+/// only to take the memtables, the version and the sequence number it will read.
+///
+/// Writes go through a queue, and the writer at its front, the leader, writes for all of the ones
+/// that are queued behind it: it makes room, takes as many of them as one log record may hold into
+/// its group, numbers them, and, with the mutex given up, appends the group to the log as one
+/// record, syncs it if it was asked to, and puts it in the memtable. Only then is the last sequence
+/// number moved, so that a reader never sees part of a group, and the group's writers are woken
+/// with the one status. The log and the memtable are touched only by the leader, and by the switch
+/// to a new memtable, which is the leader's too: a Flush() takes its place in the queue to make it.
+/// That is what lets a write that is slow to reach the disk not hold up the readers, and the
+/// writers that queue meanwhile share the next write.
+///
+/// A write that finds level 0 with `l0_slowdown_trigger` files or more sleeps a millisecond, once,
+/// and one that must switch the memtable waits while level 0 has `l0_stop_trigger` files or more,
+/// and while the memtable that was switched before is not yet a table. Level 0 only grows by the
+/// flush of a switched memtable, and only one is ever waiting, so the wait is what bounds it.
+///
+/// Background work is one task at a time on the Scheduler: a full memtable becomes the immutable
+/// one, `imm_`, and a task writes it out as a level 0 table while writes go on into a new `mem_`.
+/// What a task does when it runs is the most urgent of what there is: the flush of `imm_`, which
+/// stalls writes, then the compaction that a CompactRange() is waiting for, then the compaction
+/// that the size of a level asks for. A compaction is the task for as long as it takes, which is
+/// why it writes out `imm_` itself between two of its output files, and why only one is ever
+/// running: the picker cannot see a compaction that is in flight, and would choose the same files
+/// again. `bg_scheduled_` says a task is queued or running, and it takes the mutex, which it gives
+/// up only to write files. Whoever must wait for background work, a write that finds the memtable
+/// full and `imm_` still there among them, does it in WaitForBackgroundWork(): on a scheduler that
+/// runs tasks on the caller's thread, it runs them itself, which is for one thread at a time: two
+/// that wait at once would run tasks on the same ManualScheduler together.
+///
+/// The first error of the log, of a flush, of a compaction or of the MANIFEST stops all writes: it
+/// is kept in `bg_error_`, counted, and every write and flush after it returns it. Reads go on.
+class DBImpl final : public DB {
+ public:
+  /// Creates a database that is not open: DB::Open() calls OpenImpl() on it. `options` has been
+  /// through ValidateOptions().
+  /// @param options how to run the database.
+  /// @param dbname the database directory.
+  DBImpl(const Options& options, std::string dbname);
+
+  /// Closes the database; see DB::~DB(). Aborts if an iterator or a snapshot is still alive, the
+  /// iterator first: it points into what is about to be freed, and a snapshot is only a number.
+  ~DBImpl() override;
+
+  Status Put(const WriteOptions& options, std::string_view key, std::string_view value) override;
+  Status Delete(const WriteOptions& options, std::string_view key) override;
+  Status Write(const WriteOptions& options, WriteBatch* updates) override;
+  Status Get(const ReadOptions& options, std::string_view key, std::string* value) override;
+
+  /// Switches to a new memtable, if the one in use is not empty, and returns when the memtable
+  /// that was in use, and any that was waiting before it, is a table. It queues as a write does, so
+  /// that no group is being written while it switches, and leaves the queue before it waits for
+  /// the table, so that writes go on. Returns the error that stops writes, if there is one, and
+  /// then the memtable may not have been written.
+  Status Flush() override;
+
+  /// Compacts the range as DB::CompactRange() says: writes out the memtable, then, level by level
+  /// from 0 down to the level just above the deepest one that holds a file overlapping the range,
+  /// compacts the files of the level that overlap it, with the ones they overlap in the level
+  /// below, into that level below. Level 0 is always compacted, so that what the flush just wrote
+  /// reaches level 1. Every such compaction rewrites its files, a lone file that could move down
+  /// whole included, so that what they hold that is dead is given back. Each is a request that the
+  /// background task takes before any compaction it would have chosen itself, and this waits for
+  /// each in turn. Returns the error that stops writes, if there is one.
+  Status CompactRange(std::optional<std::string_view> begin,
+                      std::optional<std::string_view> end) override;
+
+  /// Returns an iterator over the database as of one sequence number: `options.snapshot`'s if it
+  /// is set, and else the newest write that is done. It shows each key once, with the value of its
+  /// newest write at or below that number, and no key whose newest such write is a deletion. See
+  /// NewDBIterator() for what it does with a failure.
+  ///
+  /// It merges the memtable, the immutable memtable and every file of the current version, and
+  /// holds all of them, the Version and the memtables, for as long as it lives: that is what makes
+  /// it a snapshot of its own, with no snapshot taken, whatever is written, flushed or compacted
+  /// after it was made. A table it holds is kept by LiveFiles() and is deleted by the first sweep
+  /// of obsolete files after the iterator is gone. Releasing the iterator does not run a sweep, so
+  /// that is the next flush or compaction. The tables of level 0 are opened here and those of the
+  /// deeper levels as the iterator comes to them, and a table that cannot be opened or read ends
+  /// the iteration with its error.
+  ///
+  /// An iterator at a snapshot holds what the current version has, and the snapshot only chooses
+  /// what of it is seen: the snapshot may be released while the iterator is in use, and the files
+  /// it reads stay as they were. The snapshot must be open when the iterator is made. The count of
+  /// iterators that the destructor checks goes up here and down when the iterator is destroyed,
+  /// from any thread.
+  /// @param options how to read; `options.snapshot` is checked as in Get().
+  std::unique_ptr<Iterator> NewIterator(const ReadOptions& options) override SHALE_EXCLUDES(mutex_);
+
+  /// Reads a property as DB::GetProperty() says. The figures of one property are read together,
+  /// under the mutex: a property is a look at the database at one moment.
+  bool GetProperty(std::string_view property, std::string* value) override SHALE_EXCLUDES(mutex_);
+
+  /// Returns a snapshot at the newest write that is done.
+  const Snapshot* GetSnapshot() override SHALE_EXCLUDES(mutex_);
+
+  /// Gives back `snapshot`. Aborts if it is not open in this database: one that another database
+  /// made, and one that was released already, whose memory is only compared with the open ones.
+  void ReleaseSnapshot(const Snapshot* snapshot) override SHALE_EXCLUDES(mutex_);
+
+  /// Opens the database: the work of DB::Open() after the options are checked. The sequence is
+  /// the directory, the lock, CURRENT and the MANIFEST, the replay of the write-ahead logs that
+  /// hold writes the tables do not, a new log, the recovered writes as a level 0 table, a new
+  /// MANIFEST that names both, and last the deletion of the files that these replace, which also
+  /// takes the tables that an earlier open or a flush left that no version names. A failure
+  /// anywhere leaves what was in the directory as it was, except for a new log, a new table or a
+  /// new MANIFEST that may or may not have come to be named, none of which is deleted.
+  Status OpenImpl() SHALE_EXCLUDES(mutex_);
+
+  /// Returns the files of the current version, level by level, and its counters.
+  VersionState TEST_VersionState() SHALE_EXCLUDES(mutex_);
+
+  /// Returns what the database has counted so far.
+  DBCounters TEST_Counters() SHALE_EXCLUDES(mutex_);
+
+  /// Returns the sequence number of the newest write.
+  SequenceNumber TEST_LastSequence() SHALE_EXCLUDES(mutex_);
+
+  /// Returns the numbers of the files of every version that is still alive.
+  std::set<uint64_t> TEST_LiveFiles() SHALE_EXCLUDES(mutex_);
+
+  /// Returns the current version, which the caller then holds: a table that it names is not
+  /// deleted for as long as the caller does, as for a read that began now.
+  std::shared_ptr<const Version> TEST_CurrentVersion() SHALE_EXCLUDES(mutex_);
+
+  /// Returns the cache of open tables, for a test to ask whether a table is in it.
+  TableCache* TEST_TableCache() { return &table_cache_; }
+
+  /// Sets `hook`, which a group leader calls on its own thread after it has built its group and
+  /// given up the mutex, and before it appends to the log: a test holds the leader there while more
+  /// writers queue behind it. An empty `hook` removes it. It runs for every group, from whichever
+  /// thread leads it, so it must be safe to call from any.
+  void TEST_SetBeforeWalWriteHook(std::function<void()> hook) SHALE_EXCLUDES(mutex_);
+
+  /// Returns how many writers are in the queue, the leader of the group that is being written
+  /// among them.
+  size_t TEST_QueuedWriters() SHALE_EXCLUDES(mutex_);
+
+ private:
+  // The work of OpenImpl(), with the mutex held.
+  Status OpenLocked() SHALE_REQUIRES(mutex_);
+
+  // Finds the files that recovery cares about: marks the numbers of the logs and tables in the
+  // directory as used, and returns the numbers of the logs to replay, in ascending order.
+  Status FindLogsToReplay(std::vector<uint64_t>* logs) SHALE_REQUIRES(mutex_);
+
+  // Replays log `number` into `mem_`. `*max_sequence` is the last sequence number applied so far
+  // and moves on with each batch; `*entries` counts the operations applied. Returns the IOError of
+  // a read that failed, whether or not paranoid_checks is on: the log may be whole. Sets
+  // `*stopped_for` to what was wrong when the log has a defect that is not an error because
+  // paranoid_checks is off: replay ends there, with nothing after it in this log or the later ones
+  // applied, and the caller sets those logs aside.
+  Status ReplayLog(uint64_t number, SequenceNumber* max_sequence, uint64_t* entries,
+                   std::string* stopped_for) SHALE_REQUIRES(mutex_);
+
+  // Applies the batch that is `record` to `mem_`, whole or not at all: returns Corruption, with
+  // nothing applied, for a batch that does not decode, whose sequence number does not come after
+  // `*max_sequence`, or whose operations would be numbered above kMaxSequenceNumber.
+  Status ApplyRecoveredBatch(std::string_view record, SequenceNumber* max_sequence,
+                             uint64_t* entries) SHALE_REQUIRES(mutex_);
+
+  // Renames logs[first] and every log after it to "<name>.dropped", the last first, so that a
+  // failure part of the way never leaves a later log replayable behind one that is not, and says
+  // for each in the info log why. `why` is what was wrong with logs[first]. Syncs the directory
+  // after the later logs are renamed and before logs[first] is, so that the order holds across a
+  // power loss on a filesystem that does not persist directory changes in order, and again at the
+  // end. The renamed files have a name that nothing reads or deletes.
+  Status SetAsideLogs(const std::vector<uint64_t>& logs, size_t first, const std::string& why)
+      SHALE_REQUIRES(mutex_);
+
+  // Takes a number for a log or a table. Returns Corruption instead when none is left below
+  // kMaxFileNumber: a file numbered at it is one that no MANIFEST holds, and a log numbered so high
+  // would be taken for a stray file by the next open and never replayed.
+  Status AllocateFileNumber(uint64_t* number) SHALE_REQUIRES(mutex_);
+
+  // Takes a number for a table that is about to be made, as AllocateFileNumber() does, and counts
+  // it in `table_makers_`. The number is set whether or not the status is OK.
+  Status AllocateTableNumber(uint64_t* number) SHALE_REQUIRES(mutex_);
+
+  // Writes `mem_`, the recovered writes, as a level 0 table and adds it to `*edit`.
+  Status WriteRecoveredMemTable(VersionEdit* edit) SHALE_REQUIRES(mutex_);
+
+  // Remembers `s` as the first error of the write path, if there is none yet: every later write
+  // returns it, no more background work is scheduled, and whoever waits for background work is
+  // woken to see it.
+  void RecordBackgroundError(const Status& s) SHALE_REQUIRES(mutex_);
+
+  // What a thread that writes puts in the queue, on its own stack, and waits on until it leads a
+  // group or a leader has written for it. Its fields are guarded by `mutex_`, which the analysis
+  // cannot say of a member of another class; `cv` is bound to it. A `batch` of null is a request
+  // to switch the memtable, which no group takes in.
+  struct Writer {
+    explicit Writer(Mutex* mu) : cv(mu) {}
+    WriteBatch* batch = nullptr;
+    bool sync = false;
+    bool done = false;  // a leader has written the batch, and `status` is the result
+    Status status;
+    CondVar cv;
+  };
+
+  // Takes the group of the leader at the front of the queue: the leader's batch and those of the
+  // writers behind it that may share its log record. A group ends before a writer that is not a
+  // write, before a writer that asks for a sync when the leader does not, since the leader's
+  // record is not synced and would be acknowledged without one, at the size limit, and before the
+  // batch that would take more sequence numbers than the `room` there is. The size limit is 1 MiB,
+  // and when the leader's batch is 128 KiB or less, its size and 128 KiB, so that a small write
+  // is not made slow by a large one that happened to queue after it. Sets `*last_writer` to the
+  // last writer of the group, and returns the batch to write: the leader's own if it is alone,
+  // and else `*merged`, which holds a copy of all of them.
+  WriteBatch* BuildBatchGroup(Writer** last_writer, WriteBatch* merged, uint64_t room)
+      SHALE_REQUIRES(mutex_);
+
+  // Writes the group that `leader` leads, which is the leader's thread's to do with the mutex held
+  // on entry, and held again on return. Returns what every writer of the group is to be told, and
+  // sets `*last_writer` to the last of them. Refuses a leader whose batch alone would take more
+  // sequence numbers than are left, as that batch's own error, which stops no write; any error of
+  // the log stops them.
+  Status CommitGroup(Writer* leader, Writer** last_writer) SHALE_REQUIRES(mutex_);
+
+  // Takes the writers up to `last_writer` off the front of the queue, `leader` being the first,
+  // gives each of the others `status` and wakes it, and wakes the writer that is at the front now,
+  // which leads next.
+  void FinishGroup(Writer* leader, Writer* last_writer, const Status& status)
+      SHALE_REQUIRES(mutex_);
+
+  // Makes room in `mem_` for a write, and returns OK when there is, or the error that stops
+  // writes. Called by the leader of a group, or by a Flush() that has the front of the queue, and
+  // by no one else. When level 0 has `l0_slowdown_trigger` files or more, and `force` is not set,
+  // it sleeps a millisecond with the mutex given up, once. There is room when `mem_` is below
+  // write_buffer_size, and when it is not, or when `force` is set, `mem_` becomes `imm_` and a new
+  // one takes its place, which waits first for an `imm_` that is still there, and for level 0 to
+  // have fewer than `l0_stop_trigger` files. May give up the mutex while it sleeps or waits, so a
+  // caller that read anything under the mutex before it must read it again.
+  Status MakeRoomForWrite(bool force) SHALE_REQUIRES(mutex_);
+
+  // Starts a new log and a new `mem_`, and makes the old `mem_` the `imm_`, which must be null.
+  // The old log is synced first and the new one's directory entry before any write goes into it, so
+  // that a write that is durable in the new log never has an earlier one that is not in the old.
+  // Any failure is a background error: the state of the log is not known after it.
+  Status SwitchMemTable() SHALE_REQUIRES(mutex_);
+
+  // Queues a background task if there is work and none is queued or running: the work is a memtable
+  // to flush, a request of CompactRange() or a level that is due for compaction, and there is none
+  // once the database is closing or an error has stopped writes.
+  void MaybeScheduleBackgroundWork() SHALE_REQUIRES(mutex_);
+
+  // The task that the scheduler runs. Takes the mutex.
+  void BackgroundCall() SHALE_EXCLUDES(mutex_);
+
+  // The size limits the picker chooses by, from the options.
+  CompactionOptions PickerOptions() const;
+
+  // Returns the compaction that the sizes of the levels ask for, or nothing. Aborts if a compaction
+  // is running: the picker reads the version, which does not show the files a running compaction
+  // is reading, and would choose them again.
+  std::optional<CompactionPlan> PickAutomaticCompaction() SHALE_REQUIRES(mutex_);
+
+  // What a background task does when there is no memtable to flush: the compaction that a request
+  // of CompactRange() is waiting for if there is one, else the one that a level is due for, if
+  // any. Returns OK if there was nothing to do. On an error, whatever the compaction left is left:
+  // see CompactFiles().
+  Status BackgroundCompaction() SHALE_REQUIRES(mutex_);
+
+  // Runs `plan`, which was picked from `base`: moves its file to the next level if it is a lone
+  // one that can go as it is, and else merges the files into new ones. Gives up the mutex while it
+  // merges.
+  Status RunCompaction(const CompactionPlan& plan, std::shared_ptr<const Version> base)
+      SHALE_REQUIRES(mutex_);
+
+  // Installs the move of the one file of `plan` to the next level, which reads nothing, so that
+  // none of it goes through the filter: it is the one edit that deletes the file at its level and
+  // adds it at the next.
+  Status MoveFileDown(const CompactionPlan& plan) SHALE_REQUIRES(mutex_);
+
+  // Merges the files of `plan` with a CompactionJob and installs the result, with the mutex given
+  // up while the job runs. A failed job has removed its outputs. A failure to install the edit
+  // leaves them, since the MANIFEST may hold the edit all the same and name them: they are left for
+  // the next open to find, with the inputs that the edit may or may not have deleted. After a
+  // background error the outputs of a job that succeeded are removed without being installed, for
+  // the work of the database is over. A job that stopped because the database is closing has
+  // removed what it made, and nothing is installed or recorded: it is not an error.
+  Status CompactFiles(const CompactionPlan& plan, std::shared_ptr<const Version> base)
+      SHALE_REQUIRES(mutex_);
+
+  // The hook of a compaction between two of its output files: writes `imm_` out, if there is one,
+  // so that a write that waits for it does not wait for the end of the compaction. Takes the mutex.
+  // A failure is a background error, which the compaction finds when it is done.
+  void FlushBetweenOutputs() SHALE_EXCLUDES(mutex_);
+
+  // Compacts the files of `level` that overlap the range, as a request that the background task
+  // takes, and waits for it. Returns the error that stops writes, if there is one.
+  Status CompactLevel(int level, std::optional<std::string_view> begin,
+                      std::optional<std::string_view> end) SHALE_REQUIRES(mutex_);
+
+  // Writes `imm_` as a level 0 table and installs it, with the mutex given up while the table is
+  // built. Returns the error of whichever step failed; then `imm_` is still there, a table that the
+  // MANIFEST may or may not name may be left in the directory, and nothing has been deleted.
+  Status FlushImmutable() SHALE_REQUIRES(mutex_);
+
+  // Deletes the files that nothing needs: the tables that no version, in use by a reader or not,
+  // names and no flush or compaction is producing, the logs older than `LogNumber()`, the MANIFESTs
+  // but the current one, and temporary files. A file whose name is not one of the database's, a
+  // log that a lenient open set aside among them, is not touched, nor is a numbered file at or
+  // above kMaxFileNumber, which the database never makes. A table that is deleted is evicted from
+  // the table cache. Does nothing after an error has stopped writes, since whether the version
+  // that a failed edit would have installed is the one that a restart finds is not known. Gives up
+  // the mutex while it lists and deletes: what it decides is obsolete never becomes needed, since a
+  // file number is not used twice, and the one task at a time that makes files is the caller, a
+  // compaction that flushes between its outputs included. A table begun while the files are listed
+  // would be taken for one that nothing needs, so the sweep aborts if `table_makers_` moved while
+  // it was away, which it does even for a table that was begun and finished in that time.
+  void DeleteObsoleteFiles() SHALE_REQUIRES(mutex_);
+
+  // Waits for the background work to make progress, and returns so that the caller can look at
+  // what it is waiting for again. On a scheduler that runs tasks on the caller's thread it runs
+  // them: the mutex is given up while they do, and it is a bug to be here with nothing queued,
+  // since no one else will ever run a task. On any other it waits for the end of a task.
+  void WaitForBackgroundWork() SHALE_REQUIRES(mutex_);
+
+  // What a caller of CompactRange() asks the background task for, for one level: a request that
+  // lives on the caller's stack from the time it is made until the caller has seen it done.
+  struct ManualCompaction {
+    int level = 0;                     // the level whose files are compacted
+    std::optional<std::string> begin;  // the range of user keys, inclusive, or unbounded
+    std::optional<std::string> end;
+    bool running = false;  // the task has taken it, and the caller must not leave until it is done
+    bool done = false;     // the task is finished with it, however it ended
+  };
+
+  std::shared_ptr<MemTable> NewMemTable() SHALE_REQUIRES(mutex_);
+
+  TableBuilderOptions TableOptions() const;
+
+  // Adds a line to the info log, if there is one yet.
+  void Log(const std::string& line);
+
+  // The lock on the database directory comes first so that it is released last, after every file
+  // the database holds open has been closed.
+  std::unique_ptr<FileLock> db_lock_;
+
+  const Options options_;  // with `env` filled in
+  Env* const env_;
+  const std::string dbname_;
+  std::unique_ptr<InfoLog> info_log_;  // null until the lock is held: see OpenLocked()
+  BlockCache block_cache_;
+  TableCache table_cache_;
+
+  Mutex mutex_;
+  // Signalled, with the mutex held, when a background task ends: whoever waits for the work to
+  // make progress looks at what it waits for again.
+  CondVar background_cv_{&mutex_};
+  VersionSet versions_ SHALE_GUARDED_BY(mutex_);
+  // The one that writes go into. The leader adds to it with the mutex given up, which the memtable
+  // allows beside readers, and only a leader, or a Flush() in the queue, replaces it.
+  std::shared_ptr<MemTable> mem_ SHALE_GUARDED_BY(mutex_);
+  // The memtable that is waiting to be written out as a table, or null. Reads look at it after
+  // `mem_`, and it is only ever set when `mem_` is switched and cleared by the flush.
+  std::shared_ptr<MemTable> imm_ SHALE_GUARDED_BY(mutex_);
+  // Whether `imm_` is set, for a compaction to check between its output files without the mutex.
+  std::atomic<bool> has_imm_{false};
+  // The write-ahead log of `mem_`. The writer is declared after the file it writes to, so that it
+  // is destroyed first. The leader of a group appends to it with the mutex given up, through
+  // pointers it took with the mutex held: only a leader, or a Flush() in the queue, replaces them,
+  // and none of those runs while a leader writes.
+  std::unique_ptr<WritableFile> logfile_ SHALE_GUARDED_BY(mutex_);
+  std::unique_ptr<log::Writer> log_ SHALE_GUARDED_BY(mutex_);
+  uint64_t logfile_number_ SHALE_GUARDED_BY(mutex_) = 0;
+  // Whether a record was appended to the log since it was last synced: the switch to a new
+  // memtable syncs the old log, and does not when there is nothing to sync, which with every write
+  // synced, as they are by default, is every time. Set by the leader when it has the mutex again.
+  bool log_unsynced_ SHALE_GUARDED_BY(mutex_) = false;
+  SnapshotList snapshots_ SHALE_GUARDED_BY(mutex_);
+  // How many iterators from NewIterator() are alive. Counted up under the mutex and down by the
+  // iterator, which is destroyed on any thread and must not take the mutex for it, so atomic.
+  // The destructor aborts if it is not zero.
+  std::atomic<int> live_iterators_{0};
+  // The writers that have not been told the result of their write, the oldest first; the first
+  // leads, and stays here until its group has been written.
+  std::deque<Writer*> writers_ SHALE_GUARDED_BY(mutex_);
+  // What a test sets to run in the leader before it appends to the log, or empty: see
+  // TEST_SetBeforeWalWriteHook().
+  std::function<void()> before_wal_write_hook_ SHALE_GUARDED_BY(mutex_);
+  Status bg_error_ SHALE_GUARDED_BY(mutex_);  // the first error of the write path, or OK
+  DBCounters counters_ SHALE_GUARDED_BY(mutex_);
+  uint64_t memtable_seed_ SHALE_GUARDED_BY(mutex_) = 0;  // the seed of the next memtable
+  // Whether a background task is queued or running: at most one is, and it is the one that makes
+  // tables, so a table that is being made is also here, in `pending_outputs_`.
+  bool bg_scheduled_ SHALE_GUARDED_BY(mutex_) = false;
+  // The numbers of the tables that are being written and are in no version yet, which the deletion
+  // of obsolete files must not take: the table of a flush, and the outputs of a compaction from the
+  // moment each is numbered until the edit that names them has been tried.
+  std::set<uint64_t> pending_outputs_ SHALE_GUARDED_BY(mutex_);
+  // How many tables have been begun, by a flush, a compaction or the recovery of the log: a number
+  // taken for each. Only the sweep of obsolete files looks at it, to find that a table was begun
+  // while it was away, which `pending_outputs_` alone does not show if the table is done by then.
+  uint64_t table_makers_ SHALE_GUARDED_BY(mutex_) = 0;
+  // The request of a CompactRange() that the background task has not yet finished with, or null.
+  // One at a time: a second caller waits for the first.
+  ManualCompaction* manual_ SHALE_GUARDED_BY(mutex_) = nullptr;
+  // Whether a compaction is running, which is for as long as the background task is merging files.
+  bool compaction_running_ SHALE_GUARDED_BY(mutex_) = false;
+  // Set when the database is closing: a task that has not started returns at once, and no more are
+  // scheduled.
+  std::atomic<bool> shutting_down_{false};
+
+  // Where background work runs: the scheduler of the options, or the one the database made for
+  // itself when there was none. Never null once the constructor has run.
+  Scheduler* scheduler_ = nullptr;
+  // Declared last, so that it is destroyed first, which joins its thread before anything that a
+  // task could use is gone. Nothing is queued on it by then: the destructor waits for the task.
+  std::unique_ptr<Scheduler> owned_scheduler_;
+};
+
+}  // namespace shale
+
+#endif  // SHALE_DB_DB_IMPL_H_
