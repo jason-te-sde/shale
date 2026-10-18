@@ -100,6 +100,20 @@ shale_add_test(db_snapshot SOURCES db/db_snapshot_test.cc LIBS shale_dbtest)
 shale_add_test(db_write SOURCES db/db_write_test.cc LIBS shale_dbtest)
 shale_add_test(db_properties SOURCES db/db_properties_test.cc LIBS shale_dbtest)
 
+# docs/format.md states the byte layouts of the files the engine writes, and this test is what keeps
+# the document and the code from drifting apart: it reads the document's tables of constants,
+# layouts and file names and its worked examples, and holds each to what the code does. The path of
+# the document is that of the source tree.
+shale_add_test(format_constants SOURCES docs/format_constants_test.cc LIBS shale_db shale_testkit)
+target_compile_definitions(format_constants_test PRIVATE
+  SHALE_FORMAT_DOC_PATH="${PROJECT_SOURCE_DIR}/docs/format.md")
+
+# docs/operations.md is read when something is wrong, so the defaults, the limits, the properties
+# and the counters that it states are read from its tables and held to the code.
+shale_add_test(operations_doc SOURCES docs/operations_doc_test.cc LIBS shale_db shale_testkit)
+target_compile_definitions(operations_doc_test PRIVATE
+  SHALE_OPERATIONS_DOC_PATH="${PROJECT_SOURCE_DIR}/docs/operations.md")
+
 # The deterministic simulator's reference model and the checkers of its invariants. Each checker is
 # tested against a database that lies, so that it is seen to alarm as well as to stay quiet.
 shale_add_test(model_db SOURCES sim/model_db_test.cc LIBS shale_testkit)
