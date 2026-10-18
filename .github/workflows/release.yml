@@ -1,0 +1,101 @@
+name: release
+
+# A release is a tag. Pushing a tag that begins with v starts this workflow, which checks the tag
+# against the version in CMakeLists.txt, builds and tests the tagged commit, and publishes a source
+# archive, its checksum and the changelog entry as a GitHub release. RELEASING.md describes the
+# process this is a part of, and tests/scripts/release_workflow_test.sh holds the two to each other.
+#
+# The tag name reaches the shell only as the environment variable GITHUB_REF_NAME, never pasted into
+# a command by ${{ }}: a tag name may hold characters that a shell reads.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # Everything that can refuse the release, and nothing that can publish it. This job cannot write
+  # to the repository, so a build or a test that went wrong cannot leave anything behind.
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      # The two cheap refusals come first, so that a mistyped tag fails in seconds and not after
+      # the build: the tag must be v and the version of CMakeLists.txt, and the changelog must have
+      # an entry for that version, which is what the release page will say.
+      - name: Refuse a tag that is not the version of the project
+        run: scripts/release-check.sh check "$GITHUB_REF_NAME"
+
+      - name: Refuse a version that has no changelog entry
+        run: scripts/release-check.sh notes "$(scripts/release-check.sh version)" > /dev/null
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build
+
+      - name: Configure
+        run: cmake --preset release
+
+      - name: Build
+        run: cmake --build --preset release
+
+      - name: Test
+        run: ctest --preset release
+
+  # The only job that can write. It runs only when verify has passed, and it checks the tag again, so
+  # that it never trusts a verdict it did not reach itself.
+  publish:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The version is what the script reads from CMakeLists.txt, after it has said that the tag is
+      # that version. Later steps take it from the environment, from which it cannot be misread.
+      - name: Check the tag and read the version
+        run: |
+          scripts/release-check.sh check "$GITHUB_REF_NAME"
+          echo "VERSION=$(scripts/release-check.sh version)" >> "$GITHUB_ENV"
+
+      # The archive is made from the tag and not from the checkout, so that it holds the commit the
+      # tag names and none of the files this job wrote. The checksum file names the archive without a
+      # directory, so that `sha256sum --check` works from wherever both are downloaded to.
+      - name: Make the source archive and its checksum
+        run: |
+          git archive --prefix="shale-$VERSION/" -o "shale-$VERSION.tar.gz" "refs/tags/$GITHUB_REF_NAME"
+          sha256sum "shale-$VERSION.tar.gz" > "shale-$VERSION.tar.gz.sha256"
+          sha256sum --check "shale-$VERSION.tar.gz.sha256"
+
+      # What is published is the file just made, so it is the file that is asked: unpacked, does its
+      # CMakeLists.txt say the version of the tag?
+      - name: Check what the archive holds
+        run: |
+          mkdir "$RUNNER_TEMP/unpacked"
+          tar -xzf "shale-$VERSION.tar.gz" -C "$RUNNER_TEMP/unpacked"
+          scripts/release-check.sh --root "$RUNNER_TEMP/unpacked/shale-$VERSION" check "$GITHUB_REF_NAME"
+
+      # A release page is not a file of the repository, so the relative links of the changelog are
+      # made absolute, and point at the tagged tree.
+      - name: Cut the release notes out of the changelog
+        run: |
+          scripts/release-check.sh \
+            --link-base "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/" \
+            notes "$VERSION" > "$RUNNER_TEMP/notes.md"
+
+      # gh refuses to replace a release that exists, and --verify-tag refuses a tag that is not on
+      # the remote, so neither a second run nor a deleted tag publishes something else.
+      - name: Create the release
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "shale-$VERSION.tar.gz" "shale-$VERSION.tar.gz.sha256" \
+            --verify-tag --title "shale $VERSION" --notes-file "$RUNNER_TEMP/notes.md"

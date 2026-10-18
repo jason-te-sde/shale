@@ -194,6 +194,18 @@ add_test(NAME links_check_alarms_and_passes
          COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/links_test.sh")
 set_tests_properties(links_check_alarms_and_passes PROPERTIES TIMEOUT 120)
 
+# release-check.sh is what the release workflow trusts to refuse a tag that is not the version of the
+# project and to say what the release notes are, so it is shown tags and changelogs of both kinds. The
+# second test holds the workflow, RELEASING.md and the script to each other, since a workflow cannot be
+# run until a tag is pushed.
+add_test(NAME release_check_refuses_and_passes
+         COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/release_check_test.sh")
+set_tests_properties(release_check_refuses_and_passes PROPERTIES TIMEOUT 120)
+
+add_test(NAME release_workflow_and_docs_agree
+         COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/release_workflow_test.sh")
+set_tests_properties(release_workflow_and_docs_agree PROPERTIES TIMEOUT 120)
+
 # The command-line tools. Their libraries are tested directly; the binary is run by a script that
 # makes its own database in a directory of its own. Both exist only when the tools are built.
 if(SHALE_BUILD_TOOLS)

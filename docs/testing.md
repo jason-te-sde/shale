@@ -246,6 +246,11 @@ a compaction leaves a database that opens and holds everything it said it did, o
 - `tests/scripts/options_test.sh`: the CMake options accept what they should and refuse the rest, and the
   installed package's version rule.
 - `tests/scripts/flaws_test.sh`: the CI matrix of flaws and the list in CMake agree.
+- `tests/scripts/release_check_test.sh` and `release-check.sh`: a tag is accepted only when it is `v` and
+  the version of `CMakeLists.txt`, and a refusal prints both; the notes of a release are exactly its
+  section of `CHANGELOG.md`; and the version of this tree and its changelog entry agree.
+- `tests/scripts/release_workflow_test.sh`: the release workflow runs on a tag and nowhere else, only its
+  publishing job can write, and it, [RELEASING.md](../RELEASING.md) and the script name the same files.
 - `tests/docs/format_constants_test.cc`: [format](format.md) says what the code does; its tables of
   constants, layouts, file names and `CURRENT` messages and its worked examples are read and compared
   with the code, and the Bloom filter, the checksum mask and the hash are recomputed from the rules it
