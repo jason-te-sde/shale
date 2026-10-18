@@ -9,3 +9,11 @@
 .idea/
 .vscode/
 .DS_Store
+
+# What libFuzzer leaves in the working directory when a fuzz target is run from the source root
+# without -artifact_prefix. A crash is a regression input to move into a test, not to commit as is.
+/crash-*
+/oom-*
+/timeout-*
+/leak-*
+/slow-unit-*

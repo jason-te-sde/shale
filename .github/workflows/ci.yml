@@ -249,6 +249,60 @@ jobs:
           path: ${{ runner.temp }}/crash
           if-no-files-found: ignore
 
+  # Every decoder that reads bytes off a disk, and the whole database under a random program of
+  # operations, under libFuzzer with AddressSanitizer and UndefinedBehaviorSanitizer. Sixty seconds
+  # a target is a smoke run, long enough to start from the seed corpus and to catch what a change has
+  # just made easy to reach; it is not a campaign, and a clean run says nothing about inputs it did
+  # not try. A crash is a bug in the engine, so the input that caused it is uploaded: the fuzz
+  # targets reproduce it, run with the file as their only argument.
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v7
+
+      # libclang-rt-18-dev holds the libFuzzer runtime that -fsanitize=fuzzer links, and the
+      # sanitizer runtimes; it is named here and not left to what clang-18 happens to pull in.
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang-18 libclang-rt-18-dev
+
+      - name: Configure
+        run: cmake --preset fuzz
+
+      # Only the fuzz targets: the preset instruments the test suite too, which a fuzz run does not
+      # use.
+      - name: Build
+        run: cmake --build --preset fuzz --target fuzz_targets
+
+      # Every target runs even when an earlier one has crashed, so that one run reports all the
+      # crashes there are; the step fails at the end. libFuzzer writes the inputs it finds to the
+      # first directory it is given and only reads the second, which is the seed corpus.
+      - name: Fuzz each target for sixty seconds
+        run: |
+          mkdir -p build/fuzz/crashes
+          status=0
+          for target in fuzz_log_reader fuzz_block fuzz_table fuzz_version_edit fuzz_db_ops; do
+            mkdir -p build/fuzz/found/"$target"
+            build/fuzz/fuzz/"$target" -max_total_time=60 -timeout=60 \
+              -artifact_prefix=build/fuzz/crashes/"$target"- \
+              build/fuzz/found/"$target" build/fuzz/fuzz/corpus/"$target" || status=1
+          done
+          exit "$status"
+
+      # The crash-*, oom-* and timeout-* files that libFuzzer wrote, one prefixed with its target.
+      - name: Upload the inputs that failed
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashes
+          path: build/fuzz/crashes/
+          if-no-files-found: ignore
+
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

@@ -33,6 +33,14 @@ if(SHALE_BUILD_TESTS)
   add_subdirectory(tests)
 endif()
 
+# The fuzz targets link the test kit's reference model, so they need the tests' subdirectory.
+if(SHALE_FUZZ)
+  if(NOT SHALE_BUILD_TESTS)
+    message(FATAL_ERROR "SHALE_FUZZ needs SHALE_BUILD_TESTS=ON: fuzz_db_ops links the test kit")
+  endif()
+  add_subdirectory(fuzz)
+endif()
+
 find_package(Doxygen QUIET)
 if(DOXYGEN_FOUND)
   # Doxygen resolves INPUT and OUTPUT_DIRECTORY against its working directory.
