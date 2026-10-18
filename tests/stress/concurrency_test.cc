@@ -131,6 +131,67 @@ void AwaitProgress(Failures* failures, const char* what, const std::function<boo
   }
 }
 
+// Waits until every one of `counters` has gone up since the call. A thread that holds still for
+// this knows that the others have done some more of their work in the meantime, so that what they
+// did overlapped what the thread was in the middle of.
+void AwaitAllAdvance(Failures* failures, const char* what,
+                     const std::vector<std::atomic<uint64_t>>& counters) {
+  std::vector<uint64_t> before(counters.size());
+  for (size_t i = 0; i < counters.size(); ++i) {
+    before[i] = counters[i].load();
+  }
+  AwaitProgress(failures, what, [&] {
+    for (size_t i = 0; i < counters.size(); ++i) {
+      if (counters[i].load() <= before[i]) {
+        return false;
+      }
+    }
+    return true;
+  });
+}
+
+// What the database has counted of the two kinds of background work, and the whole text of the
+// property they come from, for a message that says what the database had done.
+struct Counters {
+  uint64_t flushes = 0;
+  uint64_t compactions = 0;
+  std::string text;
+};
+
+// Finds the counter `name` in `text`, a list of "name=value" pairs separated by spaces.
+bool FindCounter(std::string_view text, std::string_view name, uint64_t* value) {
+  size_t begin = 0;
+  while (begin < text.size()) {
+    size_t end = text.find(' ', begin);
+    if (end == std::string_view::npos) {
+      end = text.size();
+    }
+    const std::string_view pair = text.substr(begin, end - begin);
+    const size_t equals = pair.find('=');
+    if (equals != std::string_view::npos && pair.substr(0, equals) == name) {
+      const std::optional<uint64_t> parsed = ParseNumber<uint64_t>(pair.substr(equals + 1));
+      if (!parsed.has_value()) {
+        return false;
+      }
+      *value = *parsed;
+      return true;
+    }
+    begin = end + 1;
+  }
+  return false;
+}
+
+// Reads "shale.counters". It never touches gtest, so a worker thread may call it; it returns false,
+// with `text` saying what was read, when the property is missing or has no such counter.
+bool ReadCounters(DB* db, Counters* counters) {
+  if (!db->GetProperty("shale.counters", &counters->text)) {
+    counters->text = "(no shale.counters property)";
+    return false;
+  }
+  return FindCounter(counters->text, "flushes", &counters->flushes) &&
+         FindCounter(counters->text, "compactions", &counters->compactions);
+}
+
 // Reads everything that the database holds, as of `options`, in key order. Returns the status of
 // the iterator, which is what says whether the scan ended because the data did.
 Status ScanAll(DB* db, const ReadOptions& options, Entries* entries) {
@@ -173,38 +234,21 @@ class ConcurrencyTest : public ::testing::Test {
     ASSERT_OK(DB::Open(StressOptions(env_.get()), "/db", &db_));
   }
 
-  // The value of the counter `name` of "shale.counters", which is a list of "name=value" pairs
-  // separated by spaces.
-  uint64_t Counter(std::string_view name) {
-    std::string text;
-    EXPECT_TRUE(db_->GetProperty("shale.counters", &text));
-    size_t begin = 0;
-    while (begin < text.size()) {
-      size_t end = text.find(' ', begin);
-      if (end == std::string::npos) {
-        end = text.size();
-      }
-      const std::string_view pair = std::string_view(text).substr(begin, end - begin);
-      const size_t equals = pair.find('=');
-      if (equals != std::string_view::npos && pair.substr(0, equals) == name) {
-        const std::optional<uint64_t> value = ParseNumber<uint64_t>(pair.substr(equals + 1));
-        EXPECT_TRUE(value.has_value()) << "counters: " << text;
-        return value.value_or(0);
-      }
-      begin = end + 1;
-    }
-    ADD_FAILURE() << "no counter " << name << " in: " << text;
-    return 0;
-  }
-
-  // Fails the test unless the run flushed and compacted: the work that the readers raced with. The
-  // counters are read with a bounded wait, since a compaction that is the last thing in the queue
-  // may finish a moment after the last write.
-  void ExpectBackgroundWork(uint64_t min_flushes) {
-    EXPECT_TRUE(PollUntil([&] { return Counter("compactions") >= 1; }))
-        << "no compaction ran: " << Counter("compactions");
-    EXPECT_GE(Counter("flushes"), min_flushes) << "the run flushed too little to mean anything";
-    EXPECT_GE(Counter("compactions"), 1u) << "the run compacted nothing";
+  // Fails the test unless, since `baseline`, the run flushed `min_flushes` times and compacted at
+  // least once: the work that the threads raced with, and not the work of the setup before them.
+  // The counters are polled, since the last compaction may finish a moment after the last write,
+  // and the assertion is made once, with what the database had counted before and after.
+  void ExpectBackgroundWork(const Counters& baseline, uint64_t min_flushes) {
+    Counters now;
+    bool readable = true;
+    const bool enough = PollUntil([&] {
+      readable = ReadCounters(db_.get(), &now);
+      return !readable || (now.flushes >= baseline.flushes + min_flushes &&
+                           now.compactions >= baseline.compactions + 1);
+    });
+    EXPECT_TRUE(readable && enough)
+        << "expected at least " << min_flushes << " flushes and 1 compaction since ["
+        << baseline.text << "], and the counters now are [" << now.text << "]";
   }
 
   std::unique_ptr<Env> env_;  // declared before db_: it is destroyed after the database
@@ -234,10 +278,15 @@ TEST_F(ConcurrencyTest, ReadYourWritesAndMonotonicVersions) {
   // read, so the version that it read is at most this.
   std::vector<std::atomic<int>> started(kKeys);
   std::vector<std::atomic<uint64_t>> reads(kReaders);
+  // The reads that found a newer version of a key than the reader had seen of it: the cases that
+  // the check that versions never go down has something to compare.
+  std::vector<std::atomic<uint64_t>> increases(kReaders);
   std::atomic<bool> writers_done{false};
   Failures failures;
   const WriteOptions write_options = NoSync();
   const ReadOptions read_options;
+  Counters baseline;
+  ASSERT_TRUE(ReadCounters(db_.get(), &baseline)) << baseline.text;
 
   auto write_and_read_back = [&](size_t w) {
     std::string value;
@@ -265,18 +314,7 @@ TEST_F(ConcurrencyTest, ReadYourWritesAndMonotonicVersions) {
         // Three times in the run, writer 0 holds still until every reader has read some more, so
         // that the readers are known to have read while a writer was part of the way through.
         if (w == 0 && k == 0 && version % 100 == 0 && version < kVersions) {
-          std::vector<uint64_t> before(kReaders);
-          for (size_t r = 0; r < kReaders; ++r) {
-            before[r] = reads[r].load();
-          }
-          AwaitProgress(&failures, "every reader to read while a writer is part way", [&] {
-            for (size_t r = 0; r < kReaders; ++r) {
-              if (reads[r].load() <= before[r]) {
-                return false;
-              }
-            }
-            return true;
-          });
+          AwaitAllAdvance(&failures, "every reader to read while a writer is part way", reads);
         }
       }
     }
@@ -319,6 +357,9 @@ TEST_F(ConcurrencyTest, ReadYourWritesAndMonotonicVersions) {
                        std::to_string(newest_started));
           return;
         }
+        if (last_seen[index] != 0 && *version > last_seen[index]) {
+          increases[r].fetch_add(1);
+        }
         last_seen[index] = *version;
       }
       reads[r].fetch_add(1);
@@ -338,10 +379,14 @@ TEST_F(ConcurrencyTest, ReadYourWritesAndMonotonicVersions) {
   readers.Join();
 
   ASSERT_FALSE(failures.Any()) << failures.Report();
+  uint64_t total_increases = 0;
   for (size_t r = 0; r < kReaders; ++r) {
     EXPECT_GT(reads[r].load(), 0u) << "reader " << r << " never read";
+    total_increases += increases[r].load();
   }
-  ExpectBackgroundWork(5);
+  EXPECT_GT(total_increases, 0u) << "no reader saw a key go to a newer version, so the check that "
+                                    "versions never go down had nothing to check";
+  ExpectBackgroundWork(baseline, 5);
 
   // Nothing was lost on the way: every key holds the last version, to a read and to a scan.
   std::string value;
@@ -360,8 +405,11 @@ TEST_F(ConcurrencyTest, ReadYourWritesAndMonotonicVersions) {
 // One writer applies 300 batches, and batch i sets all of a hundred keys to i. Three scanners
 // scan the whole database again and again: a scan that sees a batch sees all of it, so it holds
 // exactly the hundred keys with one value among them, and that value never goes back from one scan
-// to the next. A scan holds the files it reads, so a compaction that deletes them is not seen by
-// it.
+// to the next, whatever flush or compaction installs a new version while it runs. Each scan is
+// bracketed by two readings of the compactions counter, and the test asks that some scan was
+// running when a compaction finished. That the files a scan reads are not deleted under it is not
+// shown here, where the live data is one small file; SnapshotReadsAreStable holds a scan over
+// several files across compactions for that.
 TEST_F(ConcurrencyTest, IteratorsSeeAtomicBatchesDuringCompaction) {
   constexpr size_t kKeys = 100;
   constexpr size_t kScanners = 3;
@@ -381,9 +429,13 @@ TEST_F(ConcurrencyTest, IteratorsSeeAtomicBatchesDuringCompaction) {
   };
   // So that a scan always has the hundred keys to find, whenever it starts.
   ASSERT_OK(apply_batch(0));
+  Counters baseline;
+  ASSERT_TRUE(ReadCounters(db_.get(), &baseline)) << baseline.text;
 
   std::atomic<int> newest_started{0};
   std::vector<std::atomic<uint64_t>> scans(kScanners);
+  // The scans that were running when a compaction finished, by scanner.
+  std::vector<std::atomic<uint64_t>> spanned(kScanners);
   std::atomic<bool> writer_done{false};
   Failures failures;
 
@@ -398,21 +450,13 @@ TEST_F(ConcurrencyTest, IteratorsSeeAtomicBatchesDuringCompaction) {
         failures.Add("batch " + std::to_string(number) + " failed: " + s.ToString());
         return;
       }
-      // Twice in the run, the writer holds still until every scanner has finished a scan, so that
-      // scans are known to have run while batches were being written.
+      // Twice in the run, the writer pauses between two batches until every scanner has finished a
+      // scan. That only makes sure that the scanners are getting on with it while the run is part
+      // way through, and those scans run between batches: the scans that overlap a write, a flush
+      // or a compaction are the ones of the scanners looping for the whole run.
       if (number % 100 == 0 && number < kBatches) {
-        std::vector<uint64_t> before(kScanners);
-        for (size_t s_index = 0; s_index < kScanners; ++s_index) {
-          before[s_index] = scans[s_index].load();
-        }
-        AwaitProgress(&failures, "every scanner to finish a scan while batches are written", [&] {
-          for (size_t s_index = 0; s_index < kScanners; ++s_index) {
-            if (scans[s_index].load() <= before[s_index]) {
-              return false;
-            }
-          }
-          return true;
-        });
+        AwaitAllAdvance(&failures, "every scanner to finish a scan while the run is part way",
+                        scans);
       }
     }
   };
@@ -424,12 +468,25 @@ TEST_F(ConcurrencyTest, IteratorsSeeAtomicBatchesDuringCompaction) {
     // A scan of the whole database is what turns the cache off, and one scanner keeps it on.
     read_options.fill_cache = scanner == 0;
     while (!writer_done.load() && !failures.Any()) {
-      const Status s = ScanAll(db_.get(), read_options, &entries);
-      const int upper_bound = newest_started.load();
       auto where = [&] {
         return "scanner " + std::to_string(scanner) + ", scan " +
                std::to_string(scans[scanner].load()) + ": ";
       };
+      Counters before;
+      Counters after;
+      if (!ReadCounters(db_.get(), &before)) {
+        failures.Add(where() + "could not read the counters: " + before.text);
+        return;
+      }
+      const Status s = ScanAll(db_.get(), read_options, &entries);
+      const int upper_bound = newest_started.load();
+      if (!ReadCounters(db_.get(), &after)) {
+        failures.Add(where() + "could not read the counters: " + after.text);
+        return;
+      }
+      if (after.compactions > before.compactions) {
+        spanned[scanner].fetch_add(1);
+      }
       if (!s.ok()) {
         failures.Add(where() + "the iterator failed: " + s.ToString());
         return;
@@ -479,10 +536,13 @@ TEST_F(ConcurrencyTest, IteratorsSeeAtomicBatchesDuringCompaction) {
   scanners.Join();
 
   ASSERT_FALSE(failures.Any()) << failures.Report();
+  uint64_t total_spanned = 0;
   for (size_t scanner = 0; scanner < kScanners; ++scanner) {
     EXPECT_GT(scans[scanner].load(), 0u) << "scanner " << scanner << " never finished a scan";
+    total_spanned += spanned[scanner].load();
   }
-  ExpectBackgroundWork(5);
+  EXPECT_GT(total_spanned, 0u) << "no scan was running when a compaction finished";
+  ExpectBackgroundWork(baseline, 5);
 
   Entries all;
   ASSERT_OK(ScanAll(db_.get(), ReadOptions(), &all));
@@ -497,8 +557,9 @@ TEST_F(ConcurrencyTest, IteratorsSeeAtomicBatchesDuringCompaction) {
 // the thousand keys at the snapshot twenty times, and scan at it: every read is what the key held
 // when the snapshot was taken, since what a compaction drops is only what no snapshot can see. The
 // passes of a reader are spread over the writers' progress, so that they do not all run before the
-// first flush. When the writers are done the database is compacted whole, and the snapshot is read
-// once more.
+// first flush. A third reader holds one scan at the snapshot open across compactions, which is what
+// would show a file deleted while a scan still needed it. When the writers are done the database is
+// compacted whole, and the snapshot is read once more.
 TEST_F(ConcurrencyTest, SnapshotReadsAreStable) {
   constexpr size_t kKeys = 1000;
   constexpr size_t kWriters = 2;
@@ -517,6 +578,8 @@ TEST_F(ConcurrencyTest, SnapshotReadsAreStable) {
   ScopedSnapshot snapshot(db_.get());
   ReadOptions at;
   at.snapshot = snapshot.get();
+  Counters baseline;
+  ASSERT_TRUE(ReadCounters(db_.get(), &baseline)) << baseline.text;
 
   // Whether every key reads, and scans, as it did at the snapshot. Returns what is wrong, or "".
   auto check_snapshot = [&]() -> std::string {
@@ -587,11 +650,66 @@ TEST_F(ConcurrencyTest, SnapshotReadsAreStable) {
     }
   };
 
+  // The number of table files below level 0. An iterator opens those when it comes to them, and
+  // the tables of level 0 when it is made.
+  auto files_below_level0 = [&] {
+    int files = 0;
+    for (int level = 1; level <= 6; ++level) {
+      std::string count;
+      if (db_->GetProperty("shale.num-files-at-level" + std::to_string(level), &count)) {
+        files += ParseNumber<int>(count).value_or(0);
+      }
+    }
+    return files;
+  };
+
+  // One more reader holds a scan open across compactions. It starts when the levels below 0 hold
+  // two files at least, reads ten entries, which opens the first file of each level, and waits
+  // until two compactions have finished: each is followed by a sweep that deletes the files that no
+  // version holds. Then it reads on. The files it comes to now are opened only now, so a sweep that
+  // took them while the scan still needed them would fail the scan.
+  auto hold_scan_across_compactions = [&] {
+    constexpr size_t kHeldAfter = 10;
+    AwaitProgress(&failures, "a level below 0 to hold two files",
+                  [&] { return files_below_level0() >= 2; });
+    if (failures.Any()) {
+      return;
+    }
+    const std::unique_ptr<Iterator> it = db_->NewIterator(at);
+    Counters start;
+    if (!ReadCounters(db_.get(), &start)) {
+      failures.Add("held scan: could not read the counters: " + start.text);
+      return;
+    }
+    size_t seen = 0;
+    for (it->SeekToFirst(); it->Valid(); it->Next()) {
+      if (seen >= kKeys || it->key() != keys[seen] || it->value() != at_snapshot[seen]) {
+        failures.Add("held scan: entry " + std::to_string(seen) + " is " + std::string(it->key()) +
+                     "=" + std::string(it->value()));
+        return;
+      }
+      if (++seen == kHeldAfter) {
+        AwaitProgress(&failures, "two compactions to finish while a scan is held", [&] {
+          Counters now;
+          return ReadCounters(db_.get(), &now) && now.compactions >= start.compactions + 2;
+        });
+        if (failures.Any()) {
+          return;
+        }
+      }
+    }
+    if (!it->status().ok() || seen != kKeys) {
+      failures.Add("held scan: read " + std::to_string(seen) + " of " + std::to_string(kKeys) +
+                   " entries and ended with " + it->status().ToString());
+    }
+  };
+
   ThreadGroup writers;
   ThreadGroup readers;
   for (size_t r = 0; r < kReaders; ++r) {
     readers.Start([&, r] { read_at_snapshot(r); });
   }
+  readers.Start(hold_scan_across_compactions);
   for (size_t w = 0; w < kWriters; ++w) {
     writers.Start([&, w] { overwrite(w); });
   }
@@ -599,7 +717,7 @@ TEST_F(ConcurrencyTest, SnapshotReadsAreStable) {
   readers.Join();
 
   ASSERT_FALSE(failures.Any()) << failures.Report();
-  ExpectBackgroundWork(5);
+  ExpectBackgroundWork(baseline, 5);
 
   // A compaction of everything, with the snapshot still open, keeps the versions it can see.
   ASSERT_OK(db_->CompactRange(std::nullopt, std::nullopt));
