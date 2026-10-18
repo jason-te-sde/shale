@@ -1,5 +1,6 @@
-# The libFuzzer targets: one for every decoder that reads bytes off a disk, and one that drives the
-# whole database with a random program. Included only when SHALE_FUZZ is on, which needs Clang and
+# The libFuzzer targets: one for every decoder that reads bytes off a disk, one for the recovery of
+# the table set from CURRENT and a MANIFEST, and one that drives the whole database with a random
+# program. Included only when SHALE_FUZZ is on, which needs Clang and
 # AddressSanitizer with UndefinedBehaviorSanitizer (cmake/ShaleOptions.cmake checks both). Every
 # target keeps its files in a MemEnv, so a fuzz run never writes to the disk.
 #
@@ -13,7 +14,7 @@ set(SHALE_FUZZ_CORPUS_DIR "${SHALE_FUZZ_OUTPUT_DIR}/corpus")
 # of its format, and the writers that make one are the engine's own, so a seed cannot go stale.
 add_executable(make_corpus make_corpus.cc)
 target_include_directories(make_corpus PRIVATE "${PROJECT_SOURCE_DIR}/src")
-target_link_libraries(make_corpus PRIVATE shale_core shale_io shale_util)
+target_link_libraries(make_corpus PRIVATE shale_db shale_core shale_io shale_util)
 set_target_properties(make_corpus PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${SHALE_FUZZ_OUTPUT_DIR}")
 shale_set_warnings(make_corpus)
 
@@ -48,8 +49,12 @@ function(shale_add_fuzz_target name)
   shale_set_warnings(${name})
 endfunction()
 
-shale_add_fuzz_target(fuzz_log_reader LIBS shale_io)
-shale_add_fuzz_target(fuzz_block LIBS shale_io)
-shale_add_fuzz_target(fuzz_table LIBS shale_io)
-shale_add_fuzz_target(fuzz_version_edit LIBS shale_core)
-shale_add_fuzz_target(fuzz_db_ops LIBS shale_db shale_testkit)
+# The targets are listed in fuzz_targets.txt, which the CI job and scripts/preflight.sh read as well.
+# A line starts with the name of a target, and the rest of it is what the target links.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/fuzz_targets.txt")
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/fuzz_targets.txt" SHALE_FUZZ_TARGET_LINES REGEX "^[a-z]")
+foreach(line IN LISTS SHALE_FUZZ_TARGET_LINES)
+  separate_arguments(words UNIX_COMMAND "${line}")
+  list(POP_FRONT words name)
+  shale_add_fuzz_target(${name} LIBS ${words})
+endforeach()

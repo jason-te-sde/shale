@@ -249,8 +249,8 @@ jobs:
           path: ${{ runner.temp }}/crash
           if-no-files-found: ignore
 
-  # Every decoder that reads bytes off a disk, and the whole database under a random program of
-  # operations, under libFuzzer with AddressSanitizer and UndefinedBehaviorSanitizer. Sixty seconds
+  # Every decoder that reads bytes off a disk, the recovery of the table set from CURRENT and a
+  # MANIFEST, and the whole database under a random program of operations, under libFuzzer with AddressSanitizer and UndefinedBehaviorSanitizer. Sixty seconds
   # a target is a smoke run, long enough to start from the seed corpus and to catch what a change has
   # just made easy to reach; it is not a campaign, and a clean run says nothing about inputs it did
   # not try. A crash is a bug in the engine, so the input that caused it is uploaded: the fuzz
@@ -279,19 +279,22 @@ jobs:
       - name: Build
         run: cmake --build --preset fuzz --target fuzz_targets
 
-      # Every target runs even when an earlier one has crashed, so that one run reports all the
-      # crashes there are; the step fails at the end. libFuzzer writes the inputs it finds to the
-      # first directory it is given and only reads the second, which is the seed corpus.
+      # The targets are those of fuzz/fuzz_targets.txt, the file the build reads too, so a target
+      # that is added there is run here with no other change. Every target runs even when an
+      # earlier one has crashed, so that one run reports all the crashes there are; the step fails
+      # at the end. libFuzzer writes the inputs it finds to the first directory it is given and only
+      # reads the second, which is the seed corpus.
       - name: Fuzz each target for sixty seconds
         run: |
           mkdir -p build/fuzz/crashes
           status=0
-          for target in fuzz_log_reader fuzz_block fuzz_table fuzz_version_edit fuzz_db_ops; do
+          while read -r target _; do
+            case "$target" in '' | '#'*) continue ;; esac
             mkdir -p build/fuzz/found/"$target"
             build/fuzz/fuzz/"$target" -max_total_time=60 -timeout=60 \
               -artifact_prefix=build/fuzz/crashes/"$target"- \
-              build/fuzz/found/"$target" build/fuzz/fuzz/corpus/"$target" || status=1
-          done
+              build/fuzz/found/"$target" build/fuzz/fuzz/corpus/"$target" </dev/null || status=1
+          done < fuzz/fuzz_targets.txt
           exit "$status"
 
       # The crash-*, oom-* and timeout-* files that libFuzzer wrote, one prefixed with its target.

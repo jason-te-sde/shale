@@ -5,6 +5,14 @@
 //
 // A block comes off a disk and is never trusted: reading it must stay inside it, end, and report
 // what is wrong with it as a Corruption status on the iterator.
+//
+// That is all this target holds a block to: memory safety, ending, and the kind of status. It does
+// not compare what Seek() finds with what the walk found, because it cannot: Seek() assumes the
+// comparison orders the keys as the block was built, and a block whose restart array is out of
+// order or whose restart entry shares bytes with a key before it makes Seek() land where
+// SeekToFirst() never goes. That is documented behaviour of a damaged block and no finding. A block
+// that is intact is held to its seeks by fuzz_table, whose checksums say that its blocks are as
+// written.
 
 #include <cstddef>
 #include <cstdint>

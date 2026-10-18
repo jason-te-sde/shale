@@ -11,6 +11,12 @@
 // What the table promises for any bytes: Open() returns OK or Corruption, and leaves `*table` null
 // on failure; reads return the entry that is there or a Corruption, and an iterator walks the
 // internal keys in strictly increasing order, so that its output can be fed to a TableBuilder.
+//
+// And for a table that nothing has touched, the input as it came with the checksums checked and a
+// walk that found no damage, the target holds the lookups and the seeks to the walk itself: a key
+// the walk returned is found, unless the filter says it is not there, and a seek lands on the first
+// key of the walk that is not before its target. Those checks are what makes a Get that misses a
+// key it holds, or a seek that skips an exact match, fail here and not in a database.
 
 #include <cstddef>
 #include <cstdint>
@@ -19,9 +25,11 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "fuzz_util.h"
 #include "io/block.h"
+#include "io/bloom.h"
 #include "io/table.h"
 #include "io/table_format.h"
 #include "shale/env.h"
@@ -90,93 +98,210 @@ std::string WithChecksumsRepaired(std::string_view bytes) {
   return file;
 }
 
-// What the iterator returned first, and whether it then reached the end of the table without an
+// What a walk of the table returned, in order, and whether it then reached the end without an
 // error.
-struct FirstEntry {
-  bool seen = false;
+struct Walk {
+  std::vector<std::pair<std::string, std::string>> entries;
   bool clean = false;
-  std::string key;
-  std::string value;
 };
 
-// Walks the table with `options`, checking the order of its keys, and returns the first entry.
-FirstEntry Iterate(const Table& table, const TableReadOptions& options, size_t file_size) {
-  FirstEntry first;
+// Walks the table with `options`, checking the order of its keys.
+Walk Iterate(const Table& table, const TableReadOptions& options, size_t file_size) {
+  Walk walk;
   const std::unique_ptr<Iterator> it = table.NewIterator(options);
-  std::string previous;
-  size_t entries = 0;
   for (it->SeekToFirst(); it->Valid(); it->Next()) {
     const std::string_view key = it->key();
     // Every entry takes at least three bytes of a block, and no block is read twice.
-    SHALE_FUZZ_CHECK(++entries <= file_size / 3 + 1);
+    SHALE_FUZZ_CHECK(walk.entries.size() < file_size / 3 + 1);
     SHALE_FUZZ_CHECK(key.size() >= kInternalKeyTagSize);
-    if (entries == 1) {
-      first.seen = true;
-      first.key = std::string(key);
-      first.value = std::string(it->value());
-    } else {
-      SHALE_FUZZ_CHECK(CompareInternalKey(previous, key) < 0);
+    if (!walk.entries.empty()) {
+      SHALE_FUZZ_CHECK(CompareInternalKey(walk.entries.back().first, key) < 0);
     }
-    previous = std::string(key);
+    walk.entries.emplace_back(std::string(key), std::string(it->value()));
     fuzz::Touch(key);
     fuzz::Touch(it->value());
   }
   const Status s = it->status();
   SHALE_FUZZ_CHECK(s.ok() || s.IsCorruption());
-  first.clean = s.ok();
-  return first;
+  walk.clean = s.ok();
+  return walk;
 }
 
-// Seeks to `target`, which is the first entry's own key, and walks a few entries on. A seek lands
-// at or after its target or the iteration ends with Corruption: the table's iterator checks it,
-// since a scan that begins before the key it was asked to begin at returns what it was not asked
-// for.
-void CheckSeek(const Table& table, const TableReadOptions& options, std::string_view target) {
+// Returns the internal key that sorts just after `key`: the same user key with the next smaller
+// tag, since the larger tag of a user key is the newer entry and comes first. Empty if the tag is
+// zero and there is none.
+std::string JustAfter(std::string_view key) {
+  std::string after(key);
+  const uint64_t tag = DecodeFixed64(after.data() + after.size() - kInternalKeyTagSize);
+  if (tag == 0) {
+    return "";
+  }
+  EncodeFixed64(after.data() + after.size() - kInternalKeyTagSize, tag - 1);
+  return after;
+}
+
+// What a table that nothing has touched must do, on top of what every table must. `walk` is what
+// iterating it returned, in full and without an error, so the file is one the engine could have
+// written: every checksum in it holds, so every block, the index and the filter are as they were
+// written. Then a lookup of a key that the walk saw finds it, and a seek lands exactly where the
+// order of the walk puts it, and these are tested against the walk itself, not against what the
+// table might say of itself.
+class ExactChecks {
+ public:
+  ExactChecks(const Table& table, const TableReadOptions& options, const Walk& walk,
+              std::string_view bytes)
+      : table_(table), options_(options), walk_(walk) {
+    // The filter block is where the footer says; Open() has checked that it lies in the file.
+    const char* footer = bytes.data() + (bytes.size() - kFooterSize);
+    const uint64_t offset = DecodeFixed64(footer + kFooterFilterOffset);
+    const uint64_t size = DecodeFixed64(footer + kFooterFilterOffset + 8);
+    filter_ = std::string(bytes.substr(static_cast<size_t>(offset), static_cast<size_t>(size)));
+  }
+
+  // Checks the lookup of, and the seek to, entries that are spread over the table, and keys that
+  // are before all of it, just after each of those entries, and after all of it.
+  void Run() const {
+    const size_t n = walk_.entries.size();
+    for (const size_t i : Sample(n)) {
+      CheckGetEntry(i);
+      CheckNewest(i);
+      CheckSeek(walk_.entries[i].first);
+      const std::string after = JustAfter(walk_.entries[i].first);
+      if (!after.empty()) {
+        CheckSeek(after);
+      }
+    }
+    // Before every entry: no user key is smaller than the empty one, and its newest entry first.
+    std::string before;
+    AppendInternalKey(&before, ParsedInternalKey{"", kMaxSequenceNumber, kValueTypeForSeek});
+    CheckSeek(before);
+    // After every entry: the largest user key there is, one byte longer.
+    if (n != 0) {
+      std::string after_all;
+      AppendInternalKey(
+          &after_all,
+          ParsedInternalKey{std::string(ExtractUserKey(walk_.entries[n - 1].first)) + '\xff',
+                            kMaxSequenceNumber, kValueTypeForSeek});
+      CheckSeek(after_all);
+    }
+  }
+
+ private:
+  // Returns the indexes to check: the first and the last entry, and about fourteen in between.
+  static std::vector<size_t> Sample(size_t n) {
+    std::vector<size_t> indexes;
+    if (n == 0) {
+      return indexes;
+    }
+    const size_t step = n / 16 + 1;
+    for (size_t i = 0; i < n; i += step) {
+      indexes.push_back(i);
+    }
+    indexes.push_back(n - 1);
+    return indexes;
+  }
+
+  // The lookup of entry `i`'s own key returns that entry. The one answer that is not it is "not
+  // found", and only the filter can give it: a filter says no for a user key it does not hold, and
+  // that is all it may say no to.
+  void CheckGetEntry(size_t i) const { Check(i, walk_.entries[i].first); }
+
+  // The lookup that reads as of the newest sequence number returns the first entry of the user
+  // key, which is the newest.
+  void CheckNewest(size_t i) const {
+    const std::string_view user_key = ExtractUserKey(walk_.entries[i].first);
+    size_t first = i;
+    while (first > 0 && ExtractUserKey(walk_.entries[first - 1].first) == user_key) {
+      first--;
+    }
+    const LookupKey newest(user_key, kMaxSequenceNumber);
+    Check(first, newest.internal_key());
+  }
+
+  // Looks `lookup_key` up and requires the answer to be that of entry `expected`.
+  void Check(size_t expected, std::string_view lookup_key) const {
+    const auto& [key, value] = walk_.entries[expected];
+    ParsedInternalKey parsed;
+    if (!ParseInternalKey(key, &parsed)) {
+      return;  // a tag that is no kind of write: for the table to say, which the iteration did not
+    }
+    TableGetResult result;
+    const Status s = table_.Get(options_, lookup_key, &result);
+    SHALE_FUZZ_CHECK(s.ok());
+    if (result.kind == TableGetResult::Kind::kNotFound) {
+      SHALE_FUZZ_CHECK(!BloomFilterMayMatch(filter_, parsed.user_key));
+    } else if (parsed.type == ValueType::kValue) {
+      SHALE_FUZZ_CHECK(result.kind == TableGetResult::Kind::kFound);
+      SHALE_FUZZ_CHECK(result.value == value);
+    } else {
+      SHALE_FUZZ_CHECK(result.kind == TableGetResult::Kind::kDeleted);
+      SHALE_FUZZ_CHECK(result.value.empty());
+    }
+  }
+
+  // A seek to `target` lands on the first entry of the walk that is not before it, or on nothing
+  // if there is none, and the entries that follow are those of the walk.
+  void CheckSeek(std::string_view target) const {
+    const auto& entries = walk_.entries;
+    size_t expected = 0;
+    while (expected < entries.size() && CompareInternalKey(entries[expected].first, target) < 0) {
+      expected++;
+    }
+    const std::unique_ptr<Iterator> it = table_.NewIterator(options_);
+    it->Seek(target);
+    for (int steps = 0; steps < 4 && expected < entries.size(); steps++, expected++, it->Next()) {
+      SHALE_FUZZ_CHECK(it->Valid());
+      SHALE_FUZZ_CHECK(it->key() == entries[expected].first);
+      SHALE_FUZZ_CHECK(it->value() == entries[expected].second);
+    }
+    if (expected == entries.size()) {
+      SHALE_FUZZ_CHECK(!it->Valid());
+    }
+    SHALE_FUZZ_CHECK(it->status().ok());
+  }
+
+  const Table& table_;
+  const TableReadOptions options_;
+  const Walk& walk_;
+  std::string filter_;
+};
+
+// What any table must do, whatever its bytes: a seek lands at or after its target or the iteration
+// ends with Corruption, since the table's iterator checks it, and a lookup answers or fails with
+// Corruption. A table that the walk found damage in, or whose checksums were made to match, is held
+// to no more: a lookup does not walk a block, and in one whose keys are out of order it may land
+// elsewhere in it, and a file with forged checksums has no promise beyond staying inside its
+// buffers.
+void CheckAnyTable(const Table& table, const TableReadOptions& options, const Walk& walk) {
+  if (walk.entries.empty()) {
+    return;
+  }
+  const std::string& first = walk.entries.front().first;
   const std::unique_ptr<Iterator> it = table.NewIterator(options);
-  it->Seek(target);
+  it->Seek(first);
   for (int steps = 0; it->Valid() && steps < 8; steps++, it->Next()) {
     SHALE_FUZZ_CHECK(it->key().size() >= kInternalKeyTagSize);
     if (steps == 0) {
-      SHALE_FUZZ_CHECK(CompareInternalKey(it->key(), target) >= 0);
+      SHALE_FUZZ_CHECK(CompareInternalKey(it->key(), first) >= 0);
     }
     fuzz::Touch(it->key());
     fuzz::Touch(it->value());
   }
-  const Status s = it->status();
-  SHALE_FUZZ_CHECK(s.ok() || s.IsCorruption());
-}
+  const Status seek_status = it->status();
+  SHALE_FUZZ_CHECK(seek_status.ok() || seek_status.IsCorruption());
 
-// Looks `lookup_key` up, which is the first entry's own key or one that finds the same entry.
-//
-// Any bytes give OK or Corruption. When the iteration walked the whole table and found nothing
-// wrong, every block is in order and under its index key, so the first entry is the first one that
-// a lookup of its key finds, and what comes back is that entry's, or nothing: the filter block may
-// say that a key is not there which the data blocks hold. A table that the iteration found damage
-// in is not held to that, since a lookup does not walk a block, and in one whose keys are out of
-// order it may land elsewhere in it. A file with a checksum that was made to match has no promise
-// beyond staying inside its buffers.
-void CheckGet(const Table& table, const TableReadOptions& options, std::string_view lookup_key,
-              const FirstEntry& first) {
   TableGetResult result;
-  const Status s = table.Get(options, lookup_key, &result);
-  SHALE_FUZZ_CHECK(s.ok() || s.IsCorruption());
-  if (!first.clean || !s.ok() || result.kind == TableGetResult::Kind::kNotFound) {
-    return;
-  }
-  ParsedInternalKey parsed;
-  if (!ParseInternalKey(first.key, &parsed)) {
-    return;
-  }
-  if (parsed.type == ValueType::kValue) {
-    SHALE_FUZZ_CHECK(result.kind == TableGetResult::Kind::kFound);
-    SHALE_FUZZ_CHECK(result.value == first.value);
-  } else {
-    SHALE_FUZZ_CHECK(result.kind == TableGetResult::Kind::kDeleted);
-    SHALE_FUZZ_CHECK(result.value.empty());
-  }
+  const Status get_status = table.Get(options, first, &result);
+  SHALE_FUZZ_CHECK(get_status.ok() || get_status.IsCorruption());
+  const LookupKey newest(ExtractUserKey(first), kMaxSequenceNumber);
+  const Status newest_status = table.Get(options, newest.internal_key(), &result);
+  SHALE_FUZZ_CHECK(newest_status.ok() || newest_status.IsCorruption());
 }
 
-void OpenAndRead(std::string_view bytes) {
+// Opens `bytes` and reads it. `untouched` says that they are the input as it came, and not a copy
+// whose checksums were repaired, which is what lets the reads that a table that nothing has damaged
+// must pass be held to exactly.
+void OpenAndRead(std::string_view bytes, bool untouched) {
   const std::string name = "/table.sst";
   const std::unique_ptr<Env> env = fuzz::EnvWithFile(name, bytes);
   std::unique_ptr<RandomAccessFile> file;
@@ -196,15 +321,16 @@ void OpenAndRead(std::string_view bytes) {
     TableReadOptions options;
     options.verify_checksums = verify;
     options.fill_cache = verify;
-    const FirstEntry first = Iterate(*table, options, bytes.size());
-    if (!first.seen) {
-      continue;
+    const Walk walk = Iterate(*table, options, bytes.size());
+    CheckAnyTable(*table, options, walk);
+    // Only with the checksums checked is a block that came back one whose bytes were read as they
+    // were written: without, a block that is damaged decodes into whatever its bytes say, and the
+    // iteration can accept entries that a lookup, which has the block's index entry to go by, does
+    // not find.
+    if (untouched && verify && walk.clean) {
+      const ExactChecks exact(*table, options, walk, bytes);
+      exact.Run();
     }
-    CheckSeek(*table, options, first.key);
-    CheckGet(*table, options, first.key, first);
-    // The newest entry of the first user key, found as a read at the newest sequence number does.
-    const LookupKey newest(ExtractUserKey(first.key), kMaxSequenceNumber);
-    CheckGet(*table, options, newest.internal_key(), first);
   }
 }
 
@@ -213,7 +339,7 @@ void OpenAndRead(std::string_view bytes) {
 
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   const std::string_view bytes(reinterpret_cast<const char*>(data), size);
-  shale::OpenAndRead(bytes);
-  shale::OpenAndRead(shale::WithChecksumsRepaired(bytes));
+  shale::OpenAndRead(bytes, /*untouched=*/true);
+  shale::OpenAndRead(shale::WithChecksumsRepaired(bytes), /*untouched=*/false);
   return 0;
 }
