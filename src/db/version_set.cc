@@ -452,7 +452,13 @@ Status VersionSet::PrepareEdit(VersionEdit* edit, VersionState* next, std::strin
     return Status::Corruption("no file number is left below the largest there can be");
   }
   edit->next_file_number = next_file_number_;
-  edit->last_sequence = last_sequence_;
+  // The newest write that the tables hold, which recovery replays the logs from: a flush says what
+  // it is now, and an edit that says nothing leaves it as it was.
+  if (!edit->last_sequence.has_value()) {
+    edit->last_sequence = current_->state().last_sequence;
+  }
+  SHALE_CHECK(*edit->last_sequence <= last_sequence_,
+              "an edit records a sequence number above the newest write the database made");
   Status s = ApplyEdit(current_->state(), *edit, next);
   if (!s.ok()) {
     return s;

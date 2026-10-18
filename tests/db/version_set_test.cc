@@ -415,11 +415,13 @@ TEST_F(VersionSetTest, LogAndApplyThenRecover) {
 
   VersionEdit first = AddFile(0, Meta(level0_file, "a", "m"));
   first.log_number = log_number;
-  versions->SetLastSequence(10);
+  first.last_sequence = 10;  // a flush: the newest write of its table
+  versions->SetLastSequence(12);
   ASSERT_OK(versions->LogAndApply(first));
 
   VersionEdit second = AddFile(1, Meta(level1_file, "n", "z"));
   second.compact_pointers.emplace_back(1, IKey("n", 5));
+  second.last_sequence = 20;
   versions->SetLastSequence(20);
   ASSERT_OK(versions->LogAndApply(second));
 
@@ -450,14 +452,17 @@ TEST_F(VersionSetTest, EveryRecordCarriesTheCounters) {
   ASSERT_OK(versions->CreateNew());
   const uint64_t a = versions->NewFileNumber();
   versions->SetLastSequence(7);
-  ASSERT_OK(versions->LogAndApply(AddFile(0, Meta(a, "a", "b"))));
+  VersionEdit flush = AddFile(0, Meta(a, "a", "b"));
+  flush.last_sequence = 7;
+  ASSERT_OK(versions->LogAndApply(flush));
   const uint64_t b = versions->NewFileNumber();
   versions->SetLastSequence(9);
-  // The counters the caller put in the edit are replaced: these are lower than the version set's,
-  // and an edit that kept them would be refused as moving a counter back.
+  // The file counter the caller put in the edit is replaced: it is lower than the version set's,
+  // and an edit that kept it would be refused as moving a counter back. The sequence number is
+  // the newest write the tables hold, which is the caller's to say, and left as it was when the
+  // caller says nothing.
   VersionEdit edit = AddFile(0, Meta(b, "c", "d"));
   edit.next_file_number = 1;
-  edit.last_sequence = 0;
   ASSERT_OK(versions->LogAndApply(edit));
 
   const ManifestRecords records = ReadManifest(1);
@@ -469,7 +474,40 @@ TEST_F(VersionSetTest, EveryRecordCarriesTheCounters) {
   EXPECT_EQ(*records.edits[1].next_file_number, a + 1);
   EXPECT_EQ(*records.edits[1].last_sequence, 7u);
   EXPECT_EQ(*records.edits[2].next_file_number, b + 1);
-  EXPECT_EQ(*records.edits[2].last_sequence, 9u);
+  EXPECT_EQ(*records.edits[2].last_sequence, 7u);
+}
+
+TEST_F(VersionSetTest, AnEditRecordsTheNewestWriteOfTheTablesAndNotOfTheDatabase) {
+  // Recovery replays the logs from the first write after the MANIFEST's sequence number, and takes
+  // a first write beyond it for writes that a power loss took. So the number is the newest write
+  // the tables hold: a flush says what that is now, and every other edit leaves it.
+  const auto versions = NewVersionSet();
+  ASSERT_OK(versions->CreateNew());
+  versions->SetLastSequence(50);  // writes up to 50 are made, and some are only in a log
+  const uint64_t a = versions->NewFileNumber();
+  VersionEdit flush = AddFile(0, Meta(a, "a", "b"));
+  flush.last_sequence = 30;
+  ASSERT_OK(versions->LogAndApply(flush));
+  EXPECT_EQ(versions->current()->state().last_sequence, 30u);
+  EXPECT_EQ(versions->LastSequence(), 50u) << "the database's own number is not the tables'";
+  const uint64_t b = versions->NewFileNumber();
+  VersionEdit compaction = AddFile(1, Meta(b, "a", "b"));
+  compaction.deleted_files.emplace(0, a);
+  ASSERT_OK(versions->LogAndApply(compaction));
+  EXPECT_EQ(versions->current()->state().last_sequence, 30u);
+
+  const ManifestRecords records = ReadManifest(1);
+  ASSERT_EQ(records.edits.size(), 3u);
+  EXPECT_EQ(*records.edits[1].last_sequence, 30u);
+  EXPECT_EQ(*records.edits[2].last_sequence, 30u);
+  const auto recovered = NewVersionSet();
+  ASSERT_OK(recovered->Recover());
+  EXPECT_EQ(recovered->LastSequence(), 30u);
+
+  // An edit that says less than the state is refused, as a counter that moves back is.
+  VersionEdit back = AddFile(0, Meta(versions->NewFileNumber(), "c", "d"));
+  back.last_sequence = 29;
+  EXPECT_TRUE(versions->LogAndApply(back).IsCorruption());
 }
 
 TEST_F(VersionSetTest, FileNumbersNeverRepeat) {
@@ -1474,6 +1512,15 @@ TEST_F(VersionSetDeathTest, RecoverTwiceAborts) {
   const auto versions = NewVersionSet();
   ASSERT_OK(versions->Recover());
   EXPECT_DEATH(static_cast<void>(versions->Recover()), "once");
+}
+
+TEST_F(VersionSetDeathTest, AnEditCannotRecordAWriteTheDatabaseHasNotMade) {
+  const auto versions = NewVersionSet();
+  ASSERT_OK(versions->CreateNew());
+  versions->SetLastSequence(10);
+  VersionEdit edit;
+  edit.last_sequence = 11;
+  EXPECT_DEATH(static_cast<void>(versions->LogAndApply(edit)), "sequence");
 }
 
 TEST_F(VersionSetDeathTest, ASecondManifestWriterIsRefused) {

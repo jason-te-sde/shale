@@ -167,7 +167,9 @@ class VersionSet {
   Status Recover();
 
   /// Applies `edit` and starts a new MANIFEST: puts NextFileNumber() and LastSequence() into the
-  /// edit, applies it to the current state, writes MANIFEST-<n> for a number n it takes from
+  /// edit, LastSequence() being the newest write of the tables when the database is opened, with
+  /// the writes it recovered from the logs in the edit's table; applies it to the current state,
+  /// writes MANIFEST-<n> for a number n it takes from
   /// NewFileNumber(), holding SnapshotEdit of the new state as its one record, syncs it and its
   /// directory entry, makes CURRENT name it with SetCurrentFile(), and then installs the new
   /// version. The MANIFEST stays open for LogAndApply(), and the one before it is closed and left
@@ -187,11 +189,19 @@ class VersionSet {
   Status WriteNewManifest(VersionEdit edit);
 
   /// Applies `edit` to the current state, makes it durable in the MANIFEST, and installs the new
-  /// version. NextFileNumber() and LastSequence() go into the edit first, replacing what the edit
-  /// holds for them, so that every record of the MANIFEST carries the counters; ApplyEdit() checks
-  /// the edit against the state, and an edit it refuses, which is Corruption, writes nothing and
-  /// installs nothing. The record is appended and synced before the version is installed, so a
-  /// version that is installed is one a crash will not take back.
+  /// version. NextFileNumber() goes into the edit first, replacing what the edit holds for it, and
+  /// so does the state's sequence number when the edit holds none, so that every record of the
+  /// MANIFEST carries the counters; ApplyEdit() checks the edit against the state, and an edit it
+  /// refuses, which is Corruption, writes nothing and installs nothing. The record is appended and
+  /// synced before the version is installed, so a version that is installed is one a crash will
+  /// not take back.
+  ///
+  /// The sequence number an edit records is the newest write that the tables hold, and not
+  /// LastSequence(), which the writes still in the logs move on: recovery holds the first write of
+  /// the logs it replays to the one after it, and takes a write beyond that for one that a power
+  /// loss took writes before. So a flush sets it to the newest write of the memtable it wrote, and
+  /// every other edit leaves it unset. A value above LastSequence() is a bug of the caller, and
+  /// aborts; one below the state's is Corruption, as a counter that moves back is.
   ///
   /// If appending or syncing fails, nothing is installed, and the MANIFEST may or may not hold the
   /// edit: it will be there if a later recovery finds it, so the caller must not delete files the
