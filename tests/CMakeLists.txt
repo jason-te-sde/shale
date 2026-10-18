@@ -178,26 +178,25 @@ if(SHALE_BUILD_TOOLS)
 
   # The crash test kills a child process that is writing to a real directory, and the parent checks
   # what survived. The tool refuses a directory that already holds a database, so a setup test
-  # removes the two this file uses, and a run that failed leaves its database there to be looked at.
+  # removes the one the smoke test uses, and a run that failed leaves its database there to be
+  # looked at.
   set(_crashtest_smoke_db "${CMAKE_CURRENT_BINARY_DIR}/crashtest_smoke_db")
-  set(_crashtest_damage_db "${CMAKE_CURRENT_BINARY_DIR}/crashtest_damage_db")
   add_test(NAME crashtest_clean_dirs
-           COMMAND "${CMAKE_COMMAND}" -E rm -rf "${_crashtest_smoke_db}" "${_crashtest_damage_db}")
+           COMMAND "${CMAKE_COMMAND}" -E rm -rf "${_crashtest_smoke_db}")
   set_tests_properties(crashtest_clean_dirs PROPERTIES FIXTURES_SETUP crashtest_dirs)
 
-  # Three rounds, so that a break in the tool or in the engine's reopen shows up in every build of the
-  # suite; the crash job in .github/workflows/ci.yml runs twenty in a Release build.
+  # Three rounds, so that a break in the tool or in the engine's reopen shows up in every build of
+  # the suite. The crash job in .github/workflows/ci.yml runs twenty in a Release build, and asks
+  # that the kills have reached a compaction, which three rounds of a slow build need not do.
   add_test(NAME crashtest_smoke
            COMMAND $<TARGET_FILE:shale_crashtest> --rounds=3 --seed=1 "--db=${_crashtest_smoke_db}")
   set_tests_properties(crashtest_smoke PROPERTIES TIMEOUT 120 FIXTURES_REQUIRED crashtest_dirs)
 
-  # A check that has only passed has not shown that it can fail. This run overwrites one
-  # acknowledged key with a wrong value before the check, and the tool must name the key and exit
-  # with status 1. WILL_FAIL accepts any status but 0, so a usage or harness error would pass too;
-  # the tool's own output, which names the key, is what to read when this test is in doubt.
+  # A check that has only passed has not shown that it can fail. This script has the tool overwrite
+  # one key with a wrong value before the check, and requires exit status 1 and the line that says
+  # the check named the key. It makes its own directory.
   add_test(NAME crashtest_detects_damage
-           COMMAND $<TARGET_FILE:shale_crashtest> --rounds=3 --seed=1 --self_test_damage
-                   "--db=${_crashtest_damage_db}")
-  set_tests_properties(crashtest_detects_damage PROPERTIES
-                       TIMEOUT 120 WILL_FAIL TRUE FIXTURES_REQUIRED crashtest_dirs)
+           COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/crashtest_damage_test.sh"
+                   "$<TARGET_FILE:shale_crashtest>")
+  set_tests_properties(crashtest_detects_damage PROPERTIES TIMEOUT 120)
 endif()
