@@ -4,9 +4,11 @@
 #include <cstdint>
 #include <functional>
 #include <iterator>
+#include <memory>
 #include <string_view>
 
 #include "db/db_impl.h"
+#include "db/filename_io.h"
 #include "io/log_writer.h"
 #include "io/memtable.h"
 #include "io/write_batch_internal.h"
@@ -160,17 +162,47 @@ Status DBImpl::CommitGroup(Writer* leader, Writer** last_writer) {
   WritableFile* const wal_file = logfile_.get();
   const std::function<void()> hook = before_wal_write_hook_;
   const bool leader_syncs = leader->sync;
+  // A synced group is acknowledged as surviving a power loss with every write before it. The last
+  // switch synced neither the log it replaced, which may hold writes that were not synced, nor the
+  // directory entry of the log in use (see SwitchMemTable()), so a synced group does both first,
+  // and takes the old log for it: no switch comes while this leader has the front of the queue,
+  // and the flush that would close the log finds it gone.
+  std::unique_ptr<WritableFile> old_log;
+  bool sync_dir = false;
+  if (leader_syncs) {
+    old_log = std::move(unsynced_log_);
+    sync_dir = log_dir_unsynced_;
+  }
 
   mutex_.Unlock();
   if (hook) {
     hook();
+  }
+  Status s;
+  if (old_log != nullptr) {
+#if defined(SHALE_FLAW_SKIP_WAL_SYNC)
+    // Flaw skip_wal_sync: the writes in the old log are acknowledged as durable without a sync.
+#else
+    s = old_log->Sync();
+#endif
+    // Closed whatever the sync said: a log that failed to sync is not trusted again (D5), and one
+    // that synced has nothing left to lose.
+    static_cast<void>(old_log->Close());
+    old_log.reset();
+  }
+  bool dir_synced = false;
+  if (s.ok() && sync_dir) {
+    s = SyncDirectory(env_, dbname_);
+    dir_synced = s.ok();
   }
   // The log first, then the memtable: a write that a reader can see is one that the log holds. A
   // failed append or sync leaves the log in an unknown state, so it stops all writes: a later one
   // would be acknowledged into a log that may not hold it.
   const std::string_view record = WriteBatchInternal::Contents(group);
   const uint64_t wal_before = wal->bytes_written();
-  Status s = wal->AddRecord(record);
+  if (s.ok()) {
+    s = wal->AddRecord(record);
+  }
   // What the file took, headers and padding with the record, and part of it for a record that
   // failed: the cost of the group to the log, whether or not what follows works.
   const uint64_t wal_bytes = wal->bytes_written() - wal_before;
@@ -194,6 +226,9 @@ Status DBImpl::CommitGroup(Writer* leader, Writer** last_writer) {
   }
   mutex_.Lock();
 
+  if (dir_synced) {
+    log_dir_unsynced_ = false;
+  }
   counters_.wal_bytes_written += wal_bytes;
   if (appended) {
     log_unsynced_ = !synced;

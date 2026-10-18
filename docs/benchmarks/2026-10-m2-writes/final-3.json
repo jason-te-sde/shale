@@ -1,0 +1,210 @@
+{
+  "tool": "shale_bench",
+  "engine": "shale",
+  "config": {
+    "benchmarks": [
+      "fillseq",
+      "fillrandom",
+      "overwrite"
+    ],
+    "num": 1000000,
+    "sync_num": 10000,
+    "value_size": 100,
+    "repeat": 3,
+    "seed": 301,
+    "db": "t38b-db",
+    "compact_before_reads": false
+  },
+  "machine": {
+    "uname": "Darwin 25.6.0 arm64",
+    "cpu": "Apple M2",
+    "logical_cores": 8,
+    "clock_nominal_period_ns": 1,
+    "clock_smallest_step_ns": 41
+  },
+  "build": {
+    "compiler_id": "AppleClang",
+    "compiler_version": "21.0.0.21000334",
+    "build_type": "Release",
+    "sanitizer": "",
+    "coverage": false,
+    "flaw": ""
+  },
+  "megabyte_bytes": 1048576,
+  "results": [
+    {
+      "name": "fillseq",
+      "kind": "write",
+      "source": "fillseq",
+      "entries": 1000000,
+      "compact_seconds": null,
+      "ops_per_sec": 444624.525479310,
+      "mb_per_sec": 49.187130886,
+      "p50_us": 1.625000000,
+      "p99_us": 4.209000000,
+      "p999_us": 8.208000000,
+      "write_amplification": "2.17",
+      "spread_percent": 0.313953525,
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 2.254257333,
+          "engine_seconds": 2.196620402,
+          "ops_per_sec": 443605.077983348,
+          "mb_per_sec": 49.074353262,
+          "p50_us": 1.625000000,
+          "p99_us": 4.250000000,
+          "p999_us": 8.625000000,
+          "average_us": 2.196620402,
+          "write_amplification": "2.17",
+          "found": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 2.247186000,
+          "engine_seconds": 2.190680867,
+          "ops_per_sec": 445000.992352213,
+          "mb_per_sec": 49.228777993,
+          "p50_us": 1.625000000,
+          "p99_us": 4.209000000,
+          "p999_us": 7.833000000,
+          "average_us": 2.190680867,
+          "write_amplification": "2.17",
+          "found": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 2.249088709,
+          "engine_seconds": 2.192489116,
+          "ops_per_sec": 444624.525479310,
+          "mb_per_sec": 49.187130886,
+          "p50_us": 1.625000000,
+          "p99_us": 4.209000000,
+          "p999_us": 8.208000000,
+          "average_us": 2.192489116,
+          "write_amplification": "2.17",
+          "found": null
+        }
+      ]
+    },
+    {
+      "name": "fillrandom",
+      "kind": "write",
+      "source": "fillrandom",
+      "entries": 632460,
+      "compact_seconds": null,
+      "ops_per_sec": 287275.680336141,
+      "mb_per_sec": 31.780222816,
+      "p50_us": 1.958000000,
+      "p99_us": 4.958000000,
+      "p999_us": 144.583000000,
+      "write_amplification": "4.90",
+      "spread_percent": 1.194365432,
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 3.480091667,
+          "engine_seconds": 3.355258596,
+          "ops_per_sec": 287348.752759161,
+          "mb_per_sec": 31.788306542,
+          "p50_us": 1.958000000,
+          "p99_us": 4.958000000,
+          "p999_us": 144.583000000,
+          "average_us": 3.355258596,
+          "write_amplification": "4.90",
+          "found": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 3.480976875,
+          "engine_seconds": 3.357461989,
+          "ops_per_sec": 287275.680336141,
+          "mb_per_sec": 31.780222816,
+          "p50_us": 1.958000000,
+          "p99_us": 4.875000000,
+          "p999_us": 134.584000000,
+          "average_us": 3.357461989,
+          "write_amplification": "4.90",
+          "found": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 3.522148291,
+          "engine_seconds": 3.397407692,
+          "ops_per_sec": 283917.631337459,
+          "mb_per_sec": 31.408734546,
+          "p50_us": 1.958000000,
+          "p99_us": 5.166000000,
+          "p999_us": 145.541000000,
+          "average_us": 3.397407692,
+          "write_amplification": "4.90",
+          "found": null
+        }
+      ]
+    },
+    {
+      "name": "overwrite",
+      "kind": "write",
+      "source": "overwrite",
+      "entries": 1000000,
+      "compact_seconds": null,
+      "ops_per_sec": 207842.156505635,
+      "mb_per_sec": 22.992792277,
+      "p50_us": 2.042000000,
+      "p99_us": 5.291000000,
+      "p999_us": 453.584000000,
+      "write_amplification": "5.81",
+      "spread_percent": 2.852899103,
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 4.811343458,
+          "engine_seconds": 4.690940526,
+          "ops_per_sec": 207842.156505635,
+          "mb_per_sec": 22.992792277,
+          "p50_us": 2.042000000,
+          "p99_us": 5.209000000,
+          "p999_us": 453.584000000,
+          "average_us": 4.690940526,
+          "write_amplification": "5.81",
+          "found": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 4.853831792,
+          "engine_seconds": 4.732289924,
+          "ops_per_sec": 206022.796597151,
+          "mb_per_sec": 22.791523366,
+          "p50_us": 2.083000000,
+          "p99_us": 5.292000000,
+          "p999_us": 454.000000000,
+          "average_us": 4.732289924,
+          "write_amplification": "5.81",
+          "found": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 4.718042166,
+          "engine_seconds": 4.596832835,
+          "ops_per_sec": 211952.323615583,
+          "mb_per_sec": 23.447484531,
+          "p50_us": 2.042000000,
+          "p99_us": 5.291000000,
+          "p999_us": 414.208000000,
+          "average_us": 4.596832835,
+          "write_amplification": "5.70",
+          "found": null
+        }
+      ]
+    }
+  ]
+}

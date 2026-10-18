@@ -65,3 +65,9 @@ shale_add_library(shale_db
     db/table_cache.cc
     db/version_set.cc
   LIBS shale_core shale_io)
+
+# What a project that uses shale links, and the only name it needs to know: the four libraries, so
+# that the linker finds every symbol, and the thread library they use. Installed, it is
+# shale::shale (see the install rules in the top-level CMakeLists.txt).
+add_library(shale INTERFACE)
+target_link_libraries(shale INTERFACE shale_db shale_core shale_io shale_util Threads::Threads)

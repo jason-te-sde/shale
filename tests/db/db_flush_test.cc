@@ -321,7 +321,7 @@ TEST_F(DBFlushTest, AFailureAnywhereInAFlushLosesNothing) {
   EXPECT_GT(failed_flushes, 20) << "the sweep hardly made a flush fail";
 }
 
-TEST_F(DBFlushTest, FailureToSwitchTheLogClosesTheNewFile) {
+TEST_F(DBFlushTest, FailureToCreateTheNextLogStopsWritesAndLeavesNoFileOpen) {
   HandleCheckEnv handle_env(env_.get());
   Options options = CurrentOptions();
   options.env = &handle_env;
@@ -331,20 +331,22 @@ TEST_F(DBFlushTest, FailureToSwitchTheLogClosesTheNewFile) {
   } cleanup{[this] { Close(); }};
   Reopen(options);
   ASSERT_OK(Put("a", "1"));
-  env_->FailOpAfter(Op::kSyncDir, 0);  // the first directory sync is the one for the new log
+  env_->FailOpAfter(Op::kNewWritable, 0);  // the next file made is the log of the switch
   EXPECT_TRUE(db_->Flush().IsIOError());
   env_->ClearFaults();
+  EXPECT_TRUE(Put("b", "2").IsIOError()) << "a database that cannot make its next log stops";
   EXPECT_EQ(Get("a"), "1");
-  EXPECT_EQ(CountFiles(FileType::kLogFile), 1) << "the empty log that could not be used was left";
+  EXPECT_EQ(CountFiles(FileType::kLogFile), 1);
   Close();
   EXPECT_EQ(handle_env.leaked(), 0) << "a file was dropped without Close()";
   EXPECT_GT(handle_env.opened(), 0);
+  Reopen();
+  EXPECT_EQ(Get("a"), "1");
 }
 
-TEST_F(DBFlushTest, TheLogIsSyncedBeforeTheSwitch) {
-  // Writes that were not synced are in the old log. If the switch left that log unsynced, a later
-  // synced write in the new log could survive a power loss while the earlier ones, in the old,
-  // were lost: a hole, which the guarantee for unsynced writes rules out.
+TEST_F(DBFlushTest, ASyncedWriteMakesTheWritesInTheOldLogDurable) {
+  // Writes that were not synced are in the old log, and a synced write in the new one promises
+  // that they survive a power loss with it.
   Reopen(SmallBuffer());
   const int written = PutUntilSwitched();
   ASSERT_GT(written, 1);
@@ -355,6 +357,149 @@ TEST_F(DBFlushTest, TheLogIsSyncedBeforeTheSwitch) {
   Reopen(SmallBuffer());
   EXPECT_EQ(Get("synced"), "1");
   ExpectPresent(0, written);
+}
+
+// The calls that sync something, in order, as "sync <file>" and "sync_dir", with the directory
+// left out of the file names.
+class SyncRecorder {
+ public:
+  explicit SyncRecorder(HookEnv* env) : env_(env) {
+    env_->SetHook([this](std::string_view call, const std::string& path) {
+      if (call == "sync" || call == "sync_dir") {
+        const std::lock_guard<std::mutex> lock(mu_);
+        calls_.push_back(call == "sync" ? "sync " + path.substr(path.rfind('/') + 1)
+                                        : std::string(call));
+      }
+      return Status::OK();
+    });
+  }
+  ~SyncRecorder() { env_->SetHook(nullptr); }
+  SyncRecorder(const SyncRecorder&) = delete;
+  SyncRecorder& operator=(const SyncRecorder&) = delete;
+
+  // Returns what was recorded since the last call, and forgets it.
+  std::vector<std::string> Take() {
+    const std::lock_guard<std::mutex> lock(mu_);
+    std::vector<std::string> taken;
+    taken.swap(calls_);
+    return taken;
+  }
+
+ private:
+  HookEnv* const env_;
+  std::mutex mu_;
+  std::vector<std::string> calls_;  // guarded by mu_
+};
+
+TEST_F(DBFlushTest, ASwitchSyncsNeitherTheOldLogNorTheDirectory) {
+  // The writes before the switch were not synced, and nothing has promised that they are durable:
+  // the switch leaves the syncs to the first write that asks for one, which is the only thing that
+  // can be told they were made, and to the flush, which makes them durable another way.
+  Options options = SmallBuffer();
+  HookEnv* const hook_env = NewHookEnv();
+  options.env = hook_env;
+  Reopen(options);
+  SyncRecorder syncs(hook_env);
+  const int written = PutUntilSwitched();
+  ASSERT_GT(written, 1);
+  EXPECT_TRUE(syncs.Take().empty()) << "the switch synced something";
+  ExpectPresent(0, written);
+}
+
+TEST_F(DBFlushTest, ASyncedWriteAfterASwitchSyncsTheOldLogAndTheDirectoryFirst) {
+  // A write that is acknowledged as synced promises that it and every write before it survive a
+  // power loss. After a switch the writes before it are in the old log, unsynced, and the new log's
+  // directory entry is not durable either: both are synced before the write's own log is.
+  Options options = SmallBuffer();
+  HookEnv* const hook_env = NewHookEnv();
+  options.env = hook_env;
+  Reopen(options);
+  const std::vector<std::string> before = FilesOfType(FileType::kLogFile);
+  ASSERT_EQ(before.size(), 1u);
+  const int written = PutUntilSwitched();
+  ASSERT_EQ(NumTableFilesAtLevel(0), 0) << "the flush ran, which would make the writes durable";
+  const std::vector<std::string> after = FilesOfType(FileType::kLogFile);
+  ASSERT_EQ(after.size(), 2u);
+  const std::string old_log = before[0];
+  const std::string new_log = after[0] == old_log ? after[1] : after[0];
+
+  SyncRecorder syncs(hook_env);
+  ASSERT_OK(Put("synced", "1", /*sync=*/true));
+  EXPECT_EQ(syncs.Take(),
+            (std::vector<std::string>{"sync " + old_log, "sync_dir", "sync " + new_log}));
+  ASSERT_OK(Put("synced again", "2", /*sync=*/true));
+  EXPECT_EQ(syncs.Take(), std::vector<std::string>{"sync " + new_log})
+      << "what the first synced write made durable is synced again";
+
+  env_->SimulatePowerLossDropUnsynced();
+  Reopen(options);
+  ExpectPresent(0, written);
+  EXPECT_EQ(Get("synced"), "1");
+  EXPECT_EQ(Get("synced again"), "2");
+}
+
+TEST_F(DBFlushTest, AFlushLeavesASyncedWriteNothingButItsOwnLogToSync) {
+  // The flush of the old memtable makes its writes durable in a table, and syncs the directory
+  // after the new log was made, so a synced write after it has nothing of the switch left to do.
+  Options options = SmallBuffer();
+  HookEnv* const hook_env = NewHookEnv();
+  options.env = hook_env;
+  Reopen(options);
+  const int written = PutUntilSwitched();
+  scheduler_.RunPending();
+  ASSERT_EQ(NumTableFilesAtLevel(0), 1);
+  const std::vector<std::string> logs = FilesOfType(FileType::kLogFile);
+  ASSERT_EQ(logs.size(), 1u) << "the old log outlived the flush of its memtable";
+  SyncRecorder syncs(hook_env);
+  ASSERT_OK(Put("synced", "1", /*sync=*/true));
+  EXPECT_EQ(syncs.Take(), std::vector<std::string>{"sync " + logs[0]});
+  env_->SimulatePowerLossDropUnsynced();
+  Reopen(options);
+  ExpectPresent(0, written);
+  EXPECT_EQ(Get("synced"), "1");
+}
+
+TEST_F(DBFlushTest, AFailedSyncOfTheDirectoryForASyncedWriteFailsItAndStopsWrites) {
+  Reopen(SmallBuffer());
+  const int written = PutUntilSwitched();
+  env_->FailOpAfter(Op::kSyncDir, 0);
+  EXPECT_TRUE(Put("synced", "1", /*sync=*/true).IsIOError());
+  env_->ClearFaults();
+  EXPECT_TRUE(Put("after", "2", /*sync=*/false).IsIOError()) << "the error does not stop writes";
+  ExpectPresent(0, written);
+  Reopen(SmallBuffer());
+  ExpectPresent(0, written);
+  EXPECT_EQ(Get("after"), "NOT_FOUND");
+}
+
+TEST_F(DBFlushTest, AFailedSyncOfTheOldLogForASyncedWriteFailsItAndStopsWrites) {
+  Reopen(SmallBuffer());
+  const int written = PutUntilSwitched();
+  env_->FailOpAfter(Op::kSync, 0);
+  EXPECT_TRUE(Put("synced", "1", /*sync=*/true).IsIOError());
+  env_->ClearFaults();
+  EXPECT_TRUE(Put("after", "2", /*sync=*/false).IsIOError()) << "the error does not stop writes";
+  ExpectPresent(0, written);
+  Reopen(SmallBuffer());
+  ExpectPresent(0, written);
+}
+
+TEST_F(DBFlushTest, AFlushRecordsTheNewestWriteOfItsTableAndNotOfTheDatabase) {
+  // The MANIFEST's sequence number is what recovery holds the first write of the logs it replays
+  // to: every write up to it is in a table, and the logs go on from the one after. A flush that
+  // recorded the database's newest write, which may be in the new log already, would put that
+  // bound past writes that are only in the log.
+  Reopen(SmallBuffer());
+  const int written = PutUntilSwitched();  // the last of them is in the new log
+  const SequenceNumber switched_at = dbfull()->TEST_LastSequence() - 1;
+  ASSERT_OK(Put("later", "1", /*sync=*/false));
+  ASSERT_GT(dbfull()->TEST_LastSequence(), switched_at + 1);
+  scheduler_.RunPending();
+  ASSERT_EQ(NumTableFilesAtLevel(0), 1);
+  EXPECT_EQ(dbfull()->TEST_VersionState().last_sequence, switched_at);
+  Reopen(SmallBuffer());
+  ExpectPresent(0, written);
+  EXPECT_EQ(Get("later"), "1");
 }
 
 TEST_F(DBFlushTest, FlushedDataSurvivesPowerLoss) {
@@ -511,10 +656,9 @@ TEST_F(DBFlushTest, AKeyThatIsOnlyInATableIsFoundWhileAMemtableIsWaiting) {
   ExpectPresent(0, written);
 }
 
-TEST_F(DBFlushTest, ASwitchDoesNotSyncALogThatIsAlreadySynced) {
-  // With every write synced, which is the default, the old log is whole when the memtable is
-  // switched, and a sync of it is a flush of the disk's cache that is paid under the mutex for
-  // nothing.
+TEST_F(DBFlushTest, NoLogIsSyncedTwiceAndNoSwitchSyncsOne) {
+  // A log is synced by the writes that ask for it and by nothing else: a sync is a flush of the
+  // disk's cache, and a log whose memtable is flushed to a table is durable without one.
   Options options = CurrentOptions();
   HookEnv* const hook_env = NewHookEnv();
   options.env = hook_env;
@@ -532,16 +676,16 @@ TEST_F(DBFlushTest, ASwitchDoesNotSyncALogThatIsAlreadySynced) {
 
   ASSERT_OK(Put("b", "2", /*sync=*/false));
   ASSERT_OK(db_->Flush());
-  EXPECT_EQ(log_syncs, 2) << "the switch must sync a log that holds a write that was not synced";
+  EXPECT_EQ(log_syncs, 1) << "the flush made the write that was not synced durable in a table";
 
   ASSERT_OK(Put("c", "3", /*sync=*/false));
   ASSERT_OK(Put("d", "4", /*sync=*/true));  // makes "c" durable too
   ASSERT_OK(db_->Flush());
-  EXPECT_EQ(log_syncs, 3)
+  EXPECT_EQ(log_syncs, 2)
       << "the sync of a later write covers the earlier, and the switch has none";
 
   ASSERT_OK(db_->Flush());  // nothing in the memtable: no switch
-  EXPECT_EQ(log_syncs, 3);
+  EXPECT_EQ(log_syncs, 2);
   hook_env->SetHook(nullptr);
   // And what was written is where a power loss leaves it.
   env_->SimulatePowerLossDropUnsynced();
@@ -638,6 +782,57 @@ TEST_F(DBFlushTest, AStalledWriterIsWokenBeforeTheSweepListsTheDirectory) {
     EXPECT_FALSE(sweep_timed_out) << "the sweep waited for a write that was waiting for the sweep";
   }
   ExpectPresent(0, kPuts);
+}
+
+TEST_F(DBFlushTest, WritesAndReadsGoOnWhileTheManifestIsSynced) {
+  // The background task gives up the mutex while it appends an edit to the MANIFEST and syncs it.
+  // The sync is a flush of the disk's cache, and a write or a read that came meanwhile would
+  // otherwise wait for the disk too. Here the sync of the flush's edit is held until a write and a
+  // read have been made, or for three seconds, which is what a mutex held through it would cost.
+  Options options = CurrentOptions();
+  HookEnv* const hook_env = NewHookEnv();
+  options.env = hook_env;
+  options.scheduler = nullptr;  // the database runs its own: this needs a thread
+  Reopen(options);
+  ASSERT_OK(Put("a", "1"));
+  std::mutex mu;
+  std::condition_variable cv;
+  bool syncing = false;    // guarded by mu
+  bool done = false;       // guarded by mu
+  bool timed_out = false;  // guarded by mu
+  hook_env->SetHook([&](std::string_view call, const std::string& path) {
+    if (call == "sync" && path.find("MANIFEST") != std::string::npos) {
+      std::unique_lock<std::mutex> lock(mu);
+      syncing = true;
+      cv.notify_all();
+      if (!cv.wait_for(lock, std::chrono::seconds(3), [&] { return done; })) {
+        timed_out = true;
+      }
+    }
+    return Status::OK();
+  });
+  std::thread flusher([&] { EXPECT_OK(db_->Flush()); });
+  bool reached = false;
+  {
+    std::unique_lock<std::mutex> lock(mu);
+    reached = cv.wait_for(lock, std::chrono::seconds(10), [&] { return syncing; });
+  }
+  EXPECT_TRUE(reached) << "the flush never synced the MANIFEST";
+  EXPECT_OK(Put("b", "2", /*sync=*/false));
+  EXPECT_EQ(Get("a"), "1");
+  {
+    const std::lock_guard<std::mutex> lock(mu);
+    done = true;
+  }
+  cv.notify_all();
+  flusher.join();
+  hook_env->SetHook(nullptr);
+  {
+    const std::lock_guard<std::mutex> lock(mu);
+    EXPECT_FALSE(timed_out) << "the write or the read waited for the MANIFEST to be synced";
+  }
+  EXPECT_EQ(Get("b"), "2");
+  EXPECT_EQ(NumTableFilesAtLevel(0), 1);
 }
 
 TEST_F(DBFlushTest, ExhaustedFileNumbersFailTheFlushInsteadOfAborting) {

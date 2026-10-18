@@ -4,12 +4,12 @@
 # Two repository-wide rules, enforced from the first commit:
 #   1. no CJK characters (Chinese, Japanese, Korean) in any tracked file or commit message: the
 #      repository is English only
-#   2. no AI attribution in any tracked file or in any commit message
+#   2. no authorship credit in any tracked file or in any commit message: the repository has one
+#      author, so there is no co-author trailer, and no line says what produced a change
 # `root` is a git working tree and defaults to the repository root.
 #
-# Rule 2 matches attribution *shapes*, listed one per line in attribution-patterns.txt next to this
-# script (blank lines and lines starting with # are ignored). The bare words "Claude" and
-# "Anthropic" are not violations: a vendor name in prose is not attribution.
+# Rule 2 matches the *shapes* of such a credit, listed one per line in attribution-patterns.txt next
+# to this script (blank lines and lines starting with # are ignored), whatever the case.
 #
 # Everything matches at the byte level with plain `grep -E` and LC_ALL=C. Stock macOS has a grep
 # without -P and a bash 3.2 without \u escapes, and both of them silently do the wrong thing
@@ -94,10 +94,10 @@ while IFS= read -r line || [ -n "$line" ]; do
 done <"$patterns_file"
 
 # A truncated or emptied file would pass the check above and still scan for nothing. This is a
-# floor, not an exact count, so that adding a sixth pattern does not break the script. Only real
+# floor, not an exact count, so that adding a fifth pattern does not break the script. Only real
 # patterns count toward it.
-[ "${#patterns[@]}" -ge 5 ] || {
-  echo "hygiene: expected at least 5 attribution patterns in $patterns_file, found ${#patterns[@]}" >&2
+[ "${#patterns[@]}" -ge 4 ] || {
+  echo "hygiene: expected at least 4 attribution patterns in $patterns_file, found ${#patterns[@]}" >&2
   exit 1
 }
 
@@ -187,10 +187,10 @@ scan_messages E "$cjk_pattern"
 
 for pattern in "${patterns[@]}"; do
   scan_tracked nHIEi "$pattern" . ':(exclude)scripts/attribution-patterns.txt'
-  [ -n "$hits" ] && report "$hits" "AI attribution found in tracked files: $pattern"
+  [ -n "$hits" ] && report "$hits" "authorship credit found in tracked files: $pattern"
 
   scan_messages Ei "$pattern"
-  [ -n "$hits" ] && report "$hits" "AI attribution found in a commit message: $pattern"
+  [ -n "$hits" ] && report "$hits" "authorship credit found in a commit message: $pattern"
 done
 
 if [ "$fail" -eq 0 ]; then

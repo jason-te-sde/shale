@@ -1,6 +1,9 @@
 # Build trees, one per preset (build/dev, build/asan, ...), and the generated documentation.
 /build/
 
+# The report that gcovr writes for the coverage job, and for the same command run by hand.
+/coverage/
+
 # Tooling caches and the compilation database some editors drop in the source root.
 /.cache/
 /compile_commands.json

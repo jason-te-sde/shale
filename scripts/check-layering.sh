@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # scripts/check-layering.sh [root]
 #
-# Enforces the layering rules on the #include lines under include/ and src/, and the rule that
-# library code never writes to stdout or stderr. `root` defaults to the repository root.
+# Enforces the layering rules on the #include lines under include/ and src/, the rule that library
+# code never writes to stdout or stderr, and two bans on what code says: no `throw` under include/ and
+# src/, and no unseeded randomness under include/, src/, tests/ and tools/. `root` defaults to the
+# repository root.
 #
 #   include/shale/*  shale/*, standard headers
 #   src/util/*       util/*, shale/*, standard headers, <arm_acle.h>
@@ -24,6 +26,20 @@
 # and so is a line that is only a comment (//, /* ... */, or the lines in between). A violation is
 # printed as `path:line: rule`.
 #
+# The throw ban: nothing under include/ or src/ may contain the word `throw` in code, since errors are
+# returned as a Status.
+#
+# The randomness ban, under include/, src/, tests/ and tools/: std::rand, std::srand, rand(, srand(,
+# std::random_device and `#include <random>` (whose distributions are implementation-defined, so a
+# seed would not reproduce across standard libraries). All randomness is shale::Random with an
+# explicit seed. src/core's own ban on <random> is reported by the include rule above, and not twice.
+# tests/ and tools/ are scanned for this ban only: their includes and their output are theirs.
+# Both bans read one line at a time. A line that is only a comment does not count, and on any other line
+# the string literals, a block comment that opens and closes on the line, and a `//` comment are cut out
+# before the line is read, so the word in a message or in a trailing comment is not code. The lines inside
+# a multi-line block comment count as comments only when they start with `*`, as in Doxygen and Google
+# style; an unstarred one that names a banned call is reported, which is the safe way to be wrong.
+#
 # Exit status: 0 clean, 1 violations found, 2 nothing to check (a checker that checks nothing must
 # not say "ok").
 set -uo pipefail
@@ -42,6 +58,9 @@ if [ "${#dirs[@]}" -eq 0 ]; then
   echo "check-layering: neither include/ nor src/ exists under $root" >&2
   exit 2
 fi
+# Scanned for the randomness ban only.
+[ -d tests ] && dirs+=(tests)
+[ -d tools ] && dirs+=(tools)
 
 violations=0
 report() {
@@ -190,11 +209,58 @@ check_output() {
   done < <(grep -nE "$output_re" "$file")
 }
 
+# The bans on what code says. `throw` is banned under include/ and src/; the randomness bans hold
+# wherever C++ is scanned.
+throw_re='(^|[^[:alnum:]_])throw([^[:alnum:]_]|$)'
+random_re='std::(rand|srand|random_device)([^[:alnum:]_]|$)|(^|[^[:alnum:]_.>])s?rand[[:space:]]*\('
+random_include_re='^[[:space:]]*#[[:space:]]*include[[:space:]]*<random>'
+
+# code_of <line>: the line with its string literals, its one-line block comments and its // comment
+# cut out. Only lines that a ban has found are passed through it, so the cost is nothing.
+code_of() {
+  sed -E -e 's/"([^"\\]|\\.)*"//g' -e 's,/\*([^*]|\*[^/])*\*/,,g' -e 's,//.*$,,' <<<"$1"
+}
+
+# scan_banned <file> <regex> <what is wrong>: reports each line of the file whose code matches.
+scan_banned() {
+  local file=$1 re=$2 message=$3 lineno text trimmed code
+  while IFS=: read -r lineno text; do
+    trimmed="${text#"${text%%[![:space:]]*}"}"
+    is_comment_line "$trimmed" && continue
+    code="$(code_of "$text")"
+    [[ $code =~ $re ]] || continue
+    report "$file" "$lineno" "$message"
+  done < <(grep -nE "$re" "$file")
+}
+
+check_banned() {
+  local file=$1
+  case "$file" in
+    include/* | src/*)
+      scan_banned "$file" "$throw_re" "nothing under include/ or src/ may throw: errors are returned as a Status"
+      ;;
+  esac
+  scan_banned "$file" "$random_re" \
+    "std::rand, srand and std::random_device are banned: all randomness is shale::Random with an explicit seed"
+  case "$file" in
+    src/core/*) ;; # check_includes has reported <random> here already
+    *)
+      scan_banned "$file" "$random_include_re" \
+        "<random> is banned: its distributions are implementation-defined, so a seed would not reproduce across standard libraries"
+      ;;
+  esac
+}
+
 checked=0
 while IFS= read -r file; do
   checked=$((checked + 1))
-  check_includes "$file" "$(layer_of "$file")"
-  check_output "$file"
+  case "$file" in
+    include/* | src/*)
+      check_includes "$file" "$(layer_of "$file")"
+      check_output "$file"
+      ;;
+  esac
+  check_banned "$file"
 done < <(find "${dirs[@]}" -type f \( -name '*.h' -o -name '*.hpp' -o -name '*.cc' -o -name '*.cpp' \) | sort)
 
 if [ "$checked" -eq 0 ]; then

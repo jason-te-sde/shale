@@ -1385,7 +1385,7 @@ class TableDamageTest : public TableTest {
     ASSERT_OK(footer.DecodeFrom(std::string_view(bytes_).substr(bytes_.size() - kFooterSize)));
     std::unique_ptr<RandomAccessFile> file;
     ASSERT_OK(env_->NewRandomAccessFile("/small.sst", &file));
-    std::string index_contents;
+    BlockContents index_contents;
     ASSERT_OK(ReadBlock(file.get(), footer.index, true, &index_contents));
     std::unique_ptr<Iterator> index = NewBlockIterator(
         std::make_shared<const Block>(std::move(index_contents)), CompareInternalKey, 8);

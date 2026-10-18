@@ -12,13 +12,13 @@ namespace shale {
 /// definitely not in it, so that a lookup can skip a table without reading it.
 ///
 /// A filter never says a key is absent when it was added, and says a key is present for some that
-/// were not, a little over one in a hundred at 10 bits per key. The filter is stored in tables, so
-/// its bytes are part of the file format. The bit array has `max(n * bits_per_key, 64)` bits
-/// rounded up to whole bytes, and a last byte holds the number of probes `k`, which is
-/// `bits_per_key * 0.69` rounded down and kept between 1 and 30. A key is hashed once with Hash()
-/// and seed 0xbc9f1d34 to `h`; its `k` bits are `h % bits`, then `h` plus `delta` and so on, where
-/// `delta = (h >> 17) | (h << 15)` and the addition wraps at 32 bits. This is double hashing: one
-/// hash value stands in for `k` independent ones.
+/// were not, about 1.5% of them at 10 bits per key (measured, see the constructor). The filter is
+/// stored in tables, so its bytes are part of the file format. The bit array has `max(n *
+/// bits_per_key, 64)` bits rounded up to whole bytes, and a last byte holds the number of probes
+/// `k`, which is `bits_per_key * 0.69` rounded down and kept between 1 and 30. A key is hashed once
+/// with Hash() and seed 0xbc9f1d34 to `h`; its `k` bits are `h % bits`, then `h` plus `delta` and
+/// so on, where `delta = (h >> 17) | (h << 15)` and the addition wraps at 32 bits. This is double
+/// hashing: one hash value stands in for `k` independent ones.
 ///
 /// It is not thread-safe.
 class BloomFilterBuilder {

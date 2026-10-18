@@ -100,6 +100,35 @@ shale_add_test(db_snapshot SOURCES db/db_snapshot_test.cc LIBS shale_dbtest)
 shale_add_test(db_write SOURCES db/db_write_test.cc LIBS shale_dbtest)
 shale_add_test(db_properties SOURCES db/db_properties_test.cc LIBS shale_dbtest)
 
+# docs/format.md states the byte layouts of the files the engine writes, and this test is what keeps
+# the document and the code from drifting apart: it reads the document's tables of constants,
+# layouts and file names and its worked examples, and holds each to what the code does. The path of
+# the document is that of the source tree.
+shale_add_test(format_constants SOURCES docs/format_constants_test.cc LIBS shale_db shale_testkit)
+target_compile_definitions(format_constants_test PRIVATE
+  SHALE_FORMAT_DOC_PATH="${PROJECT_SOURCE_DIR}/docs/format.md")
+
+# docs/operations.md is read when something is wrong, so the defaults, the limits, the properties
+# and the counters that it states are read from its tables and held to the code.
+shale_add_test(operations_doc SOURCES docs/operations_doc_test.cc LIBS shale_db shale_testkit)
+target_compile_definitions(operations_doc_test PRIVATE
+  SHALE_OPERATIONS_DOC_PATH="${PROJECT_SOURCE_DIR}/docs/operations.md"
+  SHALE_OPTIONS_HEADER_PATH="${PROJECT_SOURCE_DIR}/include/shale/options.h"
+  SHALE_DB_HEADER_PATH="${PROJECT_SOURCE_DIR}/include/shale/db.h")
+
+# The program that the README shows is a file that CI builds against an installation, and the README's
+# copy of it, and of the CMake lines around it, is held to the file.
+shale_add_test(readme SOURCES docs/readme_test.cc LIBS shale_testkit)
+target_compile_definitions(readme_test PRIVATE
+  SHALE_README_PATH="${PROJECT_SOURCE_DIR}/README.md"
+  SHALE_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples")
+
+# The durability contract is stated in the README and in ADR 0004, and the tests that back it are
+# named in the documents: the two statements are held to each other and the names to the tests.
+shale_add_test(durability_doc SOURCES docs/durability_doc_test.cc LIBS shale_testkit)
+target_compile_definitions(durability_doc_test PRIVATE
+  SHALE_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+
 # The deterministic simulator's reference model and the checkers of its invariants. Each checker is
 # tested against a database that lies, so that it is seen to alarm as well as to stay quiet.
 shale_add_test(model_db SOURCES sim/model_db_test.cc LIBS shale_testkit)
@@ -165,6 +194,24 @@ add_test(NAME flaws_script_and_ci_agree
          COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/flaws_test.sh")
 set_tests_properties(flaws_script_and_ci_agree PROPERTIES TIMEOUT 120)
 
+# check-links.sh decides whether a document points at something that is not there, so it is shown
+# both kinds of link, and every rule of what counts as one.
+add_test(NAME links_check_alarms_and_passes
+         COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/links_test.sh")
+set_tests_properties(links_check_alarms_and_passes PROPERTIES TIMEOUT 120)
+
+# release-check.sh is what the release workflow trusts to refuse a tag that is not the version of the
+# project and to say what the release notes are, so it is shown tags and changelogs of both kinds. The
+# second test holds the workflow, RELEASING.md and the script to each other, since a workflow cannot be
+# run until a tag is pushed.
+add_test(NAME release_check_refuses_and_passes
+         COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/release_check_test.sh")
+set_tests_properties(release_check_refuses_and_passes PROPERTIES TIMEOUT 120)
+
+add_test(NAME release_workflow_and_docs_agree
+         COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/release_workflow_test.sh")
+set_tests_properties(release_workflow_and_docs_agree PROPERTIES TIMEOUT 120)
+
 # The command-line tools. Their libraries are tested directly; the binary is run by a script that
 # makes its own database in a directory of its own. Both exist only when the tools are built.
 if(SHALE_BUILD_TOOLS)
@@ -185,10 +232,35 @@ if(SHALE_BUILD_TOOLS)
 
   # The benchmark tool on small databases: every workload runs, the reads are checked against what
   # was written, a seed repeats a run, and the JSON parses. It checks no time.
+  # Whether the binary has the LevelDB engine decides what it has to do for --engine=leveldb, so the
+  # script is told.
+  if(SHALE_BENCH_HAS_LEVELDB)
+    set(_bench_leveldb_state leveldb)
+  else()
+    set(_bench_leveldb_state no-leveldb)
+  endif()
   add_test(NAME shale_bench_workloads
            COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/shale_bench_test.sh"
-                   "$<TARGET_FILE:shale_bench>")
+                   "$<TARGET_FILE:shale_bench>" "${_bench_leveldb_state}")
   set_tests_properties(shale_bench_workloads PROPERTIES TIMEOUT 300)
+
+  # The README's "Try it" is the output of its commands. This runs them again and compares, so that a
+  # change to what shalectl prints, or to which files an open makes, fails here and not in a reader's
+  # terminal.
+  add_test(NAME readme_transcript
+           COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/readme_transcript_test.sh"
+                   "$<TARGET_FILE:shalectl>")
+  set_tests_properties(readme_transcript PROPERTIES TIMEOUT 120)
+
+  # The LevelDB engine is tested where it is built, which is where LevelDB is installed and the
+  # benchmarks are asked for: not in CI.
+  if(SHALE_BENCH_HAS_LEVELDB)
+    shale_add_test(bench_leveldb
+                   SOURCES tools/bench_leveldb_test.cc tools/counting_leveldb_env.cc
+                   LIBS shale_bench_leveldb shale_testkit)
+    # LevelDB is built without RTTI, and the Env that derives from its classes must be too.
+    set_source_files_properties(tools/counting_leveldb_env.cc PROPERTIES COMPILE_OPTIONS -fno-rtti)
+  endif()
 
   # The crash test kills a child process that is writing to a real directory, and the parent checks
   # what survived. The tool refuses a directory that already holds a database, so each run of the

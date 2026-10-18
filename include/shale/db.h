@@ -41,8 +41,10 @@ class DB {
   /// uses it at the same time; a second open fails with an IOError that names the LOCK file. It
   /// reads the MANIFEST that CURRENT names, replays the write-ahead logs that hold writes the
   /// tables do not, and starts a new log and a new MANIFEST. A write-ahead log that merely ends
-  /// short, as a crash leaves it, is not an error. See Options::paranoid_checks for one that is
-  /// damaged; a log that cannot be read fails the open with an IOError in either case.
+  /// short, as a crash leaves it, is not an error, and neither is one that begins after a gap in
+  /// the sequence numbers that a power loss left: it and the later logs are set aside as ".dropped"
+  /// files. See Options::paranoid_checks for a log that is damaged; a log that cannot be read fails
+  /// the open with an IOError in either case.
   ///
   /// Returns InvalidArgument for options that ValidateOptions() refuses, for a path with no
   /// database when create_if_missing is false, and for a path with one when error_if_exists is
@@ -175,9 +177,9 @@ class DB {
   virtual bool GetProperty(std::string_view property, std::string* value) = 0;
 };
 
-/// Deletes the database in the directory `name`: every file the database makes, a log that a
-/// lenient open set aside as "<log name>.dropped" among them, and then the directory if nothing
-/// else is in it. A file that is not the database's is left alone, and so is the directory that
+/// Deletes the database in the directory `name`: every file the database makes, a log that an
+/// open set aside as "<log name>.dropped" among them, and then the directory if nothing else is
+/// in it. A file that is not the database's is left alone, and so is the directory that
 /// holds it. It is a success if there is no such directory.
 ///
 /// It takes the database's lock first, so that it fails with an IOError that names the LOCK file

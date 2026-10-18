@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Tests for scripts/check-hygiene.sh.
 #
-# The script under test searches for CJK characters and for AI attribution, and this repository
-# must itself pass it. So every needle is assembled at run time from pieces: neither the byte
-# sequences nor the attribution strings appear anywhere in this file.
+# The script under test searches for CJK characters and for authorship credits (a co-author
+# trailer, a line that says what produced a change, the robot emoji), and this repository must
+# itself pass it. So every needle is assembled at run time from pieces: neither the byte sequences
+# nor the credit strings appear anywhere in this file.
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -55,12 +56,18 @@ commit() {
   git_in commit -q "${args[@]}"
 }
 
-# The attribution strings, assembled so that no single line of this file contains one.
-co_author_trailer() { printf '%s-%s-%s: %s <noreply@%s.com>' Co Authored By "$1" anthropic; }
-generated_line() { printf '%s with %s Code' Generated "$1"; }
-written_line() { printf 'This file was %s by %s.' written "$1"; }
+# The credit strings, assembled so that no single line of this file contains one. The names are
+# placeholders: the check does not care who or what is named.
+co_author_trailer() { printf '%s-%s-%s: %s <person@example.com>' Co Authored By "$1"; }
 robot() { printf '\xf0\x9f\xa4\x96'; }
-ai_generated() { printf '%s-generated' AI; }
+
+# One sample of each shape in attribution-patterns.txt, in the order of the file: a trailer, the
+# two phrases (the second in mixed case, to show that the match ignores case) and the emoji.
+sample_trailer() { co_author_trailer 'Example Person'; }
+sample_generated_with() { printf '%s with %s' Generated 'Example Tool'; }
+sample_generated_by() { printf '%s%s %s %s' Gener ated By 'Example Tool'; }
+sample_robot() { printf '%s done' "$(robot)"; }
+shape_samples=(sample_trailer sample_generated_with sample_generated_by sample_robot)
 
 # --- Clean repositories pass. ------------------------------------------------------------------
 
@@ -70,9 +77,9 @@ commit 'chore: add a clean file' 'The body explains why and says what was left o
 expect "a clean repository" 0 "hygiene: ok"
 
 new_repo
-write_file notes.md '%s\n' 'The claude-3 and anthropic SDK names are fine on their own, so is Copilot.'
-commit 'docs: mention vendors' "$(printf '%s-%s-%s: %s <jane@example.com>' Co Authored By 'Jane Doe')"
-expect "vendor names and a human co-author trailer" 0 "hygiene: ok"
+write_file notes.md '%s\n' 'The generated file is checked in, and a person wrote the rest by hand.'
+commit 'docs: describe the generated file' 'Each word of a credit is fine on its own; it is the phrase that is not.'
+expect "words that are only part of a credit" 0 "hygiene: ok"
 
 # --- CJK characters in a tracked file: both edges of every blocked range, and what lies outside. ---
 
@@ -121,58 +128,47 @@ write_file a.txt '%s\n' 'clean'
 commit "feat: add a file $(printf '\xe2\x80\x94') caf$(printf '\xc3\xa9')"
 expect "a commit message with an em dash and an accented letter" 0 "hygiene: ok"
 
-# --- AI attribution in a commit message, anywhere in the history. ------------------------------
+# --- A credit in a commit message, anywhere in the history. ------------------------------------
 
 new_repo
 write_file a.txt '%s\n' 'clean'
-commit 'feat: add a file' "$(co_author_trailer Claude)"
-expect "an AI co-author trailer in the only commit" 1 "commit message"
+commit 'feat: add a file' "$(co_author_trailer 'Example Person')"
+expect "a co-author trailer in the only commit" 1 "commit message"
 
 new_repo
 write_file a.txt '%s\n' 'clean'
-commit 'feat: add a file' "$(co_author_trailer Claude)"
+commit 'feat: add a file' "$(co_author_trailer 'Example Person')"
 write_file b.txt '%s\n' 'also clean'
 commit 'feat: add another file'
-expect "an AI co-author trailer in an earlier commit" 1 "commit message"
+expect "a co-author trailer in an earlier commit" 1 "commit message"
 
 new_repo
 write_file a.txt '%s\n' 'clean'
-commit 'feat: add a file' "$(generated_line Claude)"
-expect "a generated-with line in a commit message" 1 "commit message"
+commit 'feat: add a file' "$(printf '%s-%s-%s: %s <person@example.com>' co authored by 'Example Person')"
+expect "a co-author trailer in lower case" 1 "commit message"
 
-new_repo
-write_file a.txt '%s\n' 'clean'
-commit 'feat: add a file' "$(written_line Claude)"
-expect "a written-by line in a commit message" 1 "commit message"
+for sample in "${shape_samples[@]}"; do
+  new_repo
+  write_file a.txt '%s\n' 'clean'
+  commit 'feat: add a file' "$($sample)"
+  expect "$sample in a commit message" 1 "commit message"
+done
 
-new_repo
-write_file a.txt '%s\n' 'clean'
-commit 'feat: add a file' "$(robot) done"
-expect "the robot emoji in a commit message" 1 "commit message"
+# --- A credit in a tracked file. ---------------------------------------------------------------
 
-new_repo
-write_file a.txt '%s\n' 'clean'
-commit 'feat: add a file' "This change is $(ai_generated)."
-expect "a machine-authorship mark in a commit message" 1 "commit message"
-
-# --- AI attribution in a tracked file. ---------------------------------------------------------
-
-new_repo
-write_file src.cc '// %s\n' "$(written_line Claude)"
-commit 'feat: add a file'
-expect "a written-by comment in a tracked file" 1 "tracked files" "src.cc"
-
-new_repo
-write_file src.cc '// %s\n' "$(co_author_trailer Claude)"
-commit 'feat: add a file'
-expect "a co-author trailer in a tracked file" 1 "tracked files" "src.cc"
+for sample in "${shape_samples[@]}"; do
+  new_repo
+  write_file src.cc '// %s\n' "$($sample)"
+  commit 'feat: add a file'
+  expect "$sample in a tracked file" 1 "tracked files" "src.cc"
+done
 
 # An untracked file is not part of the repository yet; the check covers what git would commit.
 new_repo
 write_file a.txt '%s\n' 'clean'
 commit 'feat: add a file'
-write_file untracked.txt '%s\n' "$(written_line Claude)"
-expect "an untracked file with attribution" 0 "hygiene: ok"
+write_file untracked.txt '%s\n' "$(sample_generated_with)"
+expect "an untracked file with a credit" 0 "hygiene: ok"
 
 # --- The checker must refuse to report success when it checked nothing. ------------------------
 
@@ -207,25 +203,25 @@ use_real_script() {
 
 new_repo
 write_file a.txt '%s\n' 'clean'
-commit 'feat: add a file' "$(co_author_trailer Claude)"
+commit 'feat: add a file' "$(co_author_trailer 'Example Person')"
 
 use_script_copy missing
 expect "a missing patterns file" 1 "cannot read"
 
 use_script_copy short
-real_patterns | head -n 4 >"$copy_dir/attribution-patterns.txt"
-expect "a patterns file with four patterns" 1 "at least 5"
+real_patterns | head -n 3 >"$copy_dir/attribution-patterns.txt"
+expect "a patterns file with three patterns" 1 "at least 4"
 
 # Comment lines and blank lines are not patterns, so they do not count toward the floor...
 use_script_copy padded-short
 {
   echo '# a comment'
-  real_patterns | head -n 4
+  real_patterns | head -n 3
   echo
   echo '   '
   echo '# another comment'
 } >"$copy_dir/attribution-patterns.txt"
-expect "four patterns padded out with comments and blank lines" 1 "at least 5"
+expect "three patterns padded out with comments and blank lines" 1 "at least 4"
 
 # ...and they are not scanned for either: an empty pattern would match every line of every file.
 new_repo
@@ -249,8 +245,33 @@ for bad_pattern in 'unbalanced (paren' 'unclosed [bracket' "dangling \\"; do
   expect "the pattern '$bad_pattern' in the patterns file" 1 "not a valid regular expression"
 done
 use_script_copy bad-regex-only
-{ real_patterns | head -n 4; echo 'unbalanced (paren'; } >"$copy_dir/attribution-patterns.txt"
-expect "a bad pattern as the fifth and last one" 1 "not a valid regular expression"
+{ real_patterns | head -n 3; echo 'unbalanced (paren'; } >"$copy_dir/attribution-patterns.txt"
+expect "a bad pattern as the fourth and last one" 1 "not a valid regular expression"
+
+# Every pattern is what catches its own shape. Each sample above is refused by the real patterns
+# file; with its pattern alone taken out of a private copy (and a filler that matches nothing put
+# in, for the floor) the same sample goes through, so no pattern is carried by another one, and a
+# pattern that is added without a sample is noticed here.
+cases=$((cases + 1))
+real_count="$(real_patterns | wc -l | tr -d ' ')"
+if [ "$real_count" -ne "${#shape_samples[@]}" ]; then
+  fail "the patterns file has $real_count patterns and this test has ${#shape_samples[@]} samples"
+fi
+index=0
+for sample in "${shape_samples[@]}"; do
+  index=$((index + 1))
+  new_repo
+  write_file a.txt '%s\n' 'clean'
+  commit 'feat: add a file' "$($sample)"
+  use_script_copy "without-$index"
+  { real_patterns | sed "${index}d"; echo 'qzqzqzqzqzqzqzqz'; } >"$copy_dir/attribution-patterns.txt"
+  expect "$sample in a commit message, without its own pattern" 0 "hygiene: ok"
+
+  new_repo
+  write_file src.cc '// %s\n' "$($sample)"
+  commit 'feat: add a file'
+  expect "$sample in a tracked file, without its own pattern" 0 "hygiene: ok"
+done
 
 # An error while scanning a file is not "no match" either. (root can read anything, so there is
 # nothing to provoke.)

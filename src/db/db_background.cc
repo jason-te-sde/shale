@@ -20,7 +20,6 @@
 #include "db/builder.h"
 #include "db/compaction_job.h"
 #include "db/db_impl.h"
-#include "db/filename_io.h"
 #include "db/version_set.h"
 #include "io/log_writer.h"
 #include "io/memtable.h"
@@ -144,44 +143,37 @@ Status DBImpl::MakeRoomForWrite(bool force) {
 
 Status DBImpl::SwitchMemTable() {
   SHALE_CHECK(imm_ == nullptr, "the memtable is switched while another is waiting to be flushed");
-  // The old log is made durable before any write can go into the new one. Otherwise a later write
-  // that is synced, in the new log, could survive a power loss while earlier ones that were not, in
-  // the old, were lost: a hole in the sequence of writes, which only a suffix of it may be. When
-  // every record has been synced already, as with writes that are, there is nothing to make
-  // durable, and a sync that does nothing still costs a full flush of the disk's cache, here under
-  // the mutex.
-  Status s;
-  if (log_unsynced_) {
-#if defined(SHALE_FLAW_SKIP_WAL_SYNC)
-    // Flaw skip_wal_sync: the old log is left behind unsynced, and a later write is acknowledged.
-#else
-    s = logfile_->Sync();
-    if (!s.ok()) {
-      RecordBackgroundError(s);
-      return s;
-    }
-#endif
-    log_unsynced_ = false;
-  }
+  // Nothing is synced here, and the writers do not wait for a sync of the old log or the directory
+  // at a switch. What that would buy, and how it is had without it:
+  //
+  // 1. A write acknowledged as synced survives a power loss with every write acknowledged before
+  //    it (D1, D2). The writes before the switch that were not synced are in the old log, and the
+  //    new log's directory entry is not durable: CommitGroup() syncs the old log, which this keeps
+  //    open in `unsynced_log_`, and the directory, before it syncs the new log and acknowledges a
+  //    synced group. The flush of `imm_`, which holds the old log's writes, makes both syncs
+  //    unnecessary: its table is durable before its edit is, and it syncs the directory after this
+  //    made the new log.
+  // 2. A power loss leaves a prefix of the writes, never a hole (D2). Without the sync, it can
+  //    take the end of the old log, writes that were not synced, and keep writes of the new log
+  //    that were not synced either. Every write is numbered one after the last, so recovery sees
+  //    the hole at the new log's first write and replays nothing from there on (ReplayLog()); the
+  //    tables' newest write, which the flush records, is what the first log replayed is held to.
+  //
+  // The simulator checks both after every crash it makes: I4, a reopened database must equal the
+  // writes up to some point at or after the last one acknowledged as synced; and I2's durable
+  // floor, its last sequence number is not below that of the last write acknowledged as synced.
+  // Leaving out the sync of the old log or of the directory fails I2 first, and leaving out the
+  // check of ReplayLog() fails I4.
+  SHALE_CHECK(unsynced_log_ == nullptr,
+              "a log from before the last switch is still waiting for a sync at the next switch");
   uint64_t number = 0;
-  s = AllocateFileNumber(&number);
+  Status s = AllocateFileNumber(&number);
   if (!s.ok()) {
     RecordBackgroundError(s);
     return s;
   }
-  const std::string fname = LogFileName(dbname_, number);
   std::unique_ptr<WritableFile> file;
-  s = env_->NewWritableFile(fname, &file);
-  if (s.ok()) {
-    // The directory entry is durable before a write is acknowledged in the file.
-    s = SyncDirectory(env_, dbname_);
-    if (!s.ok()) {
-      // The file is empty and has no use: it is closed and removed. A failure to remove it leaves
-      // an empty log for the next open to replay and delete.
-      static_cast<void>(file->Close());
-      static_cast<void>(env_->RemoveFile(fname));
-    }
-  }
+  s = env_->NewWritableFile(LogFileName(dbname_, number), &file);
   if (!s.ok()) {
     // Like any failure of the write path, this stops writes (D5). The old log is whole and still
     // the one in use, so a retry might go through, but a database that cannot make its next log is
@@ -192,13 +184,21 @@ Status DBImpl::SwitchMemTable() {
   }
 
   log_.reset();
-  // Every byte of it is durable, so a failure to close it has nothing to lose.
-  static_cast<void>(logfile_->Close());
+  if (log_unsynced_) {
+    unsynced_log_ = std::move(logfile_);
+  } else {
+    // Every byte of it is durable, so a failure to close it has nothing to lose.
+    static_cast<void>(logfile_->Close());
+  }
   logfile_ = std::move(file);
   log_ = std::make_unique<log::Writer>(logfile_.get());
   logfile_number_ = number;
   log_unsynced_ = false;  // the new log is empty
+  log_dir_unsynced_ = true;
 
+  // The leader switches before it numbers its group, so every write numbered up to now is in the
+  // memtable that becomes `imm_`, and none after it is.
+  imm_last_sequence_ = versions_.LastSequence();
   imm_ = std::move(mem_);
   has_imm_.store(true, std::memory_order_release);
   mem_ = NewMemTable();
@@ -296,8 +296,8 @@ Status DBImpl::MoveFileDown(const CompactionPlan& plan) {
   edit.new_files.emplace_back(plan.level + 1, file);
   edit.compact_pointers.emplace_back(plan.level, plan.next_compact_pointer);
   // If this fails, the MANIFEST may hold the edit all the same: the file is the same one either
-  // way, and nothing is deleted.
-  const Status s = versions_.LogAndApply(std::move(edit));
+  // way, and nothing is deleted. The mutex is given up while the edit is written.
+  const Status s = versions_.LogAndApply(std::move(edit), &mutex_);
   if (s.ok()) {
     counters_.trivial_moves++;
     Log("moved table " + std::to_string(file.number) + " from level " + std::to_string(plan.level) +
@@ -349,8 +349,10 @@ Status DBImpl::CompactFiles(const CompactionPlan& plan, std::shared_ptr<const Ve
   }
   if (s.ok() && !stopped) {
     // If this fails, the MANIFEST may hold the edit all the same, and the outputs are then tables
-    // that the next open finds in the version: they stay, and nothing is deleted.
-    s = versions_.LogAndApply(job->MakeEdit());
+    // that the next open finds in the version: they stay, and nothing is deleted. The mutex is
+    // given up while the edit is written; the outputs are in `pending_outputs_` until after, and
+    // the inputs in the current version, which only this task replaces.
+    s = versions_.LogAndApply(job->MakeEdit(), &mutex_);
     if (s.ok()) {
       // A write that waits for level 0 to shrink can go on now, and not when the sweep below is
       // done.
@@ -485,20 +487,34 @@ Status DBImpl::FlushImmutable() {
     VersionEdit edit;
     // The logs before the one in use are for the memtable that this table holds, and for the ones
     // before it, which are tables already: from the MANIFEST that names this edit on, they are not
-    // replayed.
+    // replayed. The writes up to the newest in the memtable are in tables from then on, and the
+    // log in use goes on from the next.
     edit.log_number = logfile_number_;
+    edit.last_sequence = imm_last_sequence_;
     if (meta.file_size > 0) {
       edit.new_files.emplace_back(0, meta);
     }
     // If this fails, the MANIFEST may hold the edit all the same, and then the table is one that a
-    // restart finds in the version. Nothing is deleted after an error for that reason.
-    s = versions_.LogAndApply(std::move(edit));
+    // restart finds in the version. Nothing is deleted after an error for that reason. The mutex
+    // is given up while the edit is written, with the table in `pending_outputs_` until after; a
+    // switch cannot replace the log the edit names, since `imm_` is still set.
+    s = versions_.LogAndApply(std::move(edit), &mutex_);
   }
   pending_outputs_.erase(meta.number);
   if (!s.ok()) {
     return s;
   }
 
+  // The old log's writes are in a durable table now, so the sync that a synced write would have
+  // made of it is no longer needed. And the directory was synced after the table was written,
+  // which is after the switch that made the log in use: no switch happens while `imm_` is set.
+  if (unsynced_log_ != nullptr) {
+    static_cast<void>(unsynced_log_->Close());  // what it holds is in the table
+    unsynced_log_.reset();
+  }
+  if (meta.file_size > 0) {
+    log_dir_unsynced_ = false;  // an empty memtable makes no table, and syncs no directory
+  }
   imm_.reset();
   has_imm_.store(false, std::memory_order_release);
   // A write that waits for `imm_` to go can go on now, and not when the sweep below is done: it
@@ -515,6 +531,11 @@ Status DBImpl::FlushImmutable() {
 }
 
 void DBImpl::DeleteObsoleteFiles() {
+  // The tables an edit adds are in no version until it is installed, and a sweep while it is being
+  // written could take them. Only the background task writes edits, and only it sweeps, so the two
+  // never meet; this is where they would.
+  SHALE_CHECK(!versions_.ManifestWriteInProgress(),
+              "the obsolete files are swept while an edit is being written to the MANIFEST");
   if (!bg_error_.ok()) {
     return;
   }

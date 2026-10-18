@@ -12,8 +12,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "shale/env.h"
 #include "shale/status.h"
@@ -76,6 +78,45 @@ struct Footer {
   Status DecodeFrom(std::string_view input);
 };
 
+/// The contents of a block, in a buffer of their own.
+///
+/// ReadBlock() fills one straight from the file, into memory that nothing has written before: a
+/// block is read whole on every miss of the block cache, and filling its buffer with zeros first,
+/// as a std::string that is resized does, is work the read then throws away. Nothing reads a byte
+/// that the file did not supply, since ReadBlock() fails on a short read before it looks at any.
+/// It can be moved and not copied, and it is immutable once made.
+class BlockContents {
+ public:
+  /// An empty block.
+  BlockContents() = default;
+
+  /// Takes the first `size` bytes of `data`, which must hold at least that many.
+  BlockContents(std::unique_ptr<char[]> data, size_t size) : data_(std::move(data)), size_(size) {}
+
+  /// Returns a copy of `bytes`: for a block that was made in memory rather than read, as a test
+  /// or a fuzz target makes one.
+  static BlockContents CopyOf(std::string_view bytes);
+
+  BlockContents(BlockContents&&) noexcept = default;
+  BlockContents& operator=(BlockContents&&) noexcept = default;
+  BlockContents(const BlockContents&) = delete;
+  BlockContents& operator=(const BlockContents&) = delete;
+  ~BlockContents() = default;
+
+  /// Returns the contents, valid for as long as this object lives and is not assigned to.
+  std::string_view view() const { return {data_.get(), size_}; }
+
+  /// Returns the size of the contents in bytes.
+  size_t size() const { return size_; }
+
+  /// Returns true if the contents are empty.
+  bool empty() const { return size_ == 0; }
+
+ private:
+  std::unique_ptr<char[]> data_;
+  size_t size_ = 0;
+};
+
 /// Reads the block at `handle` from `file`, with its trailer, and checks the trailer. On success
 /// `*contents` is the block's contents without the trailer; on failure it is empty.
 ///
@@ -93,7 +134,7 @@ struct Footer {
 /// @param verify_checksum whether to check the checksum; the type is checked either way.
 /// @param contents receives the block's contents.
 Status ReadBlock(const RandomAccessFile* file, const BlockHandle& handle, bool verify_checksum,
-                 std::string* contents);
+                 BlockContents* contents);
 
 }  // namespace shale
 

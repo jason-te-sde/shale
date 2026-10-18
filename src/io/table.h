@@ -10,6 +10,7 @@
 
 #include "io/block.h"
 #include "io/lru_cache.h"
+#include "io/table_format.h"
 #include "shale/env.h"
 #include "shale/iterator.h"
 #include "shale/status.h"
@@ -72,9 +73,12 @@ struct TableGetResult {
 /// each, every handle naming a different block in the part of the file before the filter, in
 /// order. After that, whatever the bytes of the data blocks are, a read returns the entry that
 /// was written or a Corruption status, never a crash, an out-of-bounds read or a value that
-/// was not stored. What a checksum cannot show, a file written by something that computes a
+/// was not stored, for a table whose bytes were damaged after it was written: the checksum of the
+/// block shows it. What a checksum cannot show, a file written by something that computes a
 /// checksum for whatever it writes, is handled by the decoders staying inside their buffers, and
-/// that is all that can be promised for it.
+/// that is all that can be promised for it: an iterator still returns its keys in order, but a
+/// lookup does not walk a block, so in a block whose keys are out of order it may land on another
+/// entry and return that one's value.
 ///
 /// A Table is immutable once opened and every method may be called from any number of threads at
 /// once. It is owned by shared pointers, and an iterator holds one, so a table is closed when the
@@ -141,7 +145,7 @@ class Table : public std::enable_shared_from_this<Table> {
  public:
   /// Not for callers: use Open(). It takes a type that only Table can name.
   Table(PrivateTag, std::unique_ptr<RandomAccessFile> file, uint64_t cache_id, BlockCache* cache,
-        uint64_t data_end, std::shared_ptr<const Block> index_block, std::string filter);
+        uint64_t data_end, std::shared_ptr<const Block> index_block, BlockContents filter);
 
  private:
   // Reads the block the index value `index_value` names, from the cache if it is there.
@@ -159,7 +163,7 @@ class Table : public std::enable_shared_from_this<Table> {
   // Where the data blocks end and the filter block begins. An index entry's handle must lie before.
   const uint64_t data_end_;
   const std::shared_ptr<const Block> index_block_;
-  const std::string filter_;  // empty if the table was written without one
+  const BlockContents filter_;  // empty if the table was written without one
   mutable std::atomic<uint64_t> data_block_reads_{0};
 };
 

@@ -184,8 +184,11 @@ Status ForgeEmptyDatabase(Env* env, const std::string& dbname, SequenceNumber la
     versions.MarkFileNumberUsed(next_file_number - 1);
   }
   // Every record of the MANIFEST carries the counters, so an edit that changes nothing else is how
-  // they get there.
-  return versions.LogAndApply(VersionEdit{});
+  // they get there. The sequence number is the tables' newest write, which the edit says, as the
+  // flush that wrote them would have.
+  VersionEdit edit;
+  edit.last_sequence = last_sequence;
+  return versions.LogAndApply(edit);
 }
 
 std::string EncodedBatch(SequenceNumber sequence, const Entries& puts) {

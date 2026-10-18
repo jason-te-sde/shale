@@ -1,0 +1,7 @@
+get b: 2
+scan:
+  a = 1
+  b = 2
+  c = 3
+get a at the snapshot: 1
+get a now: 10

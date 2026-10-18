@@ -7,14 +7,26 @@
 # the JSON is JSON and says where it ran. It checks no timing: a time on a loaded machine proves
 # nothing either way.
 #
-# Usage: shale_bench_test.sh <path to the shale_bench binary>
+# Usage: shale_bench_test.sh <path to the shale_bench binary> <leveldb|no-leveldb>
+#
+# The second argument says whether the binary was built with the LevelDB engine, which only a build
+# that found LevelDB has. The test then checks what that build has to do, and otherwise that the
+# binary refuses to run an engine it does not have, and says why.
 set -uo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=tests/scripts/lib.sh
 . "$here/../scripts/lib.sh"
 
-bench="${1:?usage: shale_bench_test.sh <path to the shale_bench binary>}"
+bench="${1:?usage: shale_bench_test.sh <path to the shale_bench binary> <leveldb|no-leveldb>}"
+leveldb="${2:?usage: shale_bench_test.sh <path to the shale_bench binary> <leveldb|no-leveldb>}"
+case "$leveldb" in
+  leveldb | no-leveldb) ;;
+  *)
+    echo "shale_bench_test: the second argument is leveldb or no-leveldb, not '$leveldb'" >&2
+    exit 2
+    ;;
+esac
 if [ ! -x "$bench" ]; then
   echo "shale_bench_test: $bench is not an executable" >&2
   exit 2
@@ -231,6 +243,61 @@ check "a database path with a trailing slash" 0 "${small[@]}" --repeat=1 --db="$
   --benchmarks=fillseq
 expect_eq "the database is named without the slashes" "# database: db-slash" \
   "$(grep '^# database: ' "$tmp/out" || true)"
+
+# --- The engine is chosen with --engine. ----------------------------------------------------------
+
+check "the shale engine, by name" 0 "${small[@]}" --repeat=1 --db="$tmp/e1" --engine=shale \
+  --json="$tmp/e1.json" --benchmarks=fillseq,readseq
+out_has "--engine=shale: the output names the engine" "# shale_bench: engine shale,"
+json_has "--engine=shale: the JSON names the engine" "$tmp/e1.json" 'assert d["engine"] == "shale"'
+check "an engine that does not exist" 2 --db="$tmp/x" --engine=nosuch
+err_has "an engine that does not exist" "unknown engine 'nosuch'"
+err_has "an engine that does not exist: the engines are listed" "the engines are shale"
+check "--engine without a value" 2 --db="$tmp/x" --engine
+err_has "--engine without a value" "--engine needs a value"
+check "--engine empty" 2 --db="$tmp/x" --engine=
+err_has "--engine empty" "unknown engine ''"
+check "--help" 0 --help
+out_has "--help says that the engine can be chosen" "--engine=shale|leveldb"
+out_has "--help says what the LevelDB engine is held to" "LevelDB gets the"
+out_has "--help says that LevelDB reports no write amplification" "its column shows n/a"
+
+if [ "$leveldb" = leveldb ]; then
+  # Every workload runs on LevelDB through the same code as on shale: the same operations in the
+  # same order, so that the counts of a run are the counts of the other engine's.
+  check "all benchmarks on LevelDB" 0 "${small[@]}" --repeat=2 --db="$tmp/ldb1" --engine=leveldb \
+    --json="$tmp/ldb.json"
+  for name in fillseq fillrandom fillsync overwrite readrandom readmissing readseq seekrandom; do
+    row "all benchmarks on LevelDB" "$name"
+  done
+  out_has "--engine=leveldb: the output names the engine" "# shale_bench: engine leveldb,"
+  json_has "--engine=leveldb: the JSON names the engine and gives no write amplification" \
+    "$tmp/ldb.json" '
+assert d["tool"] == "shale_bench" and d["engine"] == "leveldb", d["engine"]
+assert d["config"]["db"] == "ldb1", d["config"]["db"]
+for r in d["results"]:
+    if r["kind"] == "write":
+        assert r["write_amplification"] == "n/a", (r["name"], r["write_amplification"])
+        assert all(x["write_amplification"] == "n/a" for x in r["runs"]), r["name"]
+    else:
+        assert r["write_amplification"] is None, r["name"]
+'
+  check "the same workload on shale" 0 "${small[@]}" --repeat=2 --db="$tmp/ldb2" --engine=shale \
+    --json="$tmp/shale-for-ldb.json"
+  cases=$((cases + 1))
+  if [ "$(digest "$tmp/ldb.json")" != "$(digest "$tmp/shale-for-ldb.json")" ]; then
+    fail "the two engines did not run the same operations" \
+      "$(diff <(digest "$tmp/ldb.json") <(digest "$tmp/shale-for-ldb.json"))"
+  fi
+else
+  check "LevelDB in a build that has none" 2 --db="$tmp/x" --engine=leveldb
+  err_has "LevelDB in a build that has none" "this build has no leveldb engine"
+  err_has "LevelDB in a build that has none: it says how to get one" "SHALE_BUILD_BENCH"
+  cases=$((cases + 1))
+  if [ -e "$tmp/x" ]; then
+    fail "a refused engine touched the database path" "$(ls -la "$tmp/x")"
+  fi
+fi
 
 # --- Reads see the database that the most recent write benchmark left. ----------------------------
 
