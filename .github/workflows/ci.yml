@@ -89,8 +89,11 @@ jobs:
         include:
           - sanitizer: address,undefined
             ctest_args: ""
+          # The simulator and its determinism test are single-threaded, so ThreadSanitizer has
+          # nothing to find in them, and three runs of them took most of this job's time budget:
+          # they run once, below, with fewer seeds, and every other test runs three times.
           - sanitizer: thread
-            ctest_args: --repeat until-fail:3
+            ctest_args: --repeat until-fail:3 -E ^(sim|determinism)_test$
     steps:
       - uses: actions/checkout@v7
 
@@ -118,6 +121,15 @@ jobs:
           CTEST_ARGS: ${{ matrix.ctest_args }}
         # CTEST_ARGS is deliberately unquoted: it is a list of words, and empty for the first entry.
         run: ctest --test-dir build/sanitize --output-on-failure --no-tests=error $CTEST_ARGS
+
+      # Twenty seeds is the fewest for which the simulator still asserts its scaled floors.
+      - name: Test the simulator once
+        if: matrix.sanitizer == 'thread'
+        env:
+          SHALE_SIM_SEEDS: "20"
+        run: >
+          ctest --test-dir build/sanitize --output-on-failure --no-tests=error
+          -R "^(sim|determinism)_test$"
 
       - name: Upload the test log
         if: failure()
