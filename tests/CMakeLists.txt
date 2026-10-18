@@ -152,3 +152,15 @@ add_test(NAME cmake_options_accept_and_reject
          COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/options_test.sh"
                  "${CMAKE_COMMAND}" "${CMAKE_GENERATOR}" "${CMAKE_CXX_COMPILER}")
 set_tests_properties(cmake_options_accept_and_reject PROPERTIES TIMEOUT 300)
+
+# The command-line tools. Their libraries are tested directly; the binary is run by a script that
+# makes its own database in a directory of its own. Both exist only when the tools are built.
+if(SHALE_BUILD_TOOLS)
+  shale_add_test(cli_args SOURCES tools/cli_args_test.cc LIBS shale_cli shale_testkit)
+  shale_add_test(verify SOURCES tools/verify_test.cc LIBS shale_verify shale_testkit)
+
+  add_test(NAME shalectl_commands
+           COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/shalectl_test.sh"
+                   "$<TARGET_FILE:shalectl>")
+  set_tests_properties(shalectl_commands PROPERTIES TIMEOUT 300)
+endif()

@@ -25,6 +25,10 @@ endif()
 
 add_subdirectory(src)
 
+if(SHALE_BUILD_TOOLS)
+  add_subdirectory(tools)
+endif()
+
 if(SHALE_BUILD_TESTS)
   add_subdirectory(tests)
 endif()
