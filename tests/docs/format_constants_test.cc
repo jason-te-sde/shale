@@ -301,7 +301,9 @@ TinyTable BuildTinyTable() {
   }
   std::unique_ptr<RandomAccessFile> reader;
   EXPECT_OK(env->NewRandomAccessFile("/t.sst", &reader));
-  EXPECT_OK(ReadBlock(reader.get(), table.footer.index, true, &table.index));
+  BlockContents index;
+  EXPECT_OK(ReadBlock(reader.get(), table.footer.index, true, &index));
+  table.index = std::string(index.view());
   return table;
 }
 
