@@ -494,6 +494,8 @@ jobs:
         run: |
           "$RUNNER_TEMP/examples/basic" "$RUNNER_TEMP/exdb" > "$RUNNER_TEMP/basic.out"
           diff -u examples/basic.expected "$RUNNER_TEMP/basic.out"
+          "$RUNNER_TEMP/examples/quickstart" > "$RUNNER_TEMP/quickstart.out"
+          diff -u examples/quickstart.expected "$RUNNER_TEMP/quickstart.out"
 
       # The installed package is version 0.1: a project that asks for it gets it, and one that asks
       # for version 1 does not. The same project asks both times, so that the refusal can only be

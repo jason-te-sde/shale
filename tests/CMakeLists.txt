@@ -114,6 +114,13 @@ shale_add_test(operations_doc SOURCES docs/operations_doc_test.cc LIBS shale_db 
 target_compile_definitions(operations_doc_test PRIVATE
   SHALE_OPERATIONS_DOC_PATH="${PROJECT_SOURCE_DIR}/docs/operations.md")
 
+# The program that the README shows is a file that CI builds against an installation, and the README's
+# copy of it, and of the CMake lines around it, is held to the file.
+shale_add_test(readme SOURCES docs/readme_test.cc LIBS shale_testkit)
+target_compile_definitions(readme_test PRIVATE
+  SHALE_README_PATH="${PROJECT_SOURCE_DIR}/README.md"
+  SHALE_EXAMPLES_DIR="${PROJECT_SOURCE_DIR}/examples")
+
 # The deterministic simulator's reference model and the checkers of its invariants. Each checker is
 # tested against a database that lies, so that it is seen to alarm as well as to stay quiet.
 shale_add_test(model_db SOURCES sim/model_db_test.cc LIBS shale_testkit)

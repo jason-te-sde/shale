@@ -127,9 +127,10 @@ ctest --test-dir build/gcc --output-on-failure --no-tests=error
 # examples_against_install <build dir> <C++ compiler>: the clean-clone job of
 # .github/workflows/ci.yml from the installation on. It installs the tree into a scratch prefix,
 # builds examples/ against that prefix and nothing else, runs the program and compares what it
-# prints with examples/basic.expected, then writes a key with shalectl and reads it back in a
-# process of its own. The compiler must be the one that built the libraries: a static library is
-# only usable by the standard library it was compiled against.
+# prints with examples/basic.expected, does the same with the README's program (quickstart, which
+# keeps its database in /tmp/shale-quickstart), then writes a key with shalectl and reads it back
+# in a process of its own. The compiler must be the one that built the libraries: a static library
+# is only usable by the standard library it was compiled against.
 examples_against_install() {
   local build_dir=$1 cxx=$2 work got
   work="$(mktemp -d)"
@@ -141,6 +142,8 @@ examples_against_install() {
   cmake --build "$work/build"
   "$work/build/basic" "$work/exdb" >"$work/basic.out"
   diff -u examples/basic.expected "$work/basic.out"
+  "$work/build/quickstart" >"$work/quickstart.out"
+  diff -u examples/quickstart.expected "$work/quickstart.out"
   # The package is the one of version 0.1: a project that asks for it gets it, and one that asks for
   # version 1 does not. The same project asks both times, so that the refusal can only be the
   # version's. That the mode is SameMajorVersion and not AnyNewerVersion, which refuses version 1
