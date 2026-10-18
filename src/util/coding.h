@@ -53,6 +53,13 @@ void PutVarint32(std::string* dst, uint32_t v);
 /// Appends `v` to `*dst` as a varint of 1 to 10 bytes.
 void PutVarint64(std::string* dst, uint64_t v);
 
+/// Writes `v` as a varint to `dst` and returns the position just past it. `dst` must have room for
+/// VarintLength(`v`) bytes, and nothing beyond them is written, so a caller that has sized a buffer
+/// exactly, as the memtable does for an entry in its arena, may encode the last field into its
+/// final bytes. This is the form for a caller that is filling a buffer it already owns; it writes
+/// the same bytes as PutVarint32().
+char* EncodeVarint32(char* dst, uint32_t v);
+
 /// Appends `value` to `*dst` as a varint32 length followed by the bytes. Aborts if the length does
 /// not fit in 32 bits, which would otherwise write a prefix that disagrees with the data.
 void PutLengthPrefixed(std::string* dst, std::string_view value);

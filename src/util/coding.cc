@@ -59,6 +59,15 @@ void PutVarint64(std::string* dst, uint64_t v) {
 
 void PutVarint32(std::string* dst, uint32_t v) { PutVarint64(dst, v); }
 
+char* EncodeVarint32(char* dst, uint32_t v) {
+  while (v >= 0x80) {
+    *dst++ = static_cast<char>(static_cast<uint8_t>(v) | 0x80);
+    v >>= 7;
+  }
+  *dst++ = static_cast<char>(v);
+  return dst;
+}
+
 void PutLengthPrefixed(std::string* dst, std::string_view value) {
   SHALE_CHECK(static_cast<uint64_t>(value.size()) <= std::numeric_limits<uint32_t>::max(),
               "length-prefixed value is longer than 4 GiB");

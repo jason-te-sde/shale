@@ -32,6 +32,12 @@ inline constexpr ValueType kValueTypeForSeek = ValueType::kValue;
 /// sequence.
 inline constexpr SequenceNumber kMaxSequenceNumber = (uint64_t{1} << 56) - 1;
 
+/// The size in bytes of the tag that ends an internal key: the sequence number and the type packed
+/// into a fixed64. An internal key is at least this long, and its user key is everything before
+/// the last this many bytes. Code that reads keys from a file and cannot trust their length checks
+/// it against this.
+inline constexpr size_t kInternalKeyTagSize = 8;
+
 /// An internal key taken apart. `user_key` views into whatever it was parsed from.
 struct ParsedInternalKey {
   std::string_view user_key;
@@ -92,7 +98,7 @@ class LookupKey {
   /// Returns the user key.
   std::string_view user_key() const {
     const std::string_view internal = internal_key();
-    return internal.substr(0, internal.size() - 8);
+    return internal.substr(0, internal.size() - kInternalKeyTagSize);
   }
 
  private:
