@@ -186,6 +186,12 @@ add_test(NAME flaws_script_and_ci_agree
          COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/flaws_test.sh")
 set_tests_properties(flaws_script_and_ci_agree PROPERTIES TIMEOUT 120)
 
+# check-links.sh decides whether a document points at something that is not there, so it is shown
+# both kinds of link, and every rule of what counts as one.
+add_test(NAME links_check_alarms_and_passes
+         COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/links_test.sh")
+set_tests_properties(links_check_alarms_and_passes PROPERTIES TIMEOUT 120)
+
 # The command-line tools. Their libraries are tested directly; the binary is run by a script that
 # makes its own database in a directory of its own. Both exist only when the tools are built.
 if(SHALE_BUILD_TOOLS)

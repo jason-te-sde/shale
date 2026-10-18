@@ -106,6 +106,9 @@ bash scripts/check-layering.sh
 stage "hygiene"
 bash scripts/check-hygiene.sh
 
+stage "links"
+bash scripts/check-links.sh
+
 build_and_test dev
 build_and_test asan
 

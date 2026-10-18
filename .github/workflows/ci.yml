@@ -339,6 +339,9 @@ jobs:
       - name: Hygiene
         run: bash scripts/check-hygiene.sh
 
+      - name: Links
+        run: bash scripts/check-links.sh
+
       - name: Configure
         env:
           CC: clang-18
