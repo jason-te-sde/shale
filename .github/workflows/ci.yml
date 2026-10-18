@@ -347,8 +347,12 @@ jobs:
           cmake -S . -B build/lint -G Ninja -DCMAKE_BUILD_TYPE=Debug
           -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DSHALE_BUILD_TESTS=OFF
 
+      # tools/bench_leveldb.cc includes LevelDB's headers, which this job does not install: the engine
+      # is built only where LevelDB is, and is checked there (preflight runs clang-tidy on it too).
       - name: clang-tidy
-        run: git ls-files -z -- 'src/*.cc' 'tools/*.cc' | xargs -0 -r clang-tidy -p build/lint --quiet
+        run: >
+          git ls-files -z -- 'src/*.cc' 'tools/*.cc' ':!tools/bench_leveldb.cc'
+          | xargs -0 -r clang-tidy -p build/lint --quiet
 
       - name: Doxygen
         run: cmake --build build/lint --target docs

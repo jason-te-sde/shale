@@ -1,10 +1,13 @@
-// shale_bench: db_bench-style workloads against shale, with numbers that can be quoted.
+// shale_bench: db_bench-style workloads against shale, and against LevelDB for comparison, with
+// numbers that can be quoted.
 //
 // A benchmark here is a loop of operations on a database, timed. Keys are the 16 digits of an
 // index, "%016llu", and values are --value_size bytes from a seeded generator, so a run is a
 // function of its flags: the same flags make the same operations in the same order, on any machine,
 // and what differs between two runs of them is the machine. The workloads call the engine through
-// BenchEngine alone, so that the same workloads can be run on another engine.
+// BenchEngine alone, so that the same workloads, timed by the same code, run on another engine:
+// that is --engine=leveldb, in a build that found LevelDB, and what lets a row of one engine be set
+// next to the same row of the other.
 //
 // What is measured, since a number is only as good as its definition:
 //
@@ -85,6 +88,10 @@
 #include "shale/status.h"
 #include "util/check.h"
 
+#if defined(SHALE_BENCH_HAVE_LEVELDB)
+#include "bench_leveldb.h"
+#endif
+
 // What this binary was built with, which CMake passes in. A build that does not know says so.
 #ifndef SHALE_BENCH_COMPILER_ID
 #define SHALE_BENCH_COMPILER_ID "unknown"
@@ -114,9 +121,9 @@ constexpr int kExitFailed = 1;  // a benchmark failed, or its answers were wrong
 constexpr int kExitUsage = 2;   // the command line is wrong
 
 constexpr char kUsage[] =
-    "usage: shale_bench --db=PATH [--benchmarks=LIST] [--num=1000000] [--sync_num=10000]\n"
-    "                   [--value_size=100] [--repeat=3] [--seed=301] [--json=FILE]\n"
-    "                   [--compact_before_reads]\n"
+    "usage: shale_bench --db=PATH [--engine=shale|leveldb] [--benchmarks=LIST]\n"
+    "                   [--num=1000000] [--sync_num=10000] [--value_size=100] [--repeat=3]\n"
+    "                   [--seed=301] [--json=FILE] [--compact_before_reads]\n"
     "\n"
     "Runs db_bench-style workloads against shale and prints one line for each benchmark:\n"
     "the median over --repeat runs of operations a second, megabytes a second (of 2^20 bytes,\n"
@@ -124,6 +131,15 @@ constexpr char kUsage[] =
     "the engine call in microseconds (nearest rank, over every operation), and the engine's\n"
     "write amplification. Lines that start with # say what the run was and where; the table\n"
     "has no other kind.\n"
+    "\n"
+    "--engine=shale|leveldb picks the database that the workloads run on; shale is the default.\n"
+    "leveldb is there only in a build that found LevelDB (see docs/benchmarks.md). LevelDB gets "
+    "the\n"
+    "same workloads, keys, values and timing as shale, and settings that put it level with\n"
+    "shale's defaults: a write buffer of 4 MiB, blocks of 4096 bytes, a Bloom filter of 10 bits a\n"
+    "key, a block cache of 8 MiB, 1000 open files, no compression, and checksums verified on "
+    "every\n"
+    "read. It reports no write amplification: its column shows n/a.\n"
     "\n"
     "PATH is destroyed and made again by every write benchmark: give it a directory that holds\n"
     "nothing you want. The output and the JSON name it by the last component of PATH alone.\n"
@@ -201,6 +217,7 @@ struct Config {
   WorkloadOptions workload;
   uint64_t repeat = 3;
   std::string json;
+  std::string engine = "shale";
   bool compact_before_reads = false;
 
   Config() {
@@ -212,6 +229,49 @@ struct Config {
 };
 
 using Clock = std::chrono::steady_clock;
+
+// ---- The engines.
+// --------------------------------------------------------------------------------
+
+// The names of the engines that this build has, as the usage lists them.
+std::string EngineNames() {
+#if defined(SHALE_BENCH_HAVE_LEVELDB)
+  return "shale, leveldb";
+#else
+  return "shale";
+#endif
+}
+
+// Returns what is wrong with the engine name, or an empty string. The engine that is not in this
+// build is named for what it is, and not called unknown: it exists, and the build is what lacks it.
+std::string CheckEngine(const std::string& name) {
+  if (name == "shale") {
+    return "";
+  }
+#if defined(SHALE_BENCH_HAVE_LEVELDB)
+  if (name == "leveldb") {
+    return "";
+  }
+#else
+  if (name == "leveldb") {
+    return "this build has no leveldb engine: it is built when SHALE_BUILD_BENCH is ON and CMake "
+           "finds LevelDB, with CMAKE_PREFIX_PATH set to where it is installed";
+  }
+#endif
+  return "unknown engine '" + EscapeBytes(name) + "'; the engines are " + EngineNames();
+}
+
+// Makes the engine that CheckEngine() accepted.
+std::unique_ptr<BenchEngine> MakeEngine(const std::string& name) {
+#if defined(SHALE_BENCH_HAVE_LEVELDB)
+  if (name == "leveldb") {
+    return NewLevelDBBenchEngine();
+  }
+#endif
+  SHALE_CHECK(name == "shale",
+              "an engine that CheckEngine() accepted and MakeEngine() does not know");
+  return NewShaleBenchEngine(Options());
+}
 
 // ---- The output. --------------------------------------------------------------------------------
 
@@ -329,14 +389,14 @@ std::string LastComponent(const std::string& path) {
 
 // ---- The JSON. ----------------------------------------------------------------------------------
 
-std::string BuildJson(const Config& config, const Machine& machine,
+std::string BuildJson(const Config& config, const std::string& engine, const Machine& machine,
                       const std::vector<Summary>& summaries) {
   JsonWriter json;
   json.BeginObject();
   json.Key("tool");
   json.String("shale_bench");
   json.Key("engine");
-  json.String("shale");
+  json.String(engine);
 
   json.Key("config");
   json.BeginObject();
@@ -435,11 +495,11 @@ class OutputFile {
   std::FILE* file_ = nullptr;
 };
 
-void PrintHeader(const Config& config, const Machine& machine) {
+void PrintHeader(const Config& config, const std::string& engine, const Machine& machine) {
   std::printf(
-      "# shale_bench: engine shale, num %llu, sync_num %llu, value_size %llu, repeat %llu, seed "
+      "# shale_bench: engine %s, num %llu, sync_num %llu, value_size %llu, repeat %llu, seed "
       "%llu\n",
-      static_cast<unsigned long long>(config.workload.num),
+      engine.c_str(), static_cast<unsigned long long>(config.workload.num),
       static_cast<unsigned long long>(config.workload.sync_num),
       static_cast<unsigned long long>(config.workload.value_size),
       static_cast<unsigned long long>(config.repeat),
@@ -544,9 +604,9 @@ int Run(const Config& config) {
   }
 
   const Machine machine = DescribeMachine();
-  PrintHeader(config, machine);
+  const std::unique_ptr<BenchEngine> engine = MakeEngine(config.engine);
+  PrintHeader(config, engine->Name(), machine);
 
-  const std::unique_ptr<BenchEngine> engine = NewShaleBenchEngine(Options());
   std::vector<Summary> summaries;
   Benchmark failed = config.benchmarks.front();
   if (const Status s = RunAll(config, engine.get(), &summaries, &failed); !s.ok()) {
@@ -556,8 +616,8 @@ int Run(const Config& config) {
   }
 
   if (!config.json.empty()) {
-    if (const Status s =
-            json_file.WriteAndClose(config.json, BuildJson(config, machine, summaries));
+    if (const Status s = json_file.WriteAndClose(
+            config.json, BuildJson(config, engine->Name(), machine, summaries));
         !s.ok()) {
       std::fprintf(stderr, "shale_bench: %s\n", s.ToString().c_str());
       return kExitFailed;
@@ -654,7 +714,8 @@ std::string ParseFlags(const std::vector<std::string>& words, Config* config, bo
     const auto number_flag =
         std::find_if(number_flags.begin(), number_flags.end(),
                      [&name](const NumberFlag& flag) { return name == flag.name; });
-    const bool is_text_flag = name == "db" || name == "json" || name == "benchmarks";
+    const bool is_text_flag =
+        name == "db" || name == "json" || name == "benchmarks" || name == "engine";
     if (number_flag == number_flags.end() && !is_text_flag) {
       return "unknown flag --" + EscapeBytes(name);
     }
@@ -674,6 +735,11 @@ std::string ParseFlags(const std::vector<std::string>& words, Config* config, bo
       if (const std::string wrong = ParseBenchmarks(*value, &config->benchmarks); !wrong.empty()) {
         return wrong;
       }
+    } else if (name == "engine") {
+      if (const std::string wrong = CheckEngine(*value); !wrong.empty()) {
+        return wrong;
+      }
+      config->engine = *value;
     } else if (value->empty()) {
       return "--" + name + " needs a path, and it is empty";
     } else {
