@@ -152,11 +152,15 @@ Status DBImpl::SwitchMemTable() {
   // the mutex.
   Status s;
   if (log_unsynced_) {
+#if defined(SHALE_FLAW_SKIP_WAL_SYNC)
+    // Flaw skip_wal_sync: the old log is left behind unsynced, and a later write is acknowledged.
+#else
     s = logfile_->Sync();
     if (!s.ok()) {
       RecordBackgroundError(s);
       return s;
     }
+#endif
     log_unsynced_ = false;
   }
   uint64_t number = 0;
@@ -515,7 +519,17 @@ void DBImpl::DeleteObsoleteFiles() {
     return;
   }
   // What decides which files are obsolete is read here, with the mutex held.
+#if defined(SHALE_FLAW_DELETE_LIVE_FILES)
+  // Flaw delete_live_files: only the current version's files are kept, not those that readers hold.
+  std::set<uint64_t> needed;
+  for (const std::vector<FileMetaData>& level : versions_.current()->state().files) {
+    for (const FileMetaData& file : level) {
+      needed.insert(file.number);
+    }
+  }
+#else
   std::set<uint64_t> needed = versions_.LiveFiles();
+#endif
   needed.insert(pending_outputs_.begin(), pending_outputs_.end());
   const uint64_t makers = table_makers_;
   const uint64_t log_number = versions_.LogNumber();

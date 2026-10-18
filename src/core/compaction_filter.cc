@@ -20,6 +20,10 @@ constexpr SequenceNumber kLatestStripe = kMaxSequenceNumber + 1;
 
 CompactionFilter::CompactionFilter(std::vector<SequenceNumber> snapshots)
     : snapshots_(std::move(snapshots)) {
+#if defined(SHALE_FLAW_IGNORE_SNAPSHOTS_IN_COMPACTION)
+  // Flaw ignore_snapshots_in_compaction: no snapshot is honoured, so entries a snapshot sees go.
+  snapshots_.clear();
+#endif
   std::sort(snapshots_.begin(), snapshots_.end());
   SHALE_CHECK(snapshots_.empty() || snapshots_.back() <= kMaxSequenceNumber,
               "a snapshot sequence number is above kMaxSequenceNumber");
@@ -32,6 +36,10 @@ SequenceNumber CompactionFilter::StripeOf(SequenceNumber sequence) const {
 
 CompactionFilter::Decision CompactionFilter::Next(const ParsedInternalKey& key,
                                                   bool is_base_level_for_key) {
+#if defined(SHALE_FLAW_DROP_TOMBSTONES_EARLY)
+  // Flaw drop_tombstones_early: a deletion is dropped even with older entries of its key below.
+  is_base_level_for_key = true;
+#endif
   const int order = has_previous_ ? BytewiseCompare(key.user_key, previous_user_key_) : 1;
   SHALE_CHECK(order >= 0, "CompactionFilter: input is out of order: a user key goes backwards");
   const bool same_user_key = order == 0;

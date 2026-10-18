@@ -105,5 +105,11 @@ git ls-files -z -- 'src/*.cc' 'tools/*.cc' | xargs -0 -r clang-tidy -p build/dev
 stage "docs"
 cmake --build --preset dev --target docs
 
+# The slowest stage, so the last: six Release builds of the simulator, each with one deliberate flaw
+# compiled in, each of which must make it fail. The flaws job in .github/workflows/ci.yml runs the
+# same script, one flaw to a job.
+stage "injected flaws"
+bash scripts/run-flaws.sh
+
 echo
 echo "preflight: ok"
