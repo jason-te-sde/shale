@@ -24,6 +24,10 @@ jobs:
         compiler: [gcc-13, gcc-14, clang-18]
         build_type: [Debug, Release]
         include:
+          # Clang 17 is the oldest compiler that the README promises; it is built in Release only.
+          - os: ubuntu-24.04
+            compiler: clang-17
+            build_type: Release
           - os: macos-14
             compiler: appleclang
             build_type: Release

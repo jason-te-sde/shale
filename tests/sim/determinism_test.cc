@@ -34,10 +34,10 @@ TEST(DeterminismTest, SameSeedSameTrace) {
 // what a run's power losses keep and when its injected failures of a sync fire. A run depends on
 // the engine only through what it does, and not through how a compiler or a standard library lays
 // things out, so these are the digests on every toolchain, and CI proves it on GCC 13 and 14,
-// Clang 18 and AppleClang. A digest that
-// changes is a change of what a run does: of the simulator, of the engine's behaviour, or of a
-// toolchain's, and the first two are meant when they come with a commit that says so, and are
-// accepted by pinning the new values. The third is a bug of the replay that this test is for.
+// Clang 17 and 18 and AppleClang. A digest that changes is a change of what a run does: of the
+// simulator, of the engine's behaviour, or of a toolchain's, and the first two are meant when they
+// come with a commit that says so, and are accepted by pinning the new values. The third is a bug
+// of the replay that this test is for.
 struct Golden {
   uint64_t seed;
   uint64_t digest;

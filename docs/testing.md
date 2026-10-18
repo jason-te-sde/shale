@@ -272,7 +272,7 @@ database, `fuzz` the input; `coverage` and `bench-smoke` upload their reports. `
 
 | Job | What it runs |
 | --- | --- |
-| `build-test` | Ubuntu 24.04 with GCC 13, GCC 14 and Clang 18, Debug and Release; macOS 14 with Apple Clang, Release. Configure, build, `ctest`. |
+| `build-test` | Ubuntu 24.04 with GCC 13, GCC 14 and Clang 18, Debug and Release, and Clang 17, Release; macOS 14 with Apple Clang, Release. Configure, build, `ctest`. |
 | `sanitize` | Clang 18, AddressSanitizer with UndefinedBehaviorSanitizer; and ThreadSanitizer, each test three times, the simulator once. |
 | `flaws` | One job for each injected flaw; the simulator must fail. |
 | `crash` | `shale_crashtest`, 200 rounds and six synced rounds, on Ubuntu and macOS. |
@@ -304,8 +304,8 @@ The author's machine is a Mac (arm64) with Apple Clang, Homebrew Clang and GCC 1
   `No space left on device` (`PosixEnvTest.WriteFailureNamesThePathAndTheCause`, which exists on Linux
   only), the `fdatasync` path, and the real crash test on **ext4** (the GitHub-hosted runners'
   filesystem). Locally the engine runs on APFS with `F_FULLFSYNC`, which CI's macOS jobs also cover.
-- **GCC 13 and 14, and Clang 18.** The compiler floors are GCC 13, Clang 17 and Apple Clang 15; the matrix
-  builds GCC 13 and 14, Clang 18 and Apple Clang. Clang 17 is the floor and is not in the matrix.
+- **GCC 13 and 14, and Clang 17 and 18.** The compiler floors are GCC 13, Clang 17 and Apple Clang 15;
+  the matrix builds each floor, and GCC 14 and Clang 18 above them (Clang 17 in Release only).
 - **The coverage figure** that CI reports (95.4% of lines) is a GCC 14 on Linux number; the local build
   measures 92.3% with GCC 16 on macOS.
 - **A cold clone.** The `clean-clone` job is the only run that starts from nothing.
