@@ -640,6 +640,57 @@ TEST_F(DBFlushTest, AStalledWriterIsWokenBeforeTheSweepListsTheDirectory) {
   ExpectPresent(0, kPuts);
 }
 
+TEST_F(DBFlushTest, WritesAndReadsGoOnWhileTheManifestIsSynced) {
+  // The background task gives up the mutex while it appends an edit to the MANIFEST and syncs it.
+  // The sync is a flush of the disk's cache, and a write or a read that came meanwhile would
+  // otherwise wait for the disk too. Here the sync of the flush's edit is held until a write and a
+  // read have been made, or for three seconds, which is what a mutex held through it would cost.
+  Options options = CurrentOptions();
+  HookEnv* const hook_env = NewHookEnv();
+  options.env = hook_env;
+  options.scheduler = nullptr;  // the database runs its own: this needs a thread
+  Reopen(options);
+  ASSERT_OK(Put("a", "1"));
+  std::mutex mu;
+  std::condition_variable cv;
+  bool syncing = false;    // guarded by mu
+  bool done = false;       // guarded by mu
+  bool timed_out = false;  // guarded by mu
+  hook_env->SetHook([&](std::string_view call, const std::string& path) {
+    if (call == "sync" && path.find("MANIFEST") != std::string::npos) {
+      std::unique_lock<std::mutex> lock(mu);
+      syncing = true;
+      cv.notify_all();
+      if (!cv.wait_for(lock, std::chrono::seconds(3), [&] { return done; })) {
+        timed_out = true;
+      }
+    }
+    return Status::OK();
+  });
+  std::thread flusher([&] { EXPECT_OK(db_->Flush()); });
+  bool reached = false;
+  {
+    std::unique_lock<std::mutex> lock(mu);
+    reached = cv.wait_for(lock, std::chrono::seconds(10), [&] { return syncing; });
+  }
+  EXPECT_TRUE(reached) << "the flush never synced the MANIFEST";
+  EXPECT_OK(Put("b", "2", /*sync=*/false));
+  EXPECT_EQ(Get("a"), "1");
+  {
+    const std::lock_guard<std::mutex> lock(mu);
+    done = true;
+  }
+  cv.notify_all();
+  flusher.join();
+  hook_env->SetHook(nullptr);
+  {
+    const std::lock_guard<std::mutex> lock(mu);
+    EXPECT_FALSE(timed_out) << "the write or the read waited for the MANIFEST to be synced";
+  }
+  EXPECT_EQ(Get("b"), "2");
+  EXPECT_EQ(NumTableFilesAtLevel(0), 1);
+}
+
 TEST_F(DBFlushTest, ExhaustedFileNumbersFailTheFlushInsteadOfAborting) {
   // The log of a switch and the table of a flush take numbers, and a number at the ceiling is one
   // that no MANIFEST holds. The flush that cannot get one fails, as an error that stops writes.

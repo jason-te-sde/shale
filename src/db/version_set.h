@@ -34,6 +34,8 @@
 #include "shale/iterator.h"
 #include "shale/status.h"
 #include "util/dbformat.h"
+#include "util/mutex.h"
+#include "util/thread_annotations.h"
 
 namespace shale {
 
@@ -116,8 +118,10 @@ inline constexpr uint64_t kMaxFileNumber = uint64_t{1} << 56;
 ///
 /// A new database is CreateNew() and then LogAndApply().
 ///
-/// Not thread-safe: the database calls it with its mutex held. The Versions it hands out are
-/// another matter, and may be used and dropped from any thread.
+/// Not thread-safe: the database calls it with its mutex held, and gives the mutex up only inside
+/// LogAndApply(), while the MANIFEST is written, which touches nothing that any other method
+/// reads. The Versions it hands out are another matter, and may be used and dropped from any
+/// thread.
 class VersionSet {
  public:
   /// Creates an empty version set for the database in `dbname`, over no files yet: call CreateNew()
@@ -199,8 +203,32 @@ class VersionSet {
   /// kMaxFileNumber, which only the numbers given out can have done: the record would be one that
   /// Recover() refuses. Aborts if there is no MANIFEST open, which is before CreateNew() or
   /// WriteNewManifest().
+  ///
+  /// This form keeps whatever lock the caller holds for the whole call. It is for a caller that
+  /// has no other thread to let in: a test, a tool.
   /// @param edit what to apply; its log number, files and compact pointers are the caller's.
   Status LogAndApply(VersionEdit edit);
+
+  /// LogAndApply() as above, for a caller that holds `mu`, the lock that guards this version set:
+  /// `mu` is given up while the record is appended and synced, which waits for the disk, and taken
+  /// again before the version is installed. The edit is checked and the record made with `mu`
+  /// held, so the counters it carries are those of that moment; the version installed is the edit
+  /// applied to the version that was current then, which nothing else can replace meanwhile, as
+  /// there is one writer of the MANIFEST at a time. A caller must take what it read under `mu`
+  /// before the call as possibly changed after it, except what only a MANIFEST writer changes.
+  ///
+  /// One writer at a time is the database's design, its background task being the one, and the
+  /// version set holds it to that: a LogAndApply() or a WriteNewManifest() that starts while a
+  /// LogAndApply() is between giving up `mu` and installing its version aborts, instead of
+  /// interleaving its record with the other's.
+  /// @param edit what to apply; its log number, files and compact pointers are the caller's.
+  /// @param mu the lock the caller holds, which guards this version set.
+  Status LogAndApply(VersionEdit edit, Mutex* mu) SHALE_REQUIRES(mu);
+
+  /// Returns true while a LogAndApply() has given up its caller's lock to write the MANIFEST: the
+  /// edit it is writing may name tables that no version names yet, and the sweep of obsolete files
+  /// must not run.
+  bool ManifestWriteInProgress() const { return manifest_write_in_progress_; }
 
   /// Returns the current version.
   std::shared_ptr<const Version> current() const { return current_; }
@@ -255,6 +283,15 @@ class VersionSet {
   // Makes `state` the current version, and remembers the version for LiveFiles().
   void Install(VersionState state);
 
+  // The part of LogAndApply() that is done before the record is written: fills in the counters,
+  // checks the edit against the current state, and sets `*next` to the state it makes and
+  // `*record` to its encoding. A status that is not OK is the call's result, with nothing written.
+  Status PrepareEdit(VersionEdit* edit, VersionState* next, std::string* record);
+
+  // The part of LogAndApply() that is done after the record is written, with `written` what the
+  // append and the sync returned: installs `next`, or makes the MANIFEST untrusted.
+  Status FinishEdit(const Status& written, VersionState next);
+
   const std::string dbname_;
   Env* const env_;
   TableCache* const table_cache_;
@@ -272,6 +309,8 @@ class VersionSet {
   std::unique_ptr<log::Writer> manifest_log_;
   // The first error of the MANIFEST that is open, or OK: once set, nothing more is written to it.
   Status manifest_error_;
+  // Whether a LogAndApply() is writing the MANIFEST: see ManifestWriteInProgress().
+  bool manifest_write_in_progress_ = false;
 };
 
 }  // namespace shale

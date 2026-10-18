@@ -29,6 +29,7 @@
 #include "util/coding.h"
 #include "util/dbformat.h"
 #include "util/filename.h"
+#include "util/mutex.h"
 
 namespace shale {
 
@@ -411,6 +412,8 @@ Status VersionSet::Recover() {
 
 Status VersionSet::WriteNewManifest(VersionEdit edit) {
   SHALE_CHECK(loaded_, "VersionSet::WriteNewManifest needs CreateNew() or Recover() first");
+  SHALE_CHECK(!manifest_write_in_progress_,
+              "VersionSet::WriteNewManifest: a second MANIFEST writer came while one was writing");
   if (next_file_number_ >= kMaxFileNumber) {
     // The new MANIFEST takes the number the counter is at and the snapshot records the counter one
     // above it, which Recover() accepts up to kMaxFileNumber and no further. A switch that wrote
@@ -435,7 +438,9 @@ Status VersionSet::WriteNewManifest(VersionEdit edit) {
   return Status::OK();
 }
 
-Status VersionSet::LogAndApply(VersionEdit edit) {
+Status VersionSet::PrepareEdit(VersionEdit* edit, VersionState* next, std::string* record) {
+  SHALE_CHECK(!manifest_write_in_progress_,
+              "VersionSet::LogAndApply: a second MANIFEST writer came while one was writing");
   SHALE_CHECK(manifest_log_ != nullptr,
               "VersionSet::LogAndApply needs an open MANIFEST: CreateNew() or WriteNewManifest()");
   if (!manifest_error_.ok()) {
@@ -446,18 +451,37 @@ Status VersionSet::LogAndApply(VersionEdit edit) {
     // writing it would make the database unopenable.
     return Status::Corruption("no file number is left below the largest there can be");
   }
-  edit.next_file_number = next_file_number_;
-  edit.last_sequence = last_sequence_;
-  VersionState next;
-  Status s = ApplyEdit(current_->state(), edit, &next);
+  edit->next_file_number = next_file_number_;
+  edit->last_sequence = last_sequence_;
+  Status s = ApplyEdit(current_->state(), *edit, next);
   if (!s.ok()) {
     return s;
   }
+  edit->EncodeTo(record);
+  return Status::OK();
+}
 
-  // Durable first, installed second: a version that readers have seen must be one that a crash
-  // leaves in the MANIFEST.
+Status VersionSet::FinishEdit(const Status& written, VersionState next) {
+  if (!written.ok()) {
+    // What the file holds is unknown, and a Sync() after a failed one proves nothing. Nothing more
+    // goes into it.
+    manifest_error_ = written;
+    return written;
+  }
+  Install(std::move(next));
+  return Status::OK();
+}
+
+// Durable first, installed second, in both forms: a version that readers have seen must be one
+// that a crash leaves in the MANIFEST.
+
+Status VersionSet::LogAndApply(VersionEdit edit) {
+  VersionState next;
   std::string record;
-  edit.EncodeTo(&record);
+  Status s = PrepareEdit(&edit, &next, &record);
+  if (!s.ok()) {
+    return s;
+  }
   s = manifest_log_->AddRecord(record);
 #if defined(SHALE_FLAW_SKIP_MANIFEST_SYNC)
   // Flaw skip_manifest_sync: the edit is installed without making the MANIFEST durable.
@@ -466,14 +490,37 @@ Status VersionSet::LogAndApply(VersionEdit edit) {
     s = manifest_file_->Sync();
   }
 #endif
+  return FinishEdit(s, std::move(next));
+}
+
+Status VersionSet::LogAndApply(VersionEdit edit, Mutex* mu) {
+  mu->AssertHeld();
+  VersionState next;
+  std::string record;
+  Status s = PrepareEdit(&edit, &next, &record);
   if (!s.ok()) {
-    // What the file holds is unknown, and a Sync() after a failed one proves nothing. Nothing more
-    // goes into it.
-    manifest_error_ = s;
     return s;
   }
-  Install(std::move(next));
-  return Status::OK();
+  // What the write below uses. Only a MANIFEST writer replaces any of it, and there is one.
+  log::Writer* const writer = manifest_log_.get();
+  WritableFile* const file = manifest_file_.get();
+  const std::shared_ptr<const Version> base = current_;
+
+  manifest_write_in_progress_ = true;
+  mu->Unlock();
+  s = writer->AddRecord(record);
+#if defined(SHALE_FLAW_SKIP_MANIFEST_SYNC)
+  // Flaw skip_manifest_sync: the edit is installed without making the MANIFEST durable.
+  static_cast<void>(file);
+#else
+  if (s.ok()) {
+    s = file->Sync();
+  }
+#endif
+  mu->Lock();
+  manifest_write_in_progress_ = false;
+  SHALE_CHECK(current_ == base, "the current version was replaced while an edit was written");
+  return FinishEdit(s, std::move(next));
 }
 
 uint64_t VersionSet::NewFileNumber() {

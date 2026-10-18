@@ -296,8 +296,8 @@ Status DBImpl::MoveFileDown(const CompactionPlan& plan) {
   edit.new_files.emplace_back(plan.level + 1, file);
   edit.compact_pointers.emplace_back(plan.level, plan.next_compact_pointer);
   // If this fails, the MANIFEST may hold the edit all the same: the file is the same one either
-  // way, and nothing is deleted.
-  const Status s = versions_.LogAndApply(std::move(edit));
+  // way, and nothing is deleted. The mutex is given up while the edit is written.
+  const Status s = versions_.LogAndApply(std::move(edit), &mutex_);
   if (s.ok()) {
     counters_.trivial_moves++;
     Log("moved table " + std::to_string(file.number) + " from level " + std::to_string(plan.level) +
@@ -349,8 +349,10 @@ Status DBImpl::CompactFiles(const CompactionPlan& plan, std::shared_ptr<const Ve
   }
   if (s.ok() && !stopped) {
     // If this fails, the MANIFEST may hold the edit all the same, and the outputs are then tables
-    // that the next open finds in the version: they stay, and nothing is deleted.
-    s = versions_.LogAndApply(job->MakeEdit());
+    // that the next open finds in the version: they stay, and nothing is deleted. The mutex is
+    // given up while the edit is written; the outputs are in `pending_outputs_` until after, and
+    // the inputs in the current version, which only this task replaces.
+    s = versions_.LogAndApply(job->MakeEdit(), &mutex_);
     if (s.ok()) {
       // A write that waits for level 0 to shrink can go on now, and not when the sweep below is
       // done.
@@ -491,8 +493,10 @@ Status DBImpl::FlushImmutable() {
       edit.new_files.emplace_back(0, meta);
     }
     // If this fails, the MANIFEST may hold the edit all the same, and then the table is one that a
-    // restart finds in the version. Nothing is deleted after an error for that reason.
-    s = versions_.LogAndApply(std::move(edit));
+    // restart finds in the version. Nothing is deleted after an error for that reason. The mutex
+    // is given up while the edit is written, with the table in `pending_outputs_` until after; a
+    // switch cannot replace the log the edit names, since `imm_` is still set.
+    s = versions_.LogAndApply(std::move(edit), &mutex_);
   }
   pending_outputs_.erase(meta.number);
   if (!s.ok()) {
@@ -515,6 +519,11 @@ Status DBImpl::FlushImmutable() {
 }
 
 void DBImpl::DeleteObsoleteFiles() {
+  // The tables an edit adds are in no version until it is installed, and a sweep while it is being
+  // written could take them. Only the background task writes edits, and only it sweeps, so the two
+  // never meet; this is where they would.
+  SHALE_CHECK(!versions_.ManifestWriteInProgress(),
+              "the obsolete files are swept while an edit is being written to the MANIFEST");
   if (!bg_error_.ok()) {
     return;
   }

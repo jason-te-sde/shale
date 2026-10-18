@@ -407,7 +407,7 @@ Status DBImpl::OpenLocked() {
     }
     VersionEdit move_on;
     move_on.log_number = log_number;
-    s = versions_.LogAndApply(std::move(move_on));
+    s = versions_.LogAndApply(std::move(move_on), &mutex_);
     if (!s.ok()) {
       return s;
     }

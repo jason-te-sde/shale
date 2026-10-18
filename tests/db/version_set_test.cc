@@ -14,14 +14,17 @@
 
 #include <algorithm>
 #include <cctype>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -29,6 +32,7 @@
 #include "core/version_state.h"
 #include "db/filename_io.h"
 #include "db/handle_check_env.h"
+#include "db/hook_env.h"
 #include "db/table_cache.h"
 #include "io/env_util.h"
 #include "io/log_reader.h"
@@ -44,6 +48,7 @@
 #include "util/crc32c.h"
 #include "util/dbformat.h"
 #include "util/filename.h"
+#include "util/mutex.h"
 
 namespace shale {
 namespace {
@@ -1469,6 +1474,58 @@ TEST_F(VersionSetDeathTest, RecoverTwiceAborts) {
   const auto versions = NewVersionSet();
   ASSERT_OK(versions->Recover());
   EXPECT_DEATH(static_cast<void>(versions->Recover()), "once");
+}
+
+TEST_F(VersionSetDeathTest, ASecondManifestWriterIsRefused) {
+  // LogAndApply() gives up the caller's mutex while it appends the edit and syncs it, and the only
+  // thing then between two writers and a MANIFEST whose records interleave, or a version installed
+  // over one that it did not start from, is the version set itself. The database has one writer,
+  // its background task; a second one is a bug, and the version set stops it before it writes.
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_DEATH(
+      {
+        HookEnv hook_env(&checked_env_);
+        VersionSet versions(kDb, &hook_env, &table_cache_);
+        static_cast<void>(versions.CreateNew());
+        std::mutex hook_mu;
+        std::condition_variable hook_cv;
+        int manifest_syncs = 0;  // guarded by hook_mu
+        bool release = false;    // guarded by hook_mu
+        // The first sync of the MANIFEST is held until the end, so that the first writer is in the
+        // middle of its edit, with the mutex given up, when the second comes.
+        hook_env.SetHook([&](std::string_view call, const std::string& path) {
+          if (call == "sync" && path.find("MANIFEST") != std::string::npos) {
+            std::unique_lock<std::mutex> lock(hook_mu);
+            if (++manifest_syncs == 1) {
+              hook_cv.notify_all();
+              hook_cv.wait(lock, [&] { return release; });
+            }
+          }
+          return Status::OK();
+        });
+        Mutex mu;
+        const uint64_t a = versions.NewFileNumber();
+        const uint64_t b = versions.NewFileNumber();
+        std::thread first([&] {
+          MutexLock lock(&mu);
+          static_cast<void>(versions.LogAndApply(AddFile(0, Meta(a, "a", "b")), &mu));
+        });
+        {
+          std::unique_lock<std::mutex> lock(hook_mu);
+          hook_cv.wait(lock, [&] { return manifest_syncs >= 1; });
+        }
+        {
+          MutexLock lock(&mu);
+          static_cast<void>(versions.LogAndApply(AddFile(0, Meta(b, "c", "d")), &mu));
+        }
+        {
+          const std::lock_guard<std::mutex> lock(hook_mu);
+          release = true;
+        }
+        hook_cv.notify_all();
+        first.join();
+      },
+      "MANIFEST writer");
 }
 
 // Version: what a read finds

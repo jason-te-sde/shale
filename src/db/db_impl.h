@@ -101,6 +101,13 @@ struct DBCounters {
 /// runs tasks on the caller's thread, it runs them itself, which is for one thread at a time: two
 /// that wait at once would run tasks on the same ManualScheduler together.
 ///
+/// A flush or a compaction ends in an edit of the version set, which is appended to the MANIFEST
+/// and synced before the version it makes is installed. The mutex is given up while the edit is
+/// written and synced (VersionSet::LogAndApply() with the mutex), so that writes and reads do not
+/// wait for the disk with it; the background task is the one writer of the MANIFEST, which the
+/// version set enforces, and nothing that a writer or a reader changes in the meantime is in the
+/// edit.
+///
 /// The first error of the log, of a flush, of a compaction or of the MANIFEST stops all writes: it
 /// is kept in `bg_error_`, counted, and every write and flush after it returns it. Reads go on.
 class DBImpl final : public DB {
