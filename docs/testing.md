@@ -239,8 +239,9 @@ a compaction leaves a database that opens and holds everything it said it did, o
   `include/` throws; and that no C++ under `include/`, `src/`, `tests/` or `tools/` uses `std::rand` or
   `std::random_device` or includes `<random>`.
 - `tests/scripts/hygiene_test.sh` and `check-hygiene.sh`: no Chinese, Japanese or Korean characters, and
-  none of the authorship trailers that `scripts/attribution-patterns.txt` lists, in any tracked file or
-  commit message.
+  none of the authorship credits that `scripts/attribution-patterns.txt` lists (a co-author trailer, a
+  line that says what produced a change, the robot emoji), in any tracked file or commit message. Each
+  pattern has a sample that only it catches.
 - `tests/scripts/links_test.sh` and `check-links.sh`: every relative link in every Markdown file resolves,
   and every `#fragment` names a heading.
 - `tests/scripts/options_test.sh`: the CMake options accept what they should and refuse the rest, and the
