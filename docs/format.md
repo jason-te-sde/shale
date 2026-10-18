@@ -84,7 +84,7 @@ full, as the second table row shows. **Only that spelling is a name.** `9.log`, 
 
 File numbers come from one counter, so a number is used once for a log, a table or a MANIFEST and
 never again. The counter is bounded: a database refuses a MANIFEST numbered at or above 2^56, and
-refuses to write one whose counter is above it (`kMaxFileNumber`, commit `0b3e4b9`).
+refuses to write one whose counter is above it (`kMaxFileNumber`, commit [`0b3e4b9`][0b3e4b9]).
 
 ## Internal keys
 
@@ -186,7 +186,7 @@ it is exact:
   that died leaves behind, and the records before it are all returned. A header whose length runs past
   the end of the file counts as this only if the bytes that are there are *not* a whole fragment: where
   some length, up to what is left, gives the checksum the header holds, the fragment was whole and its
-  length is damaged, and that is reported (commit `89915a1`).
+  length is damaged, and that is reported (commit [`89915a1`][89915a1]).
 - **Reported**, once per defect, with the bytes it drops: a read error; `checksum mismatch`; `bad
   record length`; `unknown record type` (zero included); `missing start of fragmented record`; and
   `partial record without end`. A defect drops the rest of its block.
@@ -533,3 +533,6 @@ code does, for example the first byte of an encoded edit.
 | `bloom_min_bits` | 64 | The smallest bit array of a filter. |
 | `bloom_max_probes` | 30 | The most probes; a larger count in a file is a filter the reader does not know. |
 <!-- /table:constants -->
+
+[0b3e4b9]: https://github.com/jason-te-sde/shale/commit/0b3e4b9609364cfc20745a1f8a9089f38b7339ea
+[89915a1]: https://github.com/jason-te-sde/shale/commit/89915a11fe4fc0b9c394960b096fef976f928463

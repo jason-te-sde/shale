@@ -91,7 +91,7 @@ On Linux the engine uses `fdatasync` for files and `fsync` for directories. On m
 | D1, D2, D3 | The simulator's **I4**: after every simulated crash the reopened database must equal the model after some prefix of the writes, at least as long as the last sync, and a batch is never half there; and **I2**'s durable floor: the reopened database's last sequence number is not below that of the last synced write (`tests/testkit/invariants.h`, `tests/sim/sim_test.cc`). The flaws `skip_wal_sync`, `skip_dir_sync` and `skip_manifest_sync` each break one rule above, and each is caught. `tests/db/db_recovery_test.cc` (`PowerLossKeepsSyncedWrites`, `ProcessCrashKeepsUnsyncedWrites`, `APowerLossThatTakesTheEndOfTheOldLogLeavesAPrefix`), `tests/db/db_flush_test.cc` (`ASyncedWriteMakesTheWritesInTheOldLogDurable`, `ASyncedWriteAfterASwitchSyncsTheOldLogAndTheDirectoryFirst`). The real process kill: `shale_crashtest`. |
 | D4 | The simulator's **I1**, which holds every read that returns OK to the model, including while it is flipping bits in what the Env reads, and **I5**, which allows a read to fail only where an injected fault explains it. `tests/io/table_test.cc`, `tests/io/block_test.cc`; the fuzz targets for the block and table readers. |
 | D5 | The simulator's **I6**: a write succeeds after a failed one, and the run fails. `tests/db/db_basic_test.cc` (`WalSyncFailureFailsTheWriteAndEveryOneAfterIt`), `tests/db/db_flush_test.cc`, `tests/db/db_write_test.cc` (`WalSyncFailureStopsWrites`, `WalSyncFailureRecoversAfterReopen`). |
-| D6 | `tests/db/db_recovery_test.cc` and `tests/io/log_test.cc`, listed in [ADR 0003](0003-wal-format-and-recovery.md), among them `ALaterLogIsSetAsideWhenAnEarlierLogLostItsEnd` and `AFirstLogThatLostEverythingIsCaughtByTheManifestsSequenceNumber` for the gap; the simulator holds an open that read corrupted bytes to I4 in full, and reaches the gap at recovery: a deliberate break that removes the check fails I4 at seed 6 (commit `824b318`). |
+| D6 | `tests/db/db_recovery_test.cc` and `tests/io/log_test.cc`, listed in [ADR 0003](0003-wal-format-and-recovery.md), among them `ALaterLogIsSetAsideWhenAnEarlierLogLostItsEnd` and `AFirstLogThatLostEverythingIsCaughtByTheManifestsSequenceNumber` for the gap; the simulator holds an open that read corrupted bytes to I4 in full, and reaches the gap at recovery: a deliberate break that removes the check fails I4 at seed 6 (commit [`824b318`][824b318]). |
 | D7 | `tests/db/db_basic_test.cc` (`OpenSamePathTwiceFails`); `tests/io/env_posix_test.cc` for the lock. |
 <!-- /table:checks -->
 
@@ -146,7 +146,7 @@ holds the engine to D1 to D6 after every crash, not only at the end of a run.
   design, and it is simpler to argue. Rejected for what it costs the writer that makes the switch: it is a
   sync of the old log and one of the directory with the DB mutex held, shown in the profiles in
   [benchmarks](../benchmarks.md). The first synced write after the switch does the same work only when
-  somebody asked for durability, and the flush makes it unnecessary when nobody does (commit `824b318`).
+  somebody asked for durability, and the flush makes it unnecessary when nobody does (commit [`824b318`][824b318]).
 - **Let a background thread sync the old log while writes go into the new one.** Rejected: it leaves the
   same hole for recovery to find, and adds a thread that touches the log.
 - **Delete the logs after a gap.** Rejected: they hold writes that were acknowledged, if not synced, and
@@ -161,11 +161,15 @@ holds the engine to D1 to D6 after every crash, not only at the end of a run.
 - **Rely on `rename` alone for `CURRENT`.** Rejected: the rename is atomic but not durable until the
   directory is synced, and the name it publishes must exist on disk when it does.
 - **A `CURRENT` without a checksum.** Rejected after it failed: a misread of `CURRENT` made a failed switch
-  delete the MANIFEST that `CURRENT` named (seed 2240, commit `cacf403`), and a flipped digit selected an
-  older MANIFEST that was still in the directory (commit `d8c7e7b`).
+  delete the MANIFEST that `CURRENT` named (seed 2240, commit [`cacf403`][cacf403]), and a flipped
+  digit selected an older MANIFEST that was still in the directory (commit [`d8c7e7b`][d8c7e7b]).
 
 ## References
 
 - `src/db/db_write.cc`, `src/db/db_background.cc`, `src/db/builder.cc`, `src/db/filename_io.cc`,
   `src/db/version_set.h` (the two orders it names), `include/shale/env.h`
 - [testing](../testing.md) for the invariants I1 to I6 and the injected flaws.
+
+[824b318]: https://github.com/jason-te-sde/shale/commit/824b3189b6c0600e8b39c4d9a0a287831eda8d5e
+[cacf403]: https://github.com/jason-te-sde/shale/commit/cacf403bbc7d37e67e02db58e74334de391a5ef9
+[d8c7e7b]: https://github.com/jason-te-sde/shale/commit/d8c7e7bd50067c4de9f259b5fc9facdda5ca1848

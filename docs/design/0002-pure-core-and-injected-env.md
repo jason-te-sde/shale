@@ -59,7 +59,7 @@ that holds none.
   the digests of three seeds, so a toolchain whose runs diverge from the others fails CI. That test
   exists because of a bug the simulator found: the arena padded to
   `alignof(std::max_align_t)`, which is 8 on one toolchain and 16 on another, so one seed filled a
-  memtable one write earlier on one of them (commit `b082176`).
+  memtable one write earlier on one of them (commit [`b082176`][b082176]).
 - The core can be tested against oracles in isolation, and its tests link nothing else.
 
 **What it costs.**
@@ -106,4 +106,8 @@ that holds none.
 - `include/shale/env.h`, `include/shale/scheduler.h`, `tests/testkit/fault_env.h`,
   `tests/testkit/simulator.h`
 - [architecture](../architecture.md#layers), [testing](../testing.md)
-- Commits: `b082176` (arena padding), `491be63`, `6d1f3b9`.
+- Commits: [`b082176`][b082176] (arena padding), [`491be63`][491be63], [`6d1f3b9`][6d1f3b9].
+
+[491be63]: https://github.com/jason-te-sde/shale/commit/491be63b8907881ca766af9cd90eed10e5eafe73
+[6d1f3b9]: https://github.com/jason-te-sde/shale/commit/6d1f3b9af394dc13c77883c8f5e384fd7c23ccab
+[b082176]: https://github.com/jason-te-sde/shale/commit/b0821763439d9306d7427686350ae8995f54d7d7

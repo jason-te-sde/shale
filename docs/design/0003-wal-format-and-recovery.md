@@ -29,7 +29,7 @@ where a reader that has met a defect can always start again. The exact bytes are
 - A header whose length runs past the end of the file is a torn tail only if the bytes that are there
   are not a whole fragment. The reader looks for a length, up to what is left, that gives the checksum
   the header holds; if there is one, the fragment was whole and its length has been damaged, and it
-  is reported (commit `89915a1`).
+  is reported (commit [`89915a1`][89915a1]).
 - A report is **never benign by its position in the file**. After a defect the reader drops the rest
   of the block, which can include records that were acknowledged, so "nothing valid follows" does not
   mean "this is where the log ended".
@@ -109,7 +109,7 @@ Four further rules:
 - **Treat a defect with no valid record after it as the torn tail.** This was the first form of the
   rule, and it is wrong: the reader drops the rest of a block at a defect, which can include records
   that were acknowledged, so the position of a report says nothing about whether it was a crash. It
-  was revised, and the contract D6 in [ADR 0004](0004-durability.md) with it (commit `956bdc1`).
+  was revised, and the contract D6 in [ADR 0004](0004-durability.md) with it (commit [`956bdc1`][956bdc1]).
 - **Refuse every log that ends inside a record.** Rejected: a crash makes that the normal case.
 - **Record the synced length of each log somewhere**, and treat anything beyond it as torn. Rejected: it
   changes the format and adds a second file whose own durability would have to be argued.
@@ -118,7 +118,7 @@ Four further rules:
 - **Delete what a lenient open does not apply.** Rejected. An early version did, and a transient read
   error then turned into permanent loss: the reader reported a failed read, the lenient path took it for
   a defect, `Open` succeeded, and the sweep deleted that log and every later one. A read error now fails
-  `Open`, and what a lenient open drops is renamed, not deleted (commit `39793ad`).
+  `Open`, and what a lenient open drops is renamed, not deleted (commit [`39793ad`][39793ad]).
 - **Continue appending to the last log.** Rejected for the reason above: the torn record.
 
 ## References
@@ -132,4 +132,9 @@ Four further rules:
   `ALengthDamagedPastTheEndOfTheLogIsNotMistakenForATornTail`, `ZeroFilledTailFailsParanoidOpen`,
   `AReadErrorAnywhereInOpenIsAnIOErrorAndLosesNothing`,
   `LenientOpenSetsAsideTheLogWithTheDefectAndEveryLaterLog`); `fuzz/fuzz_log_reader.cc`
-- Commits: `89915a1`, `956bdc1`, `39793ad`, `b07bbcd` (`DestroyDB` removes `.dropped` logs).
+- Commits: [`89915a1`][89915a1], [`956bdc1`][956bdc1], [`39793ad`][39793ad], [`b07bbcd`][b07bbcd] (`DestroyDB` removes `.dropped` logs).
+
+[39793ad]: https://github.com/jason-te-sde/shale/commit/39793ada1cbde96f02a4011bd4abddf4bce2eb96
+[89915a1]: https://github.com/jason-te-sde/shale/commit/89915a11fe4fc0b9c394960b096fef976f928463
+[956bdc1]: https://github.com/jason-te-sde/shale/commit/956bdc18ce550d2b03c897f22722ddca47e20ddf
+[b07bbcd]: https://github.com/jason-te-sde/shale/commit/b07bbcde5ca44c966500d62b8b2745e5630f7deb
