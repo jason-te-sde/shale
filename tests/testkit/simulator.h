@@ -61,7 +61,6 @@ struct SimStats {
   uint64_t orphan_checks = 0;                ///< Times the directory was checked for orphan tables.
   uint64_t deepest_level = 0;                ///< The deepest level that held a table at a check.
   uint64_t damaged_opens = 0;                ///< Opens that worked with a read corrupted in them.
-  uint64_t unreadable_opens = 0;             ///< Of them, those that left a database not readable.
 
   /// Whether every counter is equal.
   bool operator==(const SimStats&) const = default;
@@ -109,15 +108,14 @@ struct SimResult {
 ///
 /// **Corruption during an open.** On one process crash in four, read corruption is armed for the
 /// open. An open that fails for it must lose nothing: the open that follows, with nothing armed,
-/// is held to I4 in full. An open that works although a read was corrupted is another matter,
-/// because the reader of a log cannot tell a record whose length a flipped bit has made longer than
-/// what is left of the file from the end that a crash leaves (see log_reader.h): it stops there
-/// without a report, and what follows in that file is gone, a synced write among it, or a
-/// MANIFEST's edit with the files they name. That is not an invariant to hold such a database to.
-/// It is looked at for what no damage excuses, that it serves its entries in order and that each
-/// value in it was put under that key by some write, and then undone: the directory is put back as
-/// the crash left it and opened again with nothing armed, which owes I4 in full. About one run in
-/// three hundred meets such an open.
+/// is held to I4 in full. An open that works although a read was corrupted is held to I4 in full
+/// too, with every write that was acknowledged and every one that was synced: the reader of a log
+/// reports a record whose length a flipped bit has made longer than what is left of the file when
+/// the record is whole, by finding its checksum, and a flipped bit anywhere else in a log, a
+/// MANIFEST or a table is reported by the checksum of its record or block, so a corrupted read
+/// that the open did not fail on is one that changed nothing that it used. (Until the reader did
+/// that, such an open lost the rest of the file, a synced write among it, in about one run in
+/// three hundred, and the simulator could not hold it to I4.)
 ///
 /// **Replay.** A run is a function of its options, on every toolchain: the same options give the
 /// same operations, the same answers and the same trace digest, in any build, with any compiler

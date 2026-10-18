@@ -41,9 +41,9 @@ struct Golden {
   uint64_t digest;
 };
 constexpr Golden kGolden[] = {
-    {1, 0x6bddfba3c2c48defULL},
-    {42, 0x97b2ebfd99934cefULL},
-    {8123, 0x3960d90712559c9bULL},
+    {1, 0xa98a7939b26de369ULL},
+    {42, 0x9935578d274bff32ULL},
+    {8123, 0x9dc8bcdeca19c9eeULL},
 };
 
 TEST(DeterminismTest, TracesAreTheSameOnEveryToolchain) {

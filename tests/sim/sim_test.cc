@@ -91,7 +91,6 @@ void Add(SimStats* total, const SimStats& part) {
   total->open_failures += part.open_failures;
   total->orphan_checks += part.orphan_checks;
   total->damaged_opens += part.damaged_opens;
-  total->unreadable_opens += part.unreadable_opens;
   total->deepest_level = std::max(total->deepest_level, part.deepest_level);
 }
 
@@ -137,7 +136,7 @@ void ExpectFierce(const SimStats& total, uint64_t seeds, int steps, int keys) {
       "trivial_moves=%llu tombstones_dropped=%llu snapshots_across_compaction=%llu "
       "iterators_across_compaction=%llu injected_errors=%llu injected_corruptions=%llu "
       "write_failures=%llu read_failures=%llu open_failures=%llu orphan_checks=%llu "
-      "damaged_opens=%llu unreadable_opens=%llu deepest_level=%llu\n",
+      "damaged_opens=%llu deepest_level=%llu\n",
       static_cast<unsigned long long>(seeds), steps, static_cast<unsigned long long>(total.steps),
       static_cast<unsigned long long>(total.writes),
       static_cast<unsigned long long>(total.sync_writes),
@@ -157,7 +156,6 @@ void ExpectFierce(const SimStats& total, uint64_t seeds, int steps, int keys) {
       static_cast<unsigned long long>(total.open_failures),
       static_cast<unsigned long long>(total.orphan_checks),
       static_cast<unsigned long long>(total.damaged_opens),
-      static_cast<unsigned long long>(total.unreadable_opens),
       static_cast<unsigned long long>(total.deepest_level));
   if (steps != kDefaultSteps || keys != kDefaultKeys || seeds < 20) {
     return;
