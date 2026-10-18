@@ -10,6 +10,16 @@
 # transcript are a function of the sequence of commands, so a change to what an open allocates shows up
 # here as a difference.
 #
+# Why the README's sequence is what it is. An open that recovers a log writes a level-0 table, and the
+# open that makes the fourth one reaches l0_compaction_trigger, so the database starts a compaction on
+# its background thread (a trivial move) while the command goes on to print. Whether the move has
+# finished when `stats` reads the levels is a race, and an earlier sequence, with four writes and a
+# `stats` at the end, printed "Level 0: 4 files" on two runs in three and "Level 0: 3 files, Level 1:
+# 1 files" on the rest. The sequence now has three writes, so no open sees more than three level-0
+# tables, no background work starts, and the output cannot vary. This test refuses a transcript that
+# shows four, so that an edit of the README that brings the race back fails here, with this reason, and
+# not at random in CI.
+#
 # Usage: readme_transcript_test.sh <path to the shalectl binary>
 # shellcheck disable=SC2016,SC2028  # the script written below is text, with its own quoting
 set -uo pipefail
@@ -57,6 +67,14 @@ fi
     esac
   done <"$tmp/expected"
 } >"$tmp/script.sh"
+
+# The levels the transcript shows. Four files in level 0 is the trigger: see the top of this file.
+if grep -E 'Level 0: ([4-9]|[1-9][0-9]+) files' "$tmp/expected" >/dev/null; then
+  echo "readme_transcript_test: the transcript shows four or more files in level 0, which starts a" >&2
+  echo "compaction in the background of the command that prints it, so its output is not the same on" >&2
+  echo "every run. Shape the sequence of commands so that no open sees more than three level-0 tables." >&2
+  exit 1
+fi
 
 commands="$(grep -c '^run ' "$tmp/script.sh")"
 if [ "$commands" -lt 5 ]; then

@@ -71,7 +71,7 @@ On Linux the engine uses `fdatasync` for files and `fsync` for directories. On m
 | | By |
 | --- | --- |
 | D1, D2, D3 | The simulator's **I4**: after every simulated crash the reopened database must equal the model after some prefix of the writes, at least as long as the last sync, and a batch is never half there (`tests/testkit/invariants.h`, `tests/sim/sim_test.cc`). The flaws `skip_wal_sync`, `skip_dir_sync` and `skip_manifest_sync` each break one rule above, and each is caught. `tests/db/db_recovery_test.cc` (`PowerLossKeepsSyncedWrites`, `ProcessCrashKeepsUnsyncedWrites`), `tests/db/db_flush_test.cc` (`TheLogIsSyncedBeforeTheSwitch`). The real process kill: `shale_crashtest`. |
-| D4 | The simulator's **I1**, which holds every read that returns OK to the model, including while it is flipping bits in what the Env reads, and **I5**, which allows a read to fail only where an injected fault explains it. `tests/io/table_test.cc`, `tests/io/block_test.cc`; the fuzz targets for every decoder. |
+| D4 | The simulator's **I1**, which holds every read that returns OK to the model, including while it is flipping bits in what the Env reads, and **I5**, which allows a read to fail only where an injected fault explains it. `tests/io/table_test.cc`, `tests/io/block_test.cc`; the fuzz targets for the block and table readers. |
 | D5 | The simulator's **I6**: a write succeeds after a failed one, and the run fails. `tests/db/db_basic_test.cc` (`WalSyncFailureFailsTheWriteAndEveryOneAfterIt`), `tests/db/db_flush_test.cc`, `tests/db/db_write_test.cc` (`WalSyncFailureStopsWrites`, `WalSyncFailureRecoversAfterReopen`). |
 | D6 | `tests/db/db_recovery_test.cc` and `tests/io/log_test.cc`, listed in [ADR 0003](0003-wal-format-and-recovery.md); the simulator holds an open that read corrupted bytes to I4 in full. |
 | D7 | `tests/db/db_basic_test.cc` (`OpenSamePathTwiceFails`); `tests/io/env_posix_test.cc` for the lock. |
@@ -79,13 +79,16 @@ On Linux the engine uses `fdatasync` for files and `fsync` for directories. On m
 ## Consequences
 
 **What this buys.** A short, enumerable argument. A table is written once and made whole before anything
-names it. Three files change after they are written, and each changes in one way only. The log and the
-MANIFEST only have a record appended, each record checksummed: the log is protected by rule 1, and the
-MANIFEST by rule 5 (an edit is synced before the version it makes is installed), so a crash that cuts the
-last record of either leaves a file that ends short, which the reader takes for its end
+names it. Two files grow after they are written, and each grows in one way only: the log and the
+MANIFEST only have a record appended, each record checksummed. The log is covered by rule 1 (a record is
+in the log before the write is acknowledged) and by [ADR 0003](0003-wal-format-and-recovery.md) (a
+replayed log is never appended to), and the MANIFEST by rule 5 (an edit is synced before the version it
+makes is installed), so a crash that cuts the last record of either leaves a file that ends short, which
+the reader takes for its end
 (`ManifestCutAnywhereAfterItsFirstRecordRecoversTheRecordsBeforeTheCut` in
 `tests/db/version_set_test.cc`) and that no later write is appended to, because every open starts a new
-log and a new MANIFEST. The third, `CURRENT`, is replaced by an atomic rename (rule 6). The simulator
+log and a new MANIFEST. A third file, `CURRENT`, is never changed in place: it is replaced whole by an
+atomic rename (rule 6). The simulator
 holds the engine to D1 to D6 after every crash, not only at the end of a run.
 
 **What it costs.**

@@ -251,8 +251,8 @@ jobs:
           path: ${{ runner.temp }}/crash
           if-no-files-found: ignore
 
-  # Every decoder that reads bytes off a disk, the recovery of the table set from CURRENT and a
-  # MANIFEST, and the whole database under a random program of operations, under libFuzzer with
+  # The decoders of the log, blocks, tables and version edits, the recovery of the table set from
+  # CURRENT and a MANIFEST, and the whole database under a random program of operations, under libFuzzer with
   # AddressSanitizer and UndefinedBehaviorSanitizer. Sixty seconds a target is a smoke run, long
   # enough to start from the seed corpus and to catch what a change has just made easy to reach; it
   # is not a campaign, and a clean run says nothing about inputs it did not try. A crash is a bug in

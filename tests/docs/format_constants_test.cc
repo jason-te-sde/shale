@@ -424,8 +424,8 @@ std::map<std::string, uint64_t> CodeConstants() {
 const std::set<std::string>& ConstantsCheckedByTheirFormulas() {
   static const std::set<std::string> names = {
       "crc32c_mask_rotate",       "crc32c_mask_delta", "crc32c_check_value", "bloom_hash_seed",
-      "bloom_probe_delta_rotate", "bloom_min_bits",    "bloom_max_probes",   "hash_multiplier",
-      "hash_word_shift",          "hash_tail_shift"};
+      "bloom_probe_delta_rotate", "bloom_min_bits",    "bloom_max_probes",   "bloom_probe_percent",
+      "hash_multiplier",          "hash_word_shift",   "hash_tail_shift"};
   return names;
 }
 
@@ -693,11 +693,12 @@ std::string FilterByTheDocument(const std::vector<std::string>& keys, int bits_p
   const auto seed = static_cast<uint32_t>(DocConstant(doc, "bloom_hash_seed"));
   const auto rotate = static_cast<unsigned>(DocConstant(doc, "bloom_probe_delta_rotate"));
   const uint64_t min_bits = DocConstant(doc, "bloom_min_bits");
+  const auto percent = static_cast<int>(DocConstant(doc, "bloom_probe_percent"));
   const auto max_probes = static_cast<int>(DocConstant(doc, "bloom_max_probes"));
   const uint64_t bits =
       std::max<uint64_t>(keys.size() * static_cast<uint64_t>(bits_per_key), min_bits);
   const uint64_t bytes = (bits + 7) / 8;
-  const int probes = std::clamp(bits_per_key * 69 / 100, 1, max_probes);
+  const int probes = std::clamp(bits_per_key * percent / 100, 1, max_probes);
   std::string filter(bytes + 1, '\0');
   filter[bytes] = static_cast<char>(probes);
   for (const std::string& key : keys) {

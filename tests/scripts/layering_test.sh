@@ -233,6 +233,47 @@ put tests/a_test.cc '#include <string>' 'void F() { throw 1; }'
 put src/util/a.cc '#include <vector>'
 expect "throw in a test, which this ban does not cover" 0
 
+new_tree
+put include/shale/a.h 'inline void F() { throw 1; }'
+expect "a public header throwing" 1 "include/shale/a.h:1:" "may throw"
+
+new_tree
+put include/shale/a.h '/// It does not throw.' 'inline int F() { return 1; }  // never throw here'
+expect "a public header that only says it does not throw" 0
+
+# The word in a string or in a comment on a code line is not code; code after them is.
+
+new_tree
+put src/util/a.cc 'const char* kMsg = "never throw, and never call rand() or std::random_device";' \
+  'const char* kEscaped = "a \" throw \" b";' \
+  'int a = 1; /* throw */ int b = 2;' \
+  'const char* kInclude = "#include <random>";'
+put tests/a_test.cc 'const char* kMsg = "std::rand() is banned";'
+expect "banned words in strings and in one-line block comments" 0
+
+new_tree
+put src/io/a.cc '/**' ' * It must not throw, and never calls std::rand() or std::random_device.' ' *' ' */' \
+  'int F() { return 1; }'
+put tests/a_test.cc '/*' ' * std::rand() is banned.' ' */'
+expect "the starred lines of a block comment that name what is banned" 0
+
+new_tree
+put src/util/a.cc 'void F() { Log("http://example.com"); throw 1; }'
+expect "a throw after a string that holds two slashes" 1 "src/util/a.cc:1:"
+
+new_tree
+put src/util/a.cc 'void F() { Log("x"); throw 1; }'
+expect "a throw after a string" 1 "src/util/a.cc:1:"
+
+new_tree
+put src/util/a.cc 'void F() { /* a comment */ throw 1; }'
+expect "a throw after a one-line block comment" 1 "src/util/a.cc:1:"
+
+new_tree
+put tests/a_test.cc 'void F() { Log("x"); int y = std::rand(); }'
+put src/util/a.cc '#include <vector>'
+expect "std::rand() after a string" 1 "tests/a_test.cc:1:"
+
 # --- No unseeded randomness under include/, src/, tests/ or tools/. -------------------------------
 
 for token in 'int x = std::rand();' 'std::srand(1);' 'std::random_device rd;' 'int x = rand();' \

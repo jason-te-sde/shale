@@ -272,7 +272,8 @@ filter = bit array ‖ k (1 byte)
 
 - The bit array has `max(n × bits_per_key, 64)` bits, rounded up to whole bytes, where `n` is the
   number of distinct user keys in the table: a key that appears in several versions is added once.
-- `k`, the number of probes, is `bits_per_key × 0.69` rounded down, kept between 1 and 30.
+- `k`, the number of probes, is `bits_per_key × 69 / 100` rounded down (a factor of 0.69), kept between
+  1 and 30.
 - A key is hashed once, with the [hash below](#the-hash) and the seed `0xbc9f1d34`, to a 32-bit `h`. Its
   probes are bit `h mod B`, then `(h + delta) mod B`, and so on, where `B` is the size of the
   array in bits (its length in bytes times 8), `delta = (h >> 17) | (h << 15)` (a rotation of `h` left
@@ -525,6 +526,7 @@ code does, for example the first byte of an encoded edit.
 | `hash_word_shift` | 16 | `h` is XORed with itself shifted right by this much after each whole word. |
 | `hash_tail_shift` | 24 | The same, after the last 1 to 3 bytes. |
 | `bloom_probe_delta_rotate` | 15 | The probe step is the hash rotated left by this many bits. |
+| `bloom_probe_percent` | 69 | `k` is `bits_per_key` times this, over 100, rounded down. |
 | `bloom_min_bits` | 64 | The smallest bit array of a filter. |
 | `bloom_max_probes` | 30 | The most probes; a larger count in a file is a filter the reader does not know. |
 <!-- /table:constants -->
