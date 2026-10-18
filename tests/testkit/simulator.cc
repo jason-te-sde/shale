@@ -6,8 +6,10 @@
 #include <cstdio>
 #include <deque>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -38,6 +40,9 @@ using State = ModelDB::State;
 using FaultOp = FaultInjectionEnv::Op;
 
 constexpr const char* kDbName = "/db";
+
+// What the Env puts in every error that it fails a call with on purpose.
+constexpr const char* kInjectedMarker = "injected";
 
 // The limits of what a run holds open at once.
 constexpr size_t kMaxSnapshots = 8;
@@ -222,15 +227,27 @@ std::string MessageOf(const Status& s) {
   return colon == std::string::npos ? text : text.substr(colon + 2);
 }
 
-// Enumerates what a batch does, in order: the key of each operation and whether it deletes.
+// Enumerates what a batch does, in order: for each operation its key, whether it deletes, and, if
+// asked, a digest of the value it puts.
 class BatchOps final : public WriteBatch::Handler {
  public:
-  void Put(std::string_view key, std::string_view /*value*/) override {
-    ops.emplace_back(std::string(key), false);
-  }
-  void Delete(std::string_view key) override { ops.emplace_back(std::string(key), true); }
+  struct Op {
+    std::string key;
+    bool deleted;
+    uint64_t value_digest;
+  };
 
-  std::vector<std::pair<std::string, bool>> ops;
+  explicit BatchOps(bool digest_values) : digest_values_(digest_values) {}
+
+  void Put(std::string_view key, std::string_view value) override {
+    ops.push_back({std::string(key), false, digest_values_ ? HashBytes(value) : 0});
+  }
+  void Delete(std::string_view key) override { ops.push_back({std::string(key), true, 0}); }
+
+  std::vector<Op> ops;
+
+ private:
+  const bool digest_values_;
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -287,7 +304,8 @@ class Simulator {
 
   SimResult Run() {
     ReopenMode mode = ReopenMode::kClose;
-    if (OpenDb(&mode)) {
+    bool damaged = false;
+    if (OpenDb(&mode, &damaged)) {
       prev_sequence_ = impl_->TEST_LastSequence();
       for (int step = 0; step < options_.steps && !failed_; step++) {
         step_ = step;
@@ -350,6 +368,13 @@ class Simulator {
   // that this has gone up across is one that a fault may explain.
   uint64_t FaultCount() const { return env_->injected_errors() + env_->injected_corruptions(); }
 
+  // Remembers what the Env has injected so far, for an error that the step ends with to be
+  // explained by what was injected since.
+  void MarkStep() {
+    step_errors_ = env_->injected_errors();
+    step_corruptions_ = env_->injected_corruptions();
+  }
+
   // What a check found, as the simulator acts on it.
   enum class Verdict : uint8_t {
     kPass,        // the invariant holds
@@ -388,13 +413,17 @@ class Simulator {
   // Opens the database and installs it, or fails the run. An open that fails while a fault fired
   // during it is allowed, since a fault is what made it fail: the faults are cleared and the
   // database is opened again, which must work. One that fails with no fault fired, or when
-  // nothing is armed, is a finding.
-  bool OpenDb(ReopenMode* mode) {
+  // nothing is armed, is a finding. `*damaged` is set if the open that worked had a read corrupted
+  // during it.
+  bool OpenDb(ReopenMode* mode, bool* damaged) {
+    *damaged = false;
     for (int attempt = 0; attempt < 2; attempt++) {
       std::unique_ptr<DB> real;
       const uint64_t before = FaultCount();
+      const uint64_t corruptions_before = env_->injected_corruptions();
       const Status s = DB::Open(db_options_, kDbName, &real);
       if (s.ok()) {
+        *damaged = env_->injected_corruptions() > corruptions_before;
         impl_ = dynamic_cast<DBImpl*>(real.get());
         SHALE_CHECK(impl_ != nullptr, "DB::Open returned something that is not a DBImpl");
         db_ = options_.wrap_db ? options_.wrap_db(std::move(real)) : std::move(real);
@@ -512,16 +541,47 @@ class Simulator {
     db_.reset();
     impl_ = nullptr;
 
-    // A read fault is not left armed across the open: a bit flipped in the log can look like a
-    // log that was cut off, which recovery rightly tolerates, and then there is no telling that a
-    // write was lost to the fault and not to the engine. The faults of the write side may stay,
-    // and are cleared half the time, so that the open then runs with nothing armed.
+    // Read corruption is off for the open, except on one process crash in four, when it is on
+    // for the open alone (D6: a bit flipped in what the open reads must fail it, and then
+    // nothing is lost, which the clean open that follows shows by I4; or the open works, and
+    // is looked at as CheckDamagedOpen() says, and undone). The faults of the write side may stay
+    // armed, and are cleared half the time, so that the open then runs with nothing armed.
     env_->SetReadCorruptionProbability(0.0);
     corruption_left_ = 0;
     if (rng_.OneIn(2)) {
       ClearFaults();
     }
-    if (!OpenDb(&mode)) {
+    const bool corrupt_open =
+        mode == ReopenMode::kProcessCrash && options_.read_corruption && rng_.OneIn(4);
+    std::map<std::string, std::string> before_open;
+    if (corrupt_open) {
+      before_open = CaptureDirectory();
+      env_->SetReadCorruptionProbability(kCorruptionProbability);
+    }
+    bool damaged = false;
+    bool opened = OpenDb(&mode, &damaged);
+    env_->SetReadCorruptionProbability(0.0);
+    if (opened && damaged) {
+      // The open worked, with a corrupted read in it: see CheckDamagedOpen().
+      stats_.damaged_opens++;
+      Note("opened after a process crash with a read corrupted during the open");
+      if (Judge(CheckDamagedOpen(), false, "the check of an open that damage touched") !=
+          Verdict::kPass) {
+        return false;
+      }
+      AccumulateCounters();
+      db_.reset();
+      impl_ = nullptr;
+      ClearFaults();
+      RestoreDirectory(before_open);
+      opened = OpenDb(&mode, &damaged);
+    }
+    Note(std::string("opened after ") +
+         (mode == ReopenMode::kPowerLoss
+              ? "a power loss"
+              : (mode == ReopenMode::kProcessCrash ? "a process crash" : "a close")) +
+         (corrupt_open ? ", with read corruption armed" : ""));
+    if (!opened) {
       return false;
     }
     stats_.reopens++;
@@ -536,6 +596,8 @@ class Simulator {
       return false;
     }
 
+    // After a process crash everything that was acknowledged is there; after a power loss nothing
+    // is certain but what was synced.
     const size_t min_prefix = mode == ReopenMode::kPowerLoss ? 0 : acked_;
     State matched;
     if (!CheckRecovery(min_prefix, &matched)) {
@@ -583,6 +645,73 @@ class Simulator {
     return false;
   }
 
+  // What is in the database directory, file by file, as readers see it.
+  std::map<std::string, std::string> CaptureDirectory() {
+    std::map<std::string, std::string> files;
+    std::vector<std::string> names;
+    SHALE_CHECK(env_->GetChildren(kDbName, &names).ok(), "the simulator cannot list its directory");
+    for (const std::string& name : names) {
+      files[name] = env_->FileContents(std::string(kDbName) + "/" + name);
+    }
+    return files;
+  }
+
+  // Makes the database directory hold exactly `files`: what the open that is being undone made is
+  // removed, and what it deleted is put back. The Env marks what it is given as synced, which is
+  // more than a crash leaves of bytes that were only handed to the system, but the open that
+  // follows makes all of it durable at once, and nothing in between can crash.
+  void RestoreDirectory(const std::map<std::string, std::string>& files) {
+    std::vector<std::string> names;
+    SHALE_CHECK(env_->GetChildren(kDbName, &names).ok(), "the simulator cannot list its directory");
+    for (const std::string& name : names) {
+      SHALE_CHECK(env_->RemoveFile(std::string(kDbName) + "/" + name).ok(),
+                  "the simulator cannot remove a file of its directory");
+    }
+    for (const auto& [name, contents] : files) {
+      env_->SetFileContents(std::string(kDbName) + "/" + name, contents);
+    }
+  }
+
+  // What to make of an open that worked although a read was corrupted during it. The log's reader
+  // cannot tell one damage from the end that a crash leaves (the header of log_reader.h says so):
+  // a length that a flipped bit made longer than what is left of the file looks like a record that
+  // the crash cut off, so the reader stops there, silently, and what follows that record in the
+  // file is gone, a synced write among it, and from a MANIFEST the edits of flushes and
+  // compactions, whose inputs are deleted by then. Where in the file the flip falls is nothing the
+  // Env says, and this happens in about one open in a hundred that has corruption armed. So I4 is
+  // not owed by that database, and the run does not go on with it. It is looked at for what no
+  // damage excuses: it must serve its entries in order and every value in it must be one that
+  // some write put under that key, so that a damaged record that the reader accepted would show.
+  // A database that cannot be read is not a finding either, for the same reason. Then the
+  // directory is put back as the crash left it and opened again with nothing armed, which owes I4
+  // in full.
+  Status CheckDamagedOpen() {
+    State actual;
+    const std::unique_ptr<Iterator> iterator = db_->NewIterator(ReadOptions());
+    const std::string* previous = nullptr;
+    for (iterator->SeekToFirst(); iterator->Valid(); iterator->Next()) {
+      const auto [position, inserted] =
+          actual.emplace(std::string(iterator->key()), std::string(iterator->value()));
+      if (!inserted || (previous != nullptr && !(*previous < position->first))) {
+        return Status::Corruption("I4: a scan serves key " + Show(position->first) +
+                                  " out of ascending order after an open that damage touched");
+      }
+      previous = &position->first;
+    }
+    if (!iterator->status().ok()) {
+      stats_.unreadable_opens++;
+      return Status::OK();
+    }
+    for (const auto& [key, value] : actual) {
+      const auto found = written_.find(key);
+      if (found == written_.end() || found->second.count(HashBytes(value)) == 0) {
+        return Status::Corruption("I4: after an open that damage touched, key " + Show(key) +
+                                  " has value " + Show(value) + ", which no write put under it");
+      }
+    }
+    return Status::OK();
+  }
+
   // ------------------------------------------------------------------------------------------
   // The steps.
 
@@ -617,7 +746,7 @@ class Simulator {
   }
 
   void RunStep() {
-    step_mark_ = FaultCount();
+    MarkStep();
     if (corruption_left_ > 0 && --corruption_left_ == 0) {
       env_->SetReadCorruptionProbability(0.0);
     }
@@ -759,12 +888,24 @@ class Simulator {
     }
   }
 
-  // The database has stopped writing, and an injected fault must be why. The next write must fail
-  // too (I6), and then the database is closed, or crashed, and opened again.
+  // The database has stopped writing, and an injected fault must be why: one that fired during
+  // this step, and, where only calls were failed and no read was corrupted, an error that says so,
+  // since the Env marks every failure it injects and a database that turns it into something else
+  // has lost what went wrong. The database goes on serving reads while it is stopped, and they
+  // must be right (D4, D5): they are read. The next write must fail too (I6), and then the
+  // database is closed, or crashed, and opened again.
   void HandleError() {
     stats_.write_failures++;
-    if (FaultCount() <= step_mark_) {
+    const uint64_t errors = env_->injected_errors() - step_errors_;
+    const uint64_t corruptions = env_->injected_corruptions() - step_corruptions_;
+    if (errors == 0 && corruptions == 0) {
       Fail("I5: unexpected error, " + error_text_ + ", and no fault fired during this step");
+      return;
+    }
+    if (corruptions == 0 && error_text_.find(kInjectedMarker) == std::string::npos) {
+      Fail("I5: unexpected error, " + error_text_ +
+           ", which does not say it was injected, "
+           "although only failed calls and no corrupted read fired during this step");
       return;
     }
     WriteBatch probe;
@@ -777,12 +918,17 @@ class Simulator {
       Fail("I6: a write succeeded after the database stopped writes (" + error_text_ + ")");
       return;
     }
+    FullReadCheck();
+    if (failed_) {
+      return;
+    }
+    // Most of the time the power goes: the files then hold what the failed work left, as far as
+    // it was synced and a prefix of the rest, and recovery has to make sense of them.
     ReopenMode mode = ReopenMode::kClose;
     if (options_.crashes) {
-      const uint32_t pick = rng_.Uniform(3);
-      mode = pick == 0   ? ReopenMode::kProcessCrash
-             : pick == 1 ? ReopenMode::kClose
-                         : ReopenMode::kPowerLoss;
+      const uint32_t pick = rng_.Uniform(6);
+      mode = pick < 4 ? ReopenMode::kPowerLoss
+                      : (pick == 4 ? ReopenMode::kProcessCrash : ReopenMode::kClose);
     }
     Reopen(mode);
   }
@@ -866,6 +1012,7 @@ class Simulator {
     if (sync) {
       stats_.sync_writes++;
     }
+    NoteAttempted(batch);     // a write that fails may still be there after a crash
     WriteBatch sent = batch;  // the database numbers the batch it is given, which changes it
     WriteOptions write_options;
     write_options.sync = sync;
@@ -896,19 +1043,32 @@ class Simulator {
 
   // Remembers the keys that `batch` deleted, and forgets those it wrote.
   void NoteWritten(const WriteBatch& batch) {
-    BatchOps ops;
+    BatchOps ops(/*digest_values=*/false);
     const Status s = batch.Iterate(&ops);
     SHALE_CHECK(s.ok(), "a batch the simulator built does not decode: " + s.ToString());
-    for (const auto& [key, deleted] : ops.ops) {
-      const auto found = std::find(recently_deleted_.begin(), recently_deleted_.end(), key);
+    for (const BatchOps::Op& op : ops.ops) {
+      const auto found = std::find(recently_deleted_.begin(), recently_deleted_.end(), op.key);
       if (found != recently_deleted_.end()) {
         recently_deleted_.erase(found);
       }
-      if (deleted) {
-        recently_deleted_.push_back(key);
+      if (op.deleted) {
+        recently_deleted_.push_back(op.key);
         if (recently_deleted_.size() > kRecentlyDeleted) {
           recently_deleted_.erase(recently_deleted_.begin());
         }
+      }
+    }
+  }
+
+  // Remembers every value that `batch` puts, for the check of an open that damage may have cost
+  // writes, which holds the database to nothing more than having only values that were written.
+  void NoteAttempted(const WriteBatch& batch) {
+    BatchOps ops(/*digest_values=*/true);
+    const Status s = batch.Iterate(&ops);
+    SHALE_CHECK(s.ok(), "a batch the simulator built does not decode: " + s.ToString());
+    for (const BatchOps::Op& op : ops.ops) {
+      if (!op.deleted) {
+        written_[op.key].insert(op.value_digest);
       }
     }
   }
@@ -1282,7 +1442,7 @@ class Simulator {
   void Finish() {
     ClearFaults();
     env_->SetReadCorruptionProbability(0.0);
-    step_mark_ = FaultCount();
+    MarkStep();
     for (IteratorRecord& record : iterators_) {
       uint64_t digest = 0;
       Status result;
@@ -1343,6 +1503,8 @@ class Simulator {
                                    stats_.open_failures,
                                    stats_.orphan_checks,
                                    stats_.deepest_level,
+                                   stats_.damaged_opens,
+                                   stats_.unreadable_opens,
                                    total_.shadowed_dropped,
                                    total_.user_bytes_written,
                                    total_.wal_bytes_written,
@@ -1395,6 +1557,7 @@ class Simulator {
   std::vector<WriteBatch> uncertain_;
   size_t acked_ = 0;
   std::vector<std::string> recently_deleted_;
+  std::map<std::string, std::set<uint64_t>> written_;  // key to digests of the values ever put
   uint64_t write_number_ = 0;
 
   // The sequence number the database had reached at the last check, and at the newest durable
@@ -1406,7 +1569,8 @@ class Simulator {
   bool faults_armed_ = false;  // a failure was armed since the faults were last cleared
   bool remove_dirty_ = false;  // a RemoveFile failure may have left a table for a later sweep
   int corruption_left_ = 0;
-  uint64_t step_mark_ = 0;  // FaultCount() at the start of the step
+  uint64_t step_errors_ = 0;       // the Env's injected errors at the start of the step
+  uint64_t step_corruptions_ = 0;  // and its corrupted reads
   bool unswept_ = false;
   uint64_t unswept_baseline_ = 0;
 

@@ -29,6 +29,31 @@ TEST(DeterminismTest, SameSeedSameTrace) {
   }
 }
 
+// The digests of three seeds as they were when the simulator was finished, taken with AppleClang
+// and again with GCC 16, which agree. A run depends on the engine only through what it does, and
+// not through how a compiler or a standard library lays things out, so these are the digests on
+// every toolchain, and CI proves it on GCC 13 and 14, Clang 18 and AppleClang. A digest that
+// changes is a change of what a run does: of the simulator, of the engine's behaviour, or of a
+// toolchain's, and the first two are meant when they come with a commit that says so, and are
+// accepted by pinning the new values. The third is a bug of the replay that this test is for.
+struct Golden {
+  uint64_t seed;
+  uint64_t digest;
+};
+constexpr Golden kGolden[] = {
+    {1, 0x6bddfba3c2c48defULL},
+    {42, 0x97b2ebfd99934cefULL},
+    {8123, 0x3960d90712559c9bULL},
+};
+
+TEST(DeterminismTest, TracesAreTheSameOnEveryToolchain) {
+  for (const Golden& golden : kGolden) {
+    const SimResult result = RunSeed(golden.seed);
+    ASSERT_TRUE(result.ok) << result.failure;
+    EXPECT_EQ(result.trace_digest, golden.digest) << "seed " << golden.seed;
+  }
+}
+
 TEST(DeterminismTest, DifferentSeedsDiffer) {
   const SimResult one = RunSeed(1);
   const SimResult two = RunSeed(2);

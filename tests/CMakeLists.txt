@@ -117,8 +117,9 @@ shale_add_library(shale_simulator
 shale_add_test(sim SOURCES sim/sim_test.cc LIBS shale_simulator)
 target_compile_definitions(sim_test PRIVATE
   SHALE_REGRESSION_SEEDS_PATH="${CMAKE_CURRENT_SOURCE_DIR}/sim/regression_seeds.txt")
-# Fifty seeds of two thousand steps take about half a minute in a debug build and some six minutes
-# under ThreadSanitizer, which is more than the default of five minutes a test is given.
+# Fifty seeds of two thousand steps, with the runs of the other tests, take about a minute in a
+# debug build and some ten minutes under ThreadSanitizer, which is more than the default of five
+# minutes a test is given.
 set_tests_properties(sim_test PROPERTIES TIMEOUT 1800)
 shale_add_test(determinism SOURCES sim/determinism_test.cc LIBS shale_simulator)
 

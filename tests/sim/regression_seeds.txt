@@ -1,1 +1,2 @@
 # seeds that once failed; one per line
+2240  # the failed switch to a MANIFEST deleted the file CURRENT names, after a misread of CURRENT

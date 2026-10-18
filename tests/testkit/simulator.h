@@ -60,6 +60,8 @@ struct SimStats {
   uint64_t open_failures = 0;                ///< Opens that failed, for a fault that explains it.
   uint64_t orphan_checks = 0;                ///< Times the directory was checked for orphan tables.
   uint64_t deepest_level = 0;                ///< The deepest level that held a table at a check.
+  uint64_t damaged_opens = 0;                ///< Opens that worked with a read corrupted in them.
+  uint64_t unreadable_opens = 0;             ///< Of them, those that left a database not readable.
 
   /// Whether every counter is equal.
   bool operator==(const SimStats&) const = default;
@@ -95,11 +97,33 @@ struct SimResult {
 ///
 /// The run stops at the first failure and returns it. It does not throw.
 ///
-/// A run is a function of its options on one toolchain: the same options give the same operations,
-/// the same answers and the same trace digest, in any build of it, sanitizers included. Across
-/// toolchains they can differ, because the engine decides when a memtable is full by the memory its
-/// arena has taken, and the arena pads to alignof(std::max_align_t), which is 8 for AppleClang on
-/// arm64 and 16 for GCC. A seed that a CI run reports reproduces on the toolchain that reported it.
+/// **The crash model.** A crash is made between two operations, never inside one, and a background
+/// task, a flush or a compaction, is one operation to the driver, so the machine is never stopped
+/// in the middle of one. What a crash finds in the middle of a task is reached the other way: an
+/// armed failure of an Env call that fires inside the task leaves what the task had written, and
+/// stops the database, and the reopen that follows, after the next write has been shown to fail,
+/// is a power loss in four cases of six, a process crash in one and a clean close in one, so that
+/// the files are mostly as a power loss leaves them. A power loss keeps what was synced and a
+/// prefix of the rest, and one in three keeps only what was synced. An open that fails for a
+/// fault is followed, half the time, by another crash before the open is tried again.
+///
+/// **Corruption during an open.** On one process crash in four, read corruption is armed for the
+/// open. An open that fails for it must lose nothing: the open that follows, with nothing armed,
+/// is held to I4 in full. An open that works although a read was corrupted is another matter,
+/// because the reader of a log cannot tell a record whose length a flipped bit has made longer than
+/// what is left of the file from the end that a crash leaves (see log_reader.h): it stops there
+/// without a report, and what follows in that file is gone, a synced write among it, or a
+/// MANIFEST's edit with the files they name. That is not an invariant to hold such a database to.
+/// It is looked at for what no damage excuses, that it serves its entries in order and that each
+/// value in it was put under that key by some write, and then undone: the directory is put back as
+/// the crash left it and opened again with nothing armed, which owes I4 in full. About one run in
+/// three hundred meets such an open.
+///
+/// **Replay.** A run is a function of its options, on every toolchain: the same options give the
+/// same operations, the same answers and the same trace digest, in any build, with any compiler
+/// and standard library. The engine's memtable is full when its arena says so, and the arena
+/// pads to a constant, not to alignof(std::max_align_t), which is why. determinism_test pins the
+/// digests of three seeds, so that a toolchain that differs is seen.
 /// @param options the seed and the shape of the run.
 SimResult RunSimulation(const SimOptions& options);
 

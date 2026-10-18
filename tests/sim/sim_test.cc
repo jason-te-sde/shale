@@ -90,23 +90,26 @@ void Add(SimStats* total, const SimStats& part) {
   total->read_failures += part.read_failures;
   total->open_failures += part.open_failures;
   total->orphan_checks += part.orphan_checks;
+  total->damaged_opens += part.damaged_opens;
+  total->unreadable_opens += part.unreadable_opens;
   total->deepest_level = std::max(total->deepest_level, part.deepest_level);
 }
 
 // The least that the totals of the 50 seeds of the default run (2000 steps each, 200 keys) may be,
-// each as half of what the simulator observed over those seeds when it was finished, in a debug
-// build with AppleClang (a release build with GCC 16 observed within a percent of the same):
+// each as half of what the simulator observed over those seeds when the review's changes were
+// made, in a debug build with AppleClang. A release build with GCC 16 observed exactly the same
+// totals, as it does of every run:
 //
 //                                         observed    floor
-//   power losses                              1155      577
-//   process crashes                           1248      624
-//   flushes                                   5421     2710
-//   compactions                               3625     1812
-//   tombstones dropped                       14580     7290
-//   snapshots held across a compaction         695      347
-//   iterators held across a compaction         888      444
-//   injected errors                            728      364
-//   injected corruptions                      1100      550
+//   power losses                              1327      663
+//   process crashes                           1100      550
+//   flushes                                   5495     2747
+//   compactions                               3726     1863
+//   tombstones dropped                       14851     7425
+//   snapshots held across a compaction         779      389
+//   iterators held across a compaction         877      438
+//   injected errors                            671      335
+//   injected corruptions                      1408      704
 //
 // A simulator that stops provoking something, because an operation was reweighted or a
 // precondition began to skip it, falls under its floor and fails here, where a run that merely
@@ -122,7 +125,7 @@ struct Floors {
   uint64_t injected_errors;
   uint64_t injected_corruptions;
 };
-constexpr Floors kFloors = {577, 624, 2710, 1812, 7290, 347, 444, 364, 550};
+constexpr Floors kFloors = {663, 550, 2747, 1863, 7425, 389, 438, 335, 704};
 
 // The floors are those of kDefaultSeeds seeds of kDefaultSteps steps, and scale with the number of
 // seeds, which is what a longer run is for. A run with other steps, or with too few seeds for the
@@ -134,7 +137,7 @@ void ExpectFierce(const SimStats& total, uint64_t seeds, int steps, int keys) {
       "trivial_moves=%llu tombstones_dropped=%llu snapshots_across_compaction=%llu "
       "iterators_across_compaction=%llu injected_errors=%llu injected_corruptions=%llu "
       "write_failures=%llu read_failures=%llu open_failures=%llu orphan_checks=%llu "
-      "deepest_level=%llu\n",
+      "damaged_opens=%llu unreadable_opens=%llu deepest_level=%llu\n",
       static_cast<unsigned long long>(seeds), steps, static_cast<unsigned long long>(total.steps),
       static_cast<unsigned long long>(total.writes),
       static_cast<unsigned long long>(total.sync_writes),
@@ -153,6 +156,8 @@ void ExpectFierce(const SimStats& total, uint64_t seeds, int steps, int keys) {
       static_cast<unsigned long long>(total.read_failures),
       static_cast<unsigned long long>(total.open_failures),
       static_cast<unsigned long long>(total.orphan_checks),
+      static_cast<unsigned long long>(total.damaged_opens),
+      static_cast<unsigned long long>(total.unreadable_opens),
       static_cast<unsigned long long>(total.deepest_level));
   if (steps != kDefaultSteps || keys != kDefaultKeys || seeds < 20) {
     return;
@@ -255,19 +260,22 @@ TEST(SimulationTest, CrashFreeRunsToo) {
 
 TEST(SimulationTest, ALargerKeySpaceGoesDeeper) {
   // With the sizes the simulator gives the engine, 200 keys fit in the first three levels and the
-  // deeper ones are never reached. A larger key space does reach them, with crashes and faults on
-  // and, with none, over a database that nothing interrupts.
-  for (const bool disturbed : {true, false}) {
+  // deeper ones are never reached, but for a seed or two in a thousand. A larger key space reaches
+  // level 3 in every run: eight seeds with crashes and faults on, and one over a database that
+  // nothing interrupts.
+  for (uint64_t seed = 0; seed < 9; seed++) {
+    const bool disturbed = seed < 8;
     SimOptions options;
-    options.seed = 7;
+    options.seed = seed;
     options.key_space = 1500;
-    options.steps = disturbed ? 3000 : 2500;
+    options.steps = 2500;
     options.crashes = disturbed;
     options.io_errors = disturbed;
     options.read_corruption = disturbed;
     const SimResult result = RunSeed(options);
     ASSERT_TRUE(result.ok) << result.failure;
-    EXPECT_GE(result.stats.deepest_level, 3u) << (disturbed ? "disturbed" : "undisturbed");
+    EXPECT_GE(result.stats.deepest_level, 3u)
+        << "seed " << seed << (disturbed ? " with crashes and faults" : " without");
   }
 }
 
@@ -288,6 +296,12 @@ struct Misbehavior {
   // A Write is acknowledged and not applied once the database has stopped writes: its error is
   // not sticky.
   bool accept_write_after_error = false;
+  // A write that fails reports an error that says nothing of its cause, as one that was wrapped
+  // and lost the Env's words.
+  bool launder_errors = false;
+  // Every Get finds nothing once the database has stopped writes, as if a flush that failed had
+  // taken the memtable it was writing out from the read path. Reads are to go on, and be right.
+  bool forget_reads_after_error = false;
 
   uint64_t gets = 0;
   uint64_t writes = 0;
@@ -326,13 +340,23 @@ class DoubleDB final : public DB {
     if (m_->ignore_sync) {
       actual.sync = false;
     }
-    return real_->Write(actual, updates);
+    const Status s = real_->Write(actual, updates);
+    if (!s.ok() && m_->launder_errors) {
+      return Status::IOError("double: a write failed");
+    }
+    return s;
   }
 
   Status Get(const ReadOptions& options, std::string_view key, std::string* value) override {
     m_->gets++;
     if (m_->fail_gets_from.has_value() && m_->gets >= *m_->fail_gets_from) {
       return Status::IOError("double: a read that fails for no reason");
+    }
+    if (m_->forget_reads_after_error) {
+      std::string error;
+      if (real_->GetProperty("shale.background-error", &error) && error != "OK") {
+        return Status::NotFound("double: the memtable is gone");
+      }
     }
     return real_->Get(options, key, value);
   }
@@ -438,6 +462,34 @@ TEST(SimulationDoublesTest, ASyncThatDoesNotSyncFailsTheRunAtAPowerLoss) {
     }
   }
   EXPECT_TRUE(noticed) << "no seed of twenty noticed that acknowledged synced writes were lost";
+}
+
+TEST(SimulationDoublesTest, AReadThatForgetsDataAfterAnErrorFailsTheRun) {
+  // A database that has stopped writes goes on serving reads, and the simulator must read it
+  // before it reopens it, or a read path that an error broke is never looked at.
+  for (uint64_t seed = 0; seed < 5; seed++) {
+    auto misbehavior = std::make_shared<Misbehavior>();
+    misbehavior->forget_reads_after_error = true;
+    const SimResult result = RunSeed(OptionsWithDouble(seed, misbehavior));
+    ASSERT_FALSE(result.ok) << "seed " << seed << " did not read a database that had stopped";
+    EXPECT_EQ(result.failure.find("I1: "), 0u) << result.failure;
+  }
+}
+
+TEST(SimulationDoublesTest, AnErrorThatLostItsCauseFailsTheRun) {
+  // Only calls that the Env failed on purpose fired in the step, and the Env says "injected" in
+  // every error it makes. A fault that fired is no excuse for an error that does not carry it.
+  bool noticed = false;
+  for (uint64_t seed = 0; seed < 20 && !noticed; seed++) {
+    auto misbehavior = std::make_shared<Misbehavior>();
+    misbehavior->launder_errors = true;
+    const SimResult result = RunSeed(OptionsWithDouble(seed, misbehavior));
+    if (!result.ok) {
+      noticed = true;
+      EXPECT_TRUE(Contains(result.failure, "does not say it was injected")) << result.failure;
+    }
+  }
+  EXPECT_TRUE(noticed) << "no seed of twenty noticed an error without its cause";
 }
 
 TEST(SimulationDoublesTest, AWriteAcceptedAfterAnErrorFailsTheRun) {
