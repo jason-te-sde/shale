@@ -16,3 +16,12 @@ target_include_directories(shalectl PRIVATE "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(shalectl PRIVATE shale_cli shale_verify shale_db)
 set_target_properties(shalectl PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/tools")
 shale_set_warnings(shalectl)
+
+# The crash test forks a writer, kills it and reopens the database. It reaches the engine through the
+# public interface, and the internal headers only for file names, the byte coding and the seeded
+# generator.
+add_executable(shale_crashtest shale_crashtest.cc)
+target_include_directories(shale_crashtest PRIVATE "${PROJECT_SOURCE_DIR}/src")
+target_link_libraries(shale_crashtest PRIVATE shale_cli shale_db)
+set_target_properties(shale_crashtest PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/tools")
+shale_set_warnings(shale_crashtest)

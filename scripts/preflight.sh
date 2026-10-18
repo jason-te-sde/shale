@@ -94,6 +94,14 @@ CC=gcc-16 CXX=g++-16 cmake --preset release -B build/gcc
 cmake --build build/gcc
 ctest --test-dir build/gcc --output-on-failure --no-tests=error
 
+# The crash job of .github/workflows/ci.yml, on the Release build above: the tests of that build ran
+# only the three rounds of the smoke test. A failed run leaves its database in the directory that
+# the tool names.
+stage "crash test"
+crash_dir="$(mktemp -d)"
+build/gcc/tools/shale_crashtest --rounds=20 --seed=7 --db="$crash_dir/db"
+rm -rf "$crash_dir"
+
 stage "clang-tidy"
 # The standalone clang-tidy does not ask Xcode where the SDK is, so it cannot find <string>.
 if [ "$(uname -s)" = Darwin ] && [ -z "${SDKROOT:-}" ]; then

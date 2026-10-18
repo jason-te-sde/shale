@@ -169,6 +169,59 @@ jobs:
           path: build/flaw-${{ matrix.flaw }}/sim-output.log
           if-no-files-found: ignore
 
+  # The engine under a real kill: a writer process is stopped with SIGKILL at a random moment, and
+  # every key it was told was stored must be there when the database is opened again. The simulator
+  # cannot show this, since its filesystem is not the real one, and the unit tests never kill a
+  # process. macOS is here because its Env syncs with F_FULLFSYNC, a different path from Linux's.
+  crash:
+    name: crash (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the toolchain
+        env:
+          OS: ${{ matrix.os }}
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          if [ "$OS" = macos-14 ]; then
+            brew install ninja
+          else
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends ninja-build
+          fi
+
+      # Only the tool is built, so that GoogleTest is not fetched.
+      - name: Configure
+        run: >
+          cmake -S . -B build/crash -G Ninja -DCMAKE_BUILD_TYPE=Release -DSHALE_BUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build/crash --target shale_crashtest
+
+      # The seed changes with every run, so that the kills land in different places; it is printed
+      # on the first line of the output, and with it a failed run can be repeated.
+      - name: Kill the writer twenty times, and check the database each time
+        env:
+          SEED: ${{ github.run_number }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/crash"
+          build/crash/tools/shale_crashtest --rounds=20 --seed="$SEED" --db="$RUNNER_TEMP/crash/db"
+
+      - name: Upload the database
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: crash-db-${{ matrix.os }}
+          path: ${{ runner.temp }}/crash
+          if-no-files-found: ignore
+
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
