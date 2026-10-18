@@ -68,7 +68,22 @@ $ shalectl --db=/tmp/shale-demo --create put user:1 alice
 $ shalectl --db=/tmp/shale-demo put user:2 bob
 $ shalectl --db=/tmp/shale-demo get user:1
 alice
+$ shalectl --db=/tmp/shale-demo scan
+user:1	alice
+user:2	bob
 $ shalectl --db=/tmp/shale-demo delete user:2
+$ ls /tmp/shale-demo
+000005.sst
+000008.sst
+000012.log
+CURRENT
+LOCK
+LOG
+LOG.old
+MANIFEST-000013
+$ shalectl dump-wal /tmp/shale-demo/000012.log
+batch seq=3 count=1
+  del user:2
 $ shalectl --db=/tmp/shale-demo scan
 user:1	alice
 $ shalectl --db=/tmp/shale-demo get user:2
@@ -76,23 +91,9 @@ shalectl: not found
 $ echo $?
 1
 $ shalectl --db=/tmp/shale-demo flush
-$ shalectl --db=/tmp/shale-demo put user:3 carol
-$ ls /tmp/shale-demo
-000005.sst
-000008.sst
-000013.sst
-000019.log
-CURRENT
-LOCK
-LOG
-LOG.old
-MANIFEST-000020
-$ shalectl dump-wal /tmp/shale-demo/000019.log
-batch seq=4 count=1
-  put user:3 carol
 $ shalectl --db=/tmp/shale-demo verify
 ok
-$ shalectl dump-sst /tmp/shale-demo/000013.sst
+$ shalectl dump-sst /tmp/shale-demo/000015.sst
 user:2 seq=3 type=del value=
 $ shalectl dump-manifest /tmp/shale-demo/MANIFEST-000020
 VersionEdit {
@@ -101,22 +102,25 @@ VersionEdit {
   last_sequence: 3
   add L0 #5 size=129 smallest='user:1'@1:value largest='user:1'@1:value
   add L0 #8 size=127 smallest='user:2'@2:value largest='user:2'@2:value
-  add L0 #13 size=124 smallest='user:2'@3:deletion largest='user:2'@3:deletion
+  add L0 #15 size=124 smallest='user:2'@3:deletion largest='user:2'@3:deletion
 }
 $ shalectl --db=/tmp/shale-demo stats
 shale stats
-Level 0: 4 files, 509 bytes
+Level 0: 3 files, 380 bytes
 Level 1: 0 files, 0 bytes
 Level 2: 0 files, 0 bytes
 Level 3: 0 files, 0 bytes
 Level 4: 0 files, 0 bytes
 Level 5: 0 files, 0 bytes
 Level 6: 0 files, 0 bytes
-Counters: flushes=1 compactions=0 trivial_moves=0 tombstones_dropped=0 shadowed_dropped=0 user_bytes_written=0 wal_bytes_written=0 flush_bytes_written=129 compaction_bytes_read=0 compaction_bytes_written=0 write_groups=0 wal_syncs=0 write_slowdowns=0 write_stops=0 bg_errors=0
+Counters: flushes=0 compactions=0 trivial_moves=0 tombstones_dropped=0 shadowed_dropped=0 user_bytes_written=0 wal_bytes_written=0 flush_bytes_written=0 compaction_bytes_read=0 compaction_bytes_written=0 write_groups=0 wal_syncs=0 write_slowdowns=0 write_stops=0 bg_errors=0
 ```
 
-Every command opens the database, and opening turns the log it finds into a table. That is why the first
-commands each left a `.sst` behind, and why the log of the last `put` was still there to be dumped.
+Every command except `verify` and the dumps opens the database, and opening turns the log it finds into a
+table. That is why the first commands each left a `.sst` behind, and why the log of the last write, the
+`delete`, was still there to be dumped. The sequence is shaped so that it never reaches four level-0 tables,
+which is where a compaction would start in the background while `stats` prints, and the transcript would
+differ from one run to the next; the test that runs it again says so.
 
 `verify` reads every live table with its checksums on, and the three dump commands print what is inside
 a table, a write-ahead log or a MANIFEST. What to do when they say something is wrong is in the
