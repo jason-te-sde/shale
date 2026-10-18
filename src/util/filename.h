@@ -8,7 +8,7 @@
 //   NNNNNN.log      write-ahead log
 //   NNNNNN.sst      sorted table
 //   MANIFEST-NNNNNN the list of live tables, as a log of changes
-//   CURRENT         the name of the live MANIFEST
+//   CURRENT         the name of the live MANIFEST, and a checksum of it
 //   LOCK            held while a process has the database open
 //   LOG, LOG.old    the informational log, and the one before the last restart
 //   NNNNNN.dbtmp    a file being written that has not been renamed into place

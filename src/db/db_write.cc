@@ -177,8 +177,13 @@ Status DBImpl::CommitGroup(Writer* leader, Writer** last_writer) {
   const bool appended = s.ok();
   bool synced = false;
   if (s.ok() && leader_syncs) {
+#if defined(SHALE_FLAW_SKIP_WAL_SYNC)
+    // Flaw skip_wal_sync: a write that asked for a sync is acknowledged without one.
+    static_cast<void>(wal_file);
+#else
     s = wal_file->Sync();
     synced = s.ok();
+#endif
   }
   if (s.ok()) {
     // The batch is a well formed one, made by WriteBatch::Put() and Delete(), and its sequence

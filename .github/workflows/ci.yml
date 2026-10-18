@@ -89,8 +89,11 @@ jobs:
         include:
           - sanitizer: address,undefined
             ctest_args: ""
+          # The simulator and its determinism test are single-threaded, so ThreadSanitizer has
+          # nothing to find in them, and three runs of them took most of this job's time budget:
+          # they run once, below, with fewer seeds, and every other test runs three times.
           - sanitizer: thread
-            ctest_args: --repeat until-fail:3
+            ctest_args: --repeat until-fail:3 -E ^(sim|determinism)_test$
     steps:
       - uses: actions/checkout@v7
 
@@ -119,12 +122,63 @@ jobs:
         # CTEST_ARGS is deliberately unquoted: it is a list of words, and empty for the first entry.
         run: ctest --test-dir build/sanitize --output-on-failure --no-tests=error $CTEST_ARGS
 
+      # Twenty seeds is the fewest for which the simulator still asserts its scaled floors.
+      - name: Test the simulator once
+        if: matrix.sanitizer == 'thread'
+        env:
+          SHALE_SIM_SEEDS: "20"
+        run: >
+          ctest --test-dir build/sanitize --output-on-failure --no-tests=error
+          -R "^(sim|determinism)_test$"
+
       - name: Upload the test log
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: test-log-sanitize-${{ matrix.sanitizer }}
           path: build/**/Testing/Temporary/LastTest.log
+          if-no-files-found: ignore
+
+  # A suite that has only passed has not shown that it can fail. Each job builds the simulator with
+  # one deliberate flaw compiled in and requires it to go red, so a green job means the flaw was
+  # caught, and its summary names the invariant that caught it. Keep the names in step with
+  # SHALE_FLAW_NAMES in cmake/ShaleOptions.cmake.
+  flaws:
+    name: flaws (${{ matrix.flaw }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    strategy:
+      fail-fast: false
+      matrix:
+        flaw:
+          - skip_wal_sync
+          - skip_dir_sync
+          - drop_tombstones_early
+          - ignore_snapshots_in_compaction
+          - skip_manifest_sync
+          - delete_live_files
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang-18
+
+      - name: Build the simulator with the flaw in, and require it to fail
+        env:
+          FLAW: ${{ matrix.flaw }}
+        run: scripts/run-flaws.sh "$FLAW"
+
+      - name: Upload the simulator output
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sim-output-${{ matrix.flaw }}
+          path: build/flaw-${{ matrix.flaw }}/sim-output.log
           if-no-files-found: ignore
 
   lint:

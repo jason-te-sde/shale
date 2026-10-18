@@ -12,6 +12,11 @@
 //  2. CURRENT is switched to a new MANIFEST by renaming a synced file over it and syncing the
 //     directory, so a crash leaves it naming the old MANIFEST or the new one, whole.
 //
+// CURRENT is two lines, the name of the MANIFEST and "crc32c:" and the masked CRC32C of that line
+// in eight hex digits (see CurrentFileContents() in db/filename_io.h). Recover() accepts that form
+// and nothing else, so that a read of CURRENT that comes back with a bit flipped is refused and is
+// never taken for the name of another MANIFEST that is in the directory.
+//
 // The pure rules of what an edit may do live in core/version_state.h. This file adds the files.
 
 #include <cstdint>
@@ -103,10 +108,11 @@ inline constexpr uint64_t kMaxFileNumber = uint64_t{1} << 56;
 ///
 /// The MANIFEST is a log of VersionEdits, written with log::Writer. Its first record is a snapshot
 /// of the whole state and each later one an edit; replaying them in order rebuilds the current
-/// version. CURRENT names the live MANIFEST. A database is opened by Recover(), which reads it, and
-/// then by WriteNewManifest(), which starts a new MANIFEST: the one that was read may end in a torn
-/// record, which cannot be appended to, and a new one is a snapshot, which also keeps the log from
-/// growing for ever. After that, every change is LogAndApply().
+/// version. CURRENT names the live MANIFEST, with a checksum of the name. A database is opened by
+/// Recover(), which reads it, and then by WriteNewManifest(), which starts a new MANIFEST: the one
+/// that was read may end in a torn record, which cannot be appended to, and a new one is a
+/// snapshot, which also keeps the log from growing for ever. After that, every change is
+/// LogAndApply().
 ///
 /// A new database is CreateNew() and then LogAndApply().
 ///
@@ -241,9 +247,10 @@ class VersionSet {
   // On success the new MANIFEST is the open one and the earlier one is closed.
   Status OpenNewManifest(uint64_t number, const VersionEdit& snapshot);
 
-  // Whether CURRENT may be naming MANIFEST `number`, for after a switch to it failed: false only if
-  // CURRENT is seen to name something else, or to be absent.
-  bool CurrentMayNameManifest(uint64_t number);
+  // Whether CURRENT may be naming the MANIFEST that a switch was making, for after the switch
+  // failed: false only if CURRENT is seen to be absent, or to name the MANIFEST that was open
+  // before. A read of CURRENT that is neither of these, unreadable or wrong, leaves it that it may.
+  bool CurrentMayNameNewManifest();
 
   // Makes `state` the current version, and remembers the version for LiveFiles().
   void Install(VersionState state);

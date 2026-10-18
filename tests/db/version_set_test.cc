@@ -13,8 +13,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <memory>
 #include <set>
@@ -39,6 +41,7 @@
 #include "shale/status.h"
 #include "testkit/fault_env.h"
 #include "testkit/test_util.h"
+#include "util/crc32c.h"
 #include "util/dbformat.h"
 #include "util/filename.h"
 
@@ -53,6 +56,21 @@ using Op = FaultInjectionEnv::Op;
 std::string BareName(const std::string& path) { return path.substr(std::string(kDb).size() + 1); }
 
 std::string ManifestName(uint64_t number) { return BareName(DescriptorFileName(kDb, number)); }
+
+// The contents of a CURRENT whose first line is `first_line`: the line and its newline, and then
+// "crc32c:" and the eight lower-case hex digits of the masked CRC32C of the first line, newline
+// included, and a newline. Written here and not taken from the code that is tested, so that the
+// format is pinned by two things that cannot both be wrong the same way.
+std::string CurrentTextOf(const std::string& first_line) {
+  const std::string line = first_line + "\n";
+  char hex[16];
+  std::snprintf(hex, sizeof hex, "%08x",
+                static_cast<unsigned>(crc32c::Mask(crc32c::Value(line.data(), line.size()))));
+  return line + "crc32c:" + hex + "\n";
+}
+
+// The contents of a CURRENT that names MANIFEST `number`.
+std::string CurrentText(uint64_t number) { return CurrentTextOf(ManifestName(number)); }
 
 // A file as the version set records it. The keys are those of a table holding one entry for each
 // end; whether such a table exists does not matter to the tests that never read it.
@@ -176,7 +194,7 @@ class VersionSetFixture : public testing::Test {
     }
     ASSERT_OK(file->Sync());
     ASSERT_OK(file->Close());
-    env_.SetFileContents(CurrentFileName(kDb), ManifestName(number) + "\n");
+    env_.SetFileContents(CurrentFileName(kDb), CurrentText(number));
   }
 
   FaultInjectionEnv env_;
@@ -191,24 +209,24 @@ class SetCurrentFileTest : public VersionSetFixture {};
 
 TEST_F(SetCurrentFileTest, WritesTheManifestNameAndLeavesNoTempFile) {
   ASSERT_OK(SetCurrentFile(&checked_env_, kDb, 7));
-  EXPECT_EQ(CurrentContents(), "MANIFEST-000007\n");
+  EXPECT_EQ(CurrentContents(), CurrentText(7));
   EXPECT_EQ(DbFiles(), std::vector<std::string>{"CURRENT"});
 }
 
 TEST_F(SetCurrentFileTest, ANumberWiderThanSixDigitsIsPrintedInFull) {
   ASSERT_OK(SetCurrentFile(&checked_env_, kDb, 1234567));
-  EXPECT_EQ(CurrentContents(), "MANIFEST-1234567\n");
+  EXPECT_EQ(CurrentContents(), CurrentText(1234567));
 }
 
 TEST_F(SetCurrentFileTest, ReplacesAnExistingCurrent) {
-  env_.SetFileContents(CurrentFileName(kDb), "MANIFEST-000001\n");
+  env_.SetFileContents(CurrentFileName(kDb), CurrentText(1));
   ASSERT_OK(SetCurrentFile(&checked_env_, kDb, 12));
-  EXPECT_EQ(CurrentContents(), "MANIFEST-000012\n");
+  EXPECT_EQ(CurrentContents(), CurrentText(12));
   EXPECT_EQ(DbFiles(), std::vector<std::string>{"CURRENT"});
 }
 
 TEST_F(SetCurrentFileTest, FailedWriteKeepsTheOldCurrentAndLeavesNoTempFile) {
-  env_.SetFileContents(CurrentFileName(kDb), "MANIFEST-000001\n");
+  env_.SetFileContents(CurrentFileName(kDb), CurrentText(1));
   for (const Op op : {Op::kNewWritable, Op::kAppend, Op::kSync, Op::kClose, Op::kRename}) {
     SCOPED_TRACE(static_cast<int>(op));
     env_.ClearFaults();
@@ -216,7 +234,7 @@ TEST_F(SetCurrentFileTest, FailedWriteKeepsTheOldCurrentAndLeavesNoTempFile) {
     const Status s = SetCurrentFile(&checked_env_, kDb, 12);
     env_.ClearFaults();
     EXPECT_TRUE(s.IsIOError()) << s.ToString();
-    EXPECT_EQ(CurrentContents(), "MANIFEST-000001\n");
+    EXPECT_EQ(CurrentContents(), CurrentText(1));
     EXPECT_EQ(DbFiles(), std::vector<std::string>{"CURRENT"});
   }
 }
@@ -224,7 +242,7 @@ TEST_F(SetCurrentFileTest, FailedWriteKeepsTheOldCurrentAndLeavesNoTempFile) {
 TEST_F(SetCurrentFileTest, FailedDirectorySyncIsReported) {
   // The rename happened, and whether it will survive a power loss is not known, so the call has
   // not succeeded. What CURRENT names now is whole either way.
-  env_.SetFileContents(CurrentFileName(kDb), "MANIFEST-000001\n");
+  env_.SetFileContents(CurrentFileName(kDb), CurrentText(1));
   env_.FailOpAfter(Op::kSyncDir, 0);
   const Status s = SetCurrentFile(&checked_env_, kDb, 12);
   EXPECT_TRUE(s.IsIOError()) << s.ToString();
@@ -235,15 +253,15 @@ TEST_F(SetCurrentFileTest, SyncsTheDirectory) {
   // The harshest power loss keeps only what a SyncDir() made durable. Without one the rename is
   // undone and CURRENT names the old MANIFEST, which a database that had just switched would not
   // survive.
-  env_.SetFileContents(CurrentFileName(kDb), "MANIFEST-000001\n");
+  env_.SetFileContents(CurrentFileName(kDb), CurrentText(1));
   ASSERT_OK(SetCurrentFile(&checked_env_, kDb, 12));
   env_.SimulatePowerLossDropUnsynced();
-  EXPECT_EQ(CurrentContents(), "MANIFEST-000012\n");
+  EXPECT_EQ(CurrentContents(), CurrentText(12));
 }
 
 TEST_F(SetCurrentFileTest, CurrentIsAlwaysWholeAfterAFailureAndAPowerLoss) {
-  const std::string old_contents = "MANIFEST-000001\n";
-  const std::string new_contents = "MANIFEST-000012\n";
+  const std::string old_contents = CurrentText(1);
+  const std::string new_contents = CurrentText(12);
   for (const Op op :
        {Op::kNewWritable, Op::kAppend, Op::kSync, Op::kClose, Op::kRename, Op::kSyncDir}) {
     SCOPED_TRACE(static_cast<int>(op));
@@ -274,7 +292,7 @@ TEST_F(VersionSetTest, CreateNewWritesManifestAndCurrent) {
 
   // The directory holds the MANIFEST and CURRENT and nothing else: no ".dbtmp" left behind.
   EXPECT_EQ(DbFiles(), (std::vector<std::string>{"CURRENT", "MANIFEST-000001"}));
-  EXPECT_EQ(CurrentContents(), "MANIFEST-000001\n");
+  EXPECT_EQ(CurrentContents(), CurrentText(1));
 
   EXPECT_EQ(versions->ManifestFileNumber(), 1u);
   EXPECT_EQ(versions->NextFileNumber(), 2u);
@@ -319,7 +337,7 @@ TEST_F(VersionSetTest, EveryFailingCallOfCreateNewLeavesAWholeDatabaseOrNone) {
       failures++;
       EXPECT_TRUE(s.IsIOError()) << s.ToString();
       if (env_.FileExists(CurrentFileName(kDb))) {
-        EXPECT_EQ(CurrentContents(), "MANIFEST-000001\n");
+        EXPECT_EQ(CurrentContents(), CurrentText(1));
         const std::string manifest = env_.FileContents(DescriptorFileName(kDb, 1));
         EXPECT_FALSE(manifest.empty());
         const Status retry = versions->CreateNew();
@@ -349,13 +367,13 @@ TEST_F(VersionSetTest, CreateNewRefusesARetryThatWouldTruncateTheManifestCurrent
   const Status first = versions->CreateNew();
   env_.ClearFaults();
   ASSERT_TRUE(first.IsIOError()) << first.ToString();
-  ASSERT_EQ(CurrentContents(), "MANIFEST-000001\n");
+  ASSERT_EQ(CurrentContents(), CurrentText(1));
   const std::string manifest = env_.FileContents(DescriptorFileName(kDb, 1));
 
   const Status retry = versions->CreateNew();
   EXPECT_TRUE(retry.IsIOError()) << retry.ToString();
   EXPECT_EQ(env_.FileContents(DescriptorFileName(kDb, 1)), manifest);
-  EXPECT_EQ(CurrentContents(), "MANIFEST-000001\n");
+  EXPECT_EQ(CurrentContents(), CurrentText(1));
 }
 
 TEST_F(VersionSetTest, CreateNewWithAFailedDirectorySyncLeavesAWholeDatabaseOrNone) {
@@ -488,7 +506,7 @@ TEST_F(VersionSetTest, WriteNewManifestSwitchesCurrent) {
   // the same.
   const uint64_t switched = versions->ManifestFileNumber();
   EXPECT_GT(switched, level1_file);
-  EXPECT_EQ(CurrentContents(), ManifestName(switched) + "\n");
+  EXPECT_EQ(CurrentContents(), CurrentText(switched));
   EXPECT_GT(versions->NextFileNumber(), switched);
 
   // The new MANIFEST is a snapshot of the new state and nothing else.
@@ -578,7 +596,7 @@ TEST_F(VersionSetTest, EveryFailingCallOfWriteNewManifestLeavesAUsableDatabase) 
       EXPECT_TRUE(s.IsIOError()) << s.ToString();
       EXPECT_EQ(versions->current(), before) << "nothing is installed after a failure";
 
-      const bool switched = CurrentContents() != "MANIFEST-000001\n";
+      const bool switched = CurrentContents() != CurrentText(1);
       const auto recovered = NewVersionSet();
       ASSERT_OK(recovered->Recover());
       if (switched) {
@@ -620,7 +638,7 @@ TEST_F(VersionSetTest, FailedDirectorySyncOfTheNewManifestLeavesCurrentAlone) {
   const Status s = versions->WriteNewManifest(AddFile(0, Meta(file, "a", "b")));
   env_.ClearFaults();
   EXPECT_TRUE(s.IsIOError()) << s.ToString();
-  EXPECT_EQ(CurrentContents(), "MANIFEST-000001\n");
+  EXPECT_EQ(CurrentContents(), CurrentText(1));
   EXPECT_EQ(DbFiles(), (std::vector<std::string>{"CURRENT", "MANIFEST-000001"}));
   EXPECT_EQ(versions->current()->NumFiles(0), 0);
   ASSERT_OK(versions->LogAndApply(AddFile(0, Meta(versions->NewFileNumber(), "c", "d"))));
@@ -643,7 +661,7 @@ TEST_F(VersionSetTest, FailedDirectorySyncOfTheSwitchStopsTheVersionSet) {
 
   // The new MANIFEST is kept, and is what CURRENT names now.
   const std::string current = CurrentContents();
-  EXPECT_NE(current, "MANIFEST-000001\n");
+  EXPECT_NE(current, CurrentText(1));
   const auto recovered = NewVersionSet();
   ASSERT_OK(recovered->Recover());
   EXPECT_EQ(recovered->current()->NumFiles(0), 1) << "the new MANIFEST holds the edit";
@@ -675,10 +693,36 @@ TEST_F(VersionSetTest, FailedSwitchWithUnreadableCurrentKeepsTheNewManifest) {
   const Status s = versions->WriteNewManifest(AddFile(0, Meta(file, "a", "b")));
   env_.ClearFaults();
   EXPECT_TRUE(s.IsIOError()) << s.ToString();
-  EXPECT_EQ(CurrentContents(), "MANIFEST-000001\n");
+  EXPECT_EQ(CurrentContents(), CurrentText(1));
   EXPECT_EQ(DbFiles().size(), 3u) << "CURRENT, the old MANIFEST and the new one";
   EXPECT_TRUE(
       versions->LogAndApply(AddFile(0, Meta(versions->NewFileNumber(), "c", "d"))).IsIOError());
+}
+
+TEST_F(VersionSetTest, FailedSwitchWithMisreadCurrentKeepsTheNewManifest) {
+  // A read that works is not always right: CURRENT has no checksum, so one that comes back with a
+  // bit flipped is one that names, as far as the read can tell, neither MANIFEST. That the rename
+  // went through, and that CURRENT names the new file, is not undone by it. Deleting the new file
+  // on that evidence leaves CURRENT naming nothing, and the database cannot be opened again; the
+  // new file may only be deleted when CURRENT is seen to name the old one.
+  const auto versions = NewVersionSet();
+  ASSERT_OK(versions->CreateNew());
+  const uint64_t file = versions->NewFileNumber();
+  env_.FailOpAfter(Op::kSyncDir, 1);  // the one that follows the rename
+  env_.SetReadCorruptionProbability(1.0);
+  const Status s = versions->WriteNewManifest(AddFile(0, Meta(file, "a", "b")));
+  env_.ClearFaults();
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+
+  const std::string current = CurrentContents();
+  EXPECT_NE(current, CurrentText(1)) << "the rename went through";
+  EXPECT_EQ(DbFiles().size(), 3u) << "CURRENT, the old MANIFEST and the new one";
+  const auto recovered = NewVersionSet();
+  ASSERT_OK(recovered->Recover());
+  EXPECT_EQ(recovered->current()->NumFiles(0), 1) << "the new MANIFEST holds the edit";
+  EXPECT_TRUE(
+      versions->LogAndApply(AddFile(0, Meta(versions->NewFileNumber(), "c", "d"))).IsIOError())
+      << "and the version set has stopped, as after any failed switch";
 }
 
 TEST_F(VersionSetTest, CurrentWithoutNewlineIsCorruption) {
@@ -699,13 +743,13 @@ TEST_F(VersionSetTest, CurrentNamingGarbageIsCorruption) {
   const auto versions = NewVersionSet();
   ASSERT_OK(versions->CreateNew());
   // Not a MANIFEST name, a name of another kind of file, a MANIFEST name with something after it, a
-  // name that leaves the directory, and a number spelled another way than SetCurrentFile() does.
-  for (const std::string contents :
-       {"garbage\n", "000001.sst\n", "CURRENT\n", "MANIFEST-000001\n\n", "MANIFEST-000001 \n",
-        "MANIFEST-\n", "\n", "../MANIFEST-000001\n", "/db/MANIFEST-000001\n", "MANIFEST-1\n",
-        "MANIFEST-0000001\n"}) {
-    SCOPED_TRACE(contents);
-    env_.SetFileContents(CurrentFileName(kDb), contents);
+  // name that leaves the directory, and a number spelled another way than SetCurrentFile() does:
+  // each with the checksum that goes with it, so that it is the name that is refused.
+  for (const std::string first_line :
+       {"garbage", "000001.sst", "CURRENT", "MANIFEST-000001 ", "MANIFEST-", "",
+        "../MANIFEST-000001", "/db/MANIFEST-000001", "MANIFEST-1", "MANIFEST-0000001"}) {
+    SCOPED_TRACE(first_line);
+    env_.SetFileContents(CurrentFileName(kDb), CurrentTextOf(first_line));
     const auto recovered = NewVersionSet();
     const Status s = recovered->Recover();
     EXPECT_TRUE(s.IsCorruption()) << s.ToString();
@@ -714,12 +758,127 @@ TEST_F(VersionSetTest, CurrentNamingGarbageIsCorruption) {
   }
 }
 
+TEST_F(VersionSetTest, CurrentWritesTheNameAndItsChecksum) {
+  // The format is part of what a database is: two lines, the name of the MANIFEST and the masked
+  // CRC32C of that line, newline included, as "crc32c:" and eight lower-case hex digits.
+  const auto versions = NewVersionSet();
+  ASSERT_OK(versions->CreateNew());
+  EXPECT_EQ(CurrentContents(), "MANIFEST-000001\ncrc32c:18848cc3\n");
+  ASSERT_OK(versions->WriteNewManifest(VersionEdit{}));
+  EXPECT_EQ(CurrentContents(), CurrentText(versions->ManifestFileNumber()));
+  EXPECT_EQ(CurrentText(7), "MANIFEST-000007\ncrc32c:76e85d4d\n") << "the helper of these tests";
+}
+
+TEST_F(VersionSetTest, CurrentWithoutItsChecksumLineIsMalformed) {
+  const auto versions = NewVersionSet();
+  ASSERT_OK(versions->CreateNew());
+  const std::string name = "MANIFEST-000001\n";
+  const std::string good = CurrentText(1);
+  const std::string digits = good.substr(good.find(':') + 1, 8);
+  std::string upper = digits;
+  for (char& c : upper) {
+    c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+  }
+  ASSERT_NE(upper, digits) << "the checksum of this name has a letter in it";
+  const std::vector<std::string> shapes = {name,
+                                           name + "\n",
+                                           name + "crc32c:\n",
+                                           name + "crc32c:" + digits.substr(1) + "\n",
+                                           name + "crc32c:" + digits + "0\n",
+                                           name + "crc32c:" + upper + "\n",
+                                           name + "crc32d:" + digits + "\n",
+                                           name + "crc32c: " + digits.substr(1) + "\n",
+                                           name + "crc32c:" + digits + "\n\n",
+                                           name + "crc32c:" + digits + "\nx\n",
+                                           name + "crc32c:" + std::string(8, 'g') + "\n",
+                                           name + "crc32c:0x" + digits.substr(2) + "\n",
+                                           name + digits + "\n"};
+  for (const std::string& contents : shapes) {
+    SCOPED_TRACE(contents);
+    env_.SetFileContents(CurrentFileName(kDb), contents);
+    const auto recovered = NewVersionSet();
+    const Status s = recovered->Recover();
+    EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+    EXPECT_NE(s.ToString().find("CURRENT file is malformed"), std::string::npos) << s.ToString();
+    EXPECT_NE(s.ToString().find(CurrentFileName(kDb)), std::string::npos) << "the file is named";
+  }
+}
+
+TEST_F(VersionSetTest, CurrentWithAChecksumThatDoesNotMatchIsCorruption) {
+  const auto versions = NewVersionSet();
+  ASSERT_OK(versions->CreateNew());
+  const std::string good = CurrentText(1);
+  const size_t digit = good.find(':') + 1;
+  std::string other_digit = good;
+  other_digit[digit] = other_digit[digit] == '0' ? '1' : '0';
+  // The checksum of another name, which is what a CURRENT that names the wrong MANIFEST with the
+  // right checksum of the old would look like.
+  const std::string other_name = "MANIFEST-000002\n" + good.substr(good.find('\n') + 1);
+  for (const std::string& contents : {other_digit, other_name}) {
+    SCOPED_TRACE(contents);
+    env_.SetFileContents(CurrentFileName(kDb), contents);
+    const auto recovered = NewVersionSet();
+    const Status s = recovered->Recover();
+    EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+    EXPECT_NE(s.ToString().find("CURRENT checksum mismatch"), std::string::npos) << s.ToString();
+    EXPECT_NE(s.ToString().find(CurrentFileName(kDb)), std::string::npos) << "the file is named";
+  }
+}
+
+TEST_F(VersionSetTest, NoSingleFlippedBitOfCurrentIsAcceptedAsAnotherManifest) {
+  // CURRENT is one read of one small file, and a read can come back wrong. Three MANIFESTs are in
+  // the directory, as after two switches, and CURRENT names the newest: a bit flipped anywhere in
+  // it, in the name or the checksum, must be refused, and not read as the name of the one before,
+  // which is there and would open.
+  const auto versions = NewVersionSet();
+  ASSERT_OK(versions->CreateNew());
+  ASSERT_OK(versions->WriteNewManifest(VersionEdit{}));
+  ASSERT_OK(versions->WriteNewManifest(VersionEdit{}));
+  const uint64_t newest = versions->ManifestFileNumber();
+  ASSERT_EQ(newest, 3u);
+  ASSERT_TRUE(env_.FileExists(DescriptorFileName(kDb, 1)));
+  ASSERT_TRUE(env_.FileExists(DescriptorFileName(kDb, 2)));
+  const std::string good = CurrentText(newest);
+  ASSERT_EQ(CurrentContents(), good);
+  size_t flips = 0;
+  for (size_t byte = 0; byte < good.size(); byte++) {
+    for (size_t bit = 0; bit < 8; bit++) {
+      SCOPED_TRACE("bit " + std::to_string(bit) + " of byte " + std::to_string(byte));
+      std::string flipped = good;
+      flipped[byte] = static_cast<char>(flipped[byte] ^ (1 << bit));
+      env_.SetFileContents(CurrentFileName(kDb), flipped);
+      const auto recovered = NewVersionSet();
+      const Status s = recovered->Recover();
+      EXPECT_TRUE(s.IsCorruption())
+          << "CURRENT with one flipped bit was accepted: " << s.ToString();
+      flips++;
+    }
+  }
+  EXPECT_EQ(flips, good.size() * 8);
+}
+
+TEST_F(VersionSetTest, CurrentNamingAnOlderManifestWithItsOwnChecksumIsAccepted) {
+  // An older MANIFEST that is there is a legitimate target, as after a crash that took the rename
+  // back: what the checksum is for is that a CURRENT says which one, and means it.
+  const auto versions = NewVersionSet();
+  ASSERT_OK(versions->CreateNew());
+  const VersionState first = versions->current()->state();
+  ASSERT_OK(versions->WriteNewManifest(AddFile(0, Meta(versions->NewFileNumber(), "a", "b"))));
+  ASSERT_GT(versions->ManifestFileNumber(), 1u);
+  ASSERT_TRUE(env_.FileExists(DescriptorFileName(kDb, 1)));
+  env_.SetFileContents(CurrentFileName(kDb), CurrentText(1));
+  const auto recovered = NewVersionSet();
+  ASSERT_OK(recovered->Recover());
+  EXPECT_EQ(recovered->ManifestFileNumber(), 1u);
+  EXPECT_EQ(recovered->current()->state(), first);
+}
+
 TEST_F(VersionSetTest, MissingCurrentOrManifestIsAnIOError) {
   const auto recovered = NewVersionSet();
   const Status no_current = recovered->Recover();
   EXPECT_TRUE(no_current.IsIOError()) << no_current.ToString();
 
-  env_.SetFileContents(CurrentFileName(kDb), "MANIFEST-000009\n");
+  env_.SetFileContents(CurrentFileName(kDb), CurrentText(9));
   const auto other = NewVersionSet();
   const Status no_manifest = other->Recover();
   EXPECT_TRUE(no_manifest.IsIOError()) << no_manifest.ToString();
@@ -754,6 +913,32 @@ TEST_F(VersionSetTest, CorruptManifestRecordIsCorruption) {
       EXPECT_TRUE(s.IsCorruption()) << s.ToString();
       EXPECT_TRUE(Names(s, ManifestName(1)));
     }
+  }
+}
+
+TEST_F(VersionSetTest, ALengthDamagedPastTheEndOfTheManifestIsCorruptionNotATornTail) {
+  // The edit of a flush or a compaction whose length a flipped bit made longer than the rest of
+  // the file looked like an edit that a crash cut short, and recovery went on without it, and
+  // without every edit after it: the files they name were then not in the version, and the files
+  // they deleted were. The bytes that are there are a whole edit with its checksum, which a crash
+  // never leaves, so recovery refuses the MANIFEST, whichever record it is.
+  const auto versions = NewVersionSet();
+  ASSERT_OK(versions->CreateNew());
+  for (const char* key : {"a", "c", "e", "g"}) {
+    ASSERT_OK(versions->LogAndApply(AddFile(0, Meta(versions->NewFileNumber(), key, key))));
+  }
+  const ManifestRecords records = ReadManifest(1);
+  ASSERT_EQ(records.offsets.size(), 5u);
+  const std::string intact = env_.FileContents(DescriptorFileName(kDb, 1));
+  for (const size_t record : {size_t{1}, size_t{3}, size_t{4}}) {  // a middle one, and the last
+    SCOPED_TRACE("record " + std::to_string(record));
+    std::string damaged = intact;
+    damaged[static_cast<size_t>(records.offsets[record]) + 5] ^= 0x04;  // 1024 bytes longer
+    env_.SetFileContents(DescriptorFileName(kDb, 1), damaged);
+    const auto recovered = NewVersionSet();
+    const Status s = recovered->Recover();
+    EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+    EXPECT_TRUE(Names(s, ManifestName(1)));
   }
 }
 
@@ -824,7 +1009,7 @@ TEST_F(VersionSetTest, StateOfManyBlocksIsRecoveredFromRecordsThatSpanThem) {
   std::string contents = env_.FileContents(DescriptorFileName(kDb, 1));
   contents.resize(contents.size() - 40000);
   env_.SetFileContents(DescriptorFileName(kDb, 1), contents);
-  env_.SetFileContents(CurrentFileName(kDb), "MANIFEST-000001\n");
+  env_.SetFileContents(CurrentFileName(kDb), CurrentText(1));
   const auto torn = NewVersionSet();
   ASSERT_OK(torn->Recover());
   EXPECT_EQ(torn->current()->NumFiles(1), 0) << "only the snapshot of the empty state was whole";
@@ -982,7 +1167,7 @@ TEST_F(VersionSetTest, SwitchRightBelowTheCeilingCanBeRecoveredAgain) {
   ASSERT_OK(versions->Recover());
   ASSERT_OK(versions->WriteNewManifest(VersionEdit{}));
   EXPECT_EQ(versions->ManifestFileNumber(), kMaxFileNumber - 1);
-  EXPECT_EQ(CurrentContents(), ManifestName(kMaxFileNumber - 1) + "\n");
+  EXPECT_EQ(CurrentContents(), CurrentText(kMaxFileNumber - 1));
 
   const auto again = NewVersionSet();
   ASSERT_OK(again->Recover());
@@ -999,7 +1184,7 @@ TEST_F(VersionSetTest, NoSwitchIsWrittenThatRecoverWouldRefuse) {
   ASSERT_OK(versions->Recover());
   const Status s = versions->WriteNewManifest(VersionEdit{});
   EXPECT_TRUE(s.IsCorruption()) << s.ToString();
-  EXPECT_EQ(CurrentContents(), ManifestName(3) + "\n");
+  EXPECT_EQ(CurrentContents(), CurrentText(3));
   EXPECT_EQ(DbFiles(), (std::vector<std::string>{"CURRENT", "MANIFEST-000003"}));
   const auto again = NewVersionSet();
   EXPECT_OK(again->Recover());
@@ -1033,7 +1218,7 @@ TEST_F(VersionSetTest, WriteNewManifestWithNoFileNumberLeftIsAnErrorNotAnAbort) 
   const Status s = versions->WriteNewManifest(VersionEdit{});
   EXPECT_TRUE(s.IsCorruption()) << s.ToString();
   EXPECT_EQ(versions->current(), before);
-  EXPECT_EQ(CurrentContents(), "MANIFEST-000001\n");
+  EXPECT_EQ(CurrentContents(), CurrentText(1));
   EXPECT_EQ(DbFiles(), (std::vector<std::string>{"CURRENT", "MANIFEST-000001"}));
 }
 

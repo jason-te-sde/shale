@@ -260,7 +260,7 @@ Status VersionSet::OpenNewManifest(uint64_t number, const VersionEdit& snapshot)
     writer.reset();
     static_cast<void>(file->Close());
     file.reset();
-    if (CurrentMayNameManifest(number)) {
+    if (CurrentMayNameNewManifest()) {
       // The rename happened, and the directory sync that failed was what would have made it
       // durable, so CURRENT names this file now and may after a crash, or it names the old one.
       // Both files are kept, and nothing more is written to either until a switch succeeds.
@@ -284,7 +284,7 @@ Status VersionSet::OpenNewManifest(uint64_t number, const VersionEdit& snapshot)
   return Status::OK();
 }
 
-bool VersionSet::CurrentMayNameManifest(uint64_t number) {
+bool VersionSet::CurrentMayNameNewManifest() {
   const std::string current_name = CurrentFileName(dbname_);
   if (!env_->FileExists(current_name)) {
     return false;
@@ -293,8 +293,15 @@ bool VersionSet::CurrentMayNameManifest(uint64_t number) {
   if (!ReadFileToString(env_, current_name, &contents).ok()) {
     return true;  // not known, and deleting the file that CURRENT names would be the worst answer
   }
-  const std::string manifest = DescriptorFileName(dbname_, number);
-  return contents == manifest.substr(dbname_.size() + 1) + "\n";
+  // Only what proves that the rename did not happen lets the new file go: CURRENT is read to be
+  // the contents that name the MANIFEST that was open before it. A read that matches nothing is not
+  // proof of that, since a read can come back wrong, and what the rename that went through made of
+  // it cannot be undone by a read that is wrong: the new file stays, and a later sweep deletes it
+  // if CURRENT turns out not to name it.
+  if (manifest_file_number_ != 0) {
+    return contents != CurrentFileContents(dbname_, manifest_file_number_);
+  }
+  return true;
 }
 
 void VersionSet::Install(VersionState state) {
@@ -331,17 +338,10 @@ Status VersionSet::Recover() {
   if (!s.ok()) {
     return s;
   }
-  if (current.empty() || current.back() != '\n') {
-    return Status::Corruption("CURRENT file does not end with newline");
-  }
-  current.pop_back();
   uint64_t number = 0;
-  FileType type = FileType::kCurrentFile;
-  // The name must be the one SetCurrentFile() writes: a number spelled another way names the same
-  // file to the parser and a different one to the directory.
-  if (!ParseFileName(current, &number, &type) || type != FileType::kDescriptorFile ||
-      DescriptorFileName(dbname_, number) != dbname_ + "/" + current) {
-    return Status::Corruption("CURRENT names an invalid file");
+  s = ParseCurrentFile(dbname_, current, &number);
+  if (!s.ok()) {
+    return WithFileName(s, CurrentFileName(dbname_));
   }
 
   const std::string manifest = DescriptorFileName(dbname_, number);
@@ -459,9 +459,13 @@ Status VersionSet::LogAndApply(VersionEdit edit) {
   std::string record;
   edit.EncodeTo(&record);
   s = manifest_log_->AddRecord(record);
+#if defined(SHALE_FLAW_SKIP_MANIFEST_SYNC)
+  // Flaw skip_manifest_sync: the edit is installed without making the MANIFEST durable.
+#else
   if (s.ok()) {
     s = manifest_file_->Sync();
   }
+#endif
   if (!s.ok()) {
     // What the file holds is unknown, and a Sync() after a failed one proves nothing. Nothing more
     // goes into it.

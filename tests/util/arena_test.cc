@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <thread>
 #include <utility>
@@ -61,6 +62,33 @@ TEST(ArenaTest, ManyAllocationsKeepTheirBytes) {
   EXPECT_LE(arena.MemoryUsage(), total + total / 10 + size_t{64} * 1024);
 }
 
+// What the arena has taken from the system must not depend on the platform: the memtable is full
+// when it says so, and a run that is to be replayed on another machine has to fill it at the same
+// write. An aligned request is padded to 16 bytes, from where it is in its block and not from what
+// address the block happens to have, so exactly 128 requests of 24 bytes (32 each, the last one
+// ending at 4088) fill a block, whatever alignof(std::max_align_t) is.
+TEST(ArenaTest, AlignedPaddingIsTheSameOnEveryPlatform) {
+  constexpr size_t kBlock = 4096;
+  const size_t one_block = kBlock + sizeof(std::unique_ptr<char[]>);
+  Arena arena;
+  for (int i = 0; i < 128; i++) {
+    arena.AllocateAligned(24);
+  }
+  EXPECT_EQ(arena.MemoryUsage(), one_block) << "128 requests of 24 bytes fill one block";
+  arena.AllocateAligned(24);
+  EXPECT_EQ(arena.MemoryUsage(), 2 * one_block) << "the 129th starts the second block";
+
+  // The same after a request that is not aligned moved the cursor off a multiple of 16.
+  Arena offset;
+  offset.Allocate(5);  // the cursor is at 5; the first aligned request goes to 16 and ends at 40
+  for (int i = 0; i < 127; i++) {
+    offset.AllocateAligned(24);  // then at 48, 80, ..., 4048 + 24: the 127th ends at 4072
+  }
+  EXPECT_EQ(offset.MemoryUsage(), one_block);
+  offset.AllocateAligned(24);  // at 4080 it would end at 4104
+  EXPECT_EQ(offset.MemoryUsage(), 2 * one_block);
+}
+
 TEST(ArenaTest, AlignedAllocationsAreAligned) {
   constexpr uint64_t kSeed = 17;
   SCOPED_TRACE("seed " + std::to_string(kSeed));
@@ -71,7 +99,7 @@ TEST(ArenaTest, AlignedAllocationsAreAligned) {
     arena.Allocate(rnd.Uniform(15) + 1);
     const size_t size = (i % 50 == 49) ? 2000 : rnd.Uniform(100) + 1;
     char* p = arena.AllocateAligned(size);
-    ASSERT_EQ(reinterpret_cast<uintptr_t>(p) % alignof(std::max_align_t), 0u)
+    ASSERT_EQ(reinterpret_cast<uintptr_t>(p) % 16, 0u)
         << "allocation " << i << " of " << size << " bytes at " << static_cast<void*>(p);
   }
 }

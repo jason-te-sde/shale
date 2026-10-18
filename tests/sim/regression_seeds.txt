@@ -1,0 +1,4 @@
+# seeds that once failed; one per line
+2240  # the failed switch to a MANIFEST deleted the file CURRENT names, after a misread of CURRENT
+185   # a flipped bit in the length of a WAL record, past the end of the file, lost the rest of the log
+191   # the same in a MANIFEST: the open named files that were not there

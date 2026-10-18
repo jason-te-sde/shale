@@ -292,6 +292,62 @@ TEST_F(DBRecoveryTest, CorruptionInTheLastBlockIsNotMistakenForATornTail) {
   EXPECT_TRUE(Contains(s, "WAL corruption in")) << s.ToString();
 }
 
+TEST_F(DBRecoveryTest, ALengthDamagedPastTheEndOfTheLogIsNotMistakenForATornTail) {
+  // A flipped bit that makes the length of a record longer than what is left of the file looks like
+  // the record that a crash cut short, and the reader used to stop there without a word: the
+  // record, and every one after it, were gone, synced writes among them, and the open worked. The
+  // bytes that are there are a whole record with its checksum, which a crash never leaves, so the
+  // open fails, whichever record it is and whatever the bit.
+  PutRange(0, 6);  // six small records, all in the one block
+  Close();
+  const std::string log = NewestLogFile(env_.get(), kDb);
+  const std::string intact = env_->FileContents(log);
+  const std::vector<uint64_t> offsets = LogRecordOffsets(env_.get(), log);
+  ASSERT_EQ(offsets.size(), 6u);
+  for (const size_t record : {size_t{0}, size_t{3}, size_t{5}}) {   // the first, a middle, the last
+    for (const size_t bit : {size_t{8}, size_t{11}, size_t{14}}) {  // 256, 2048 or 16384 longer
+      SCOPED_TRACE("bit " + std::to_string(bit) + " of the length of record " +
+                   std::to_string(record));
+      std::string damaged = intact;
+      damaged[offsets[record] + 4 + bit / 8] ^= static_cast<char>(1u << (bit % 8));
+      env_->SetFileContents(log, damaged);
+      const Status s = TryReopen(CurrentOptions());
+      EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+      EXPECT_TRUE(Contains(s, "WAL corruption in")) << s.ToString();
+    }
+  }
+  // A refused open changes nothing: with the log as it was, all six are there.
+  env_->SetFileContents(log, intact);
+  Reopen();
+  ExpectPresent(0, 6);
+}
+
+TEST_F(DBRecoveryTest, ACurrentWithAFlippedBitFailsOpenAndLosesNothing) {
+  // CURRENT is read once, and a bit that comes back wrong in it, in the name or in the checksum
+  // that follows it, must fail the open: the name may be that of another MANIFEST that is there.
+  // A refused open changes nothing, so with CURRENT as it was the database opens with all of it.
+  PutRange(0, 20);
+  Close();
+  const std::string current_name = CurrentFileName(kDb);
+  const std::string intact = env_->FileContents(current_name);
+  ASSERT_EQ(intact.size(), 16u + 16u) << "a name line and a checksum line";
+  for (size_t byte = 0; byte < intact.size(); byte++) {
+    for (const size_t bit : {size_t{0}, size_t{5}}) {  // a digit or letter to another, and its case
+      SCOPED_TRACE("bit " + std::to_string(bit) + " of byte " + std::to_string(byte));
+      std::string damaged = intact;
+      damaged[byte] = static_cast<char>(damaged[byte] ^ (1 << bit));
+      env_->SetFileContents(current_name, damaged);
+      const Status s = TryReopen(CurrentOptions());
+      EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+      EXPECT_TRUE(Contains(s, "CURRENT")) << s.ToString();
+      EXPECT_EQ(db_, nullptr);
+    }
+  }
+  env_->SetFileContents(current_name, intact);
+  Reopen();
+  ExpectPresent(0, 20);
+}
+
 TEST_F(DBRecoveryTest, ZeroFilledTailFailsParanoidOpen) {
   PutRange(0, 5);
   Close();

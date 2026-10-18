@@ -734,12 +734,148 @@ TEST_F(LogTest, LengthPastTheBlockIsReportedEvenInTheLastBlock) {
   EXPECT_EQ(reports_.dropped, kHeaderSize + 3);
 }
 
-TEST_F(LogTest, LengthPastTheEndOfTheFileButInsideTheBlockIsATornTail) {
+TEST_F(LogTest, LengthPastTheEndOfTheFileOfARecordThatIsWholeIsReported) {
+  // The record is all there, and its length says it is a byte longer than the file. That is what a
+  // record that a crash cut short looks like, until it is seen that the bytes the file does have
+  // are a whole record with the stored checksum: a crash leaves a prefix of a record, which does
+  // not have it, and a record whose length was damaged does. So it is reported, and not taken for
+  // the end of the file.
   Write("foo");
   Write("bar");
   SetLengthField(kHeaderSize + 3, 4);  // one byte more than the file holds
   EXPECT_EQ(ReadAll(), Records{"foo"});
+  EXPECT_EQ(reports_.messages, Records{Report("bad record length")});
+  EXPECT_EQ(reports_.dropped, kHeaderSize + 3) << "what is left of the block, which is the record";
+}
+
+TEST_F(LogTest, LengthPastTheEndOfTheFileOfARecordThatIsCutShortIsStillATornTail) {
+  // The same length, and the file really does end inside the record: the checksum matches no length
+  // of the bytes that are there, and this is the end that a crash leaves.
+  Write("foo");
+  Write("bar!");
+  Truncate(FileSize() - 1);  // "bar", under a header that says four bytes
+  EXPECT_EQ(ReadAll(), Records{"foo"});
   ExpectNoReports();
+}
+
+// The records of `contents`, a log, as the offsets in it at which each starts.
+std::vector<size_t> RecordOffsets(const std::string& contents) {
+  const std::unique_ptr<Env> env = NewMemEnv();
+  EXPECT_OK(WriteStringToFile(env.get(), contents, "/offsets", /*sync=*/false));
+  std::unique_ptr<SequentialFile> source;
+  EXPECT_OK(env->NewSequentialFile("/offsets", &source));
+  ReportCollector reports;
+  Reader reader(source.get(), &reports, /*checksum=*/true);
+  std::vector<size_t> offsets;
+  std::string scratch;
+  std::string_view record;
+  while (reader.ReadRecord(&record, &scratch)) {
+    offsets.push_back(static_cast<size_t>(reader.LastRecordOffset()));
+  }
+  EXPECT_EQ(reports.messages, Records{});
+  return offsets;
+}
+
+// Flips each of the 16 bits of the length field of each record of `records` that starts at or
+// after byte `from`, one at a time, in the log that holds them, and checks that the damage is
+// reported whichever way the length went, that the records before the damaged one are all that is
+// returned, since a defect drops the rest of its block, and that the report is one of the two that
+// a damaged length can be.
+void ExpectEveryDamagedLengthIsReported(const Records& records, size_t from) {
+  const std::string intact = WriteContents(records);
+  const std::vector<size_t> offsets = RecordOffsets(intact);
+  ASSERT_EQ(offsets.size(), records.size());
+  size_t flips = 0;
+  for (size_t i = 0; i < records.size(); i++) {
+    if (offsets[i] < from) {
+      continue;
+    }
+    for (size_t bit = 0; bit < 16; bit++) {
+      SCOPED_TRACE("bit " + std::to_string(bit) + " of the length of record " + std::to_string(i));
+      std::string damaged = intact;
+      damaged[offsets[i] + 4 + bit / 8] =
+          static_cast<char>(ByteAt(damaged, offsets[i] + 4 + bit / 8) ^ (1u << (bit % 8)));
+      ReportCollector reports;
+      const Records got = ReadContents(damaged, &reports);
+      ASSERT_FALSE(reports.messages.empty()) << "the damage went unreported";
+      for (const std::string& message : reports.messages) {
+        EXPECT_TRUE(message == Report("bad record length") ||
+                    message == Report("checksum mismatch"))
+            << message;
+      }
+      EXPECT_EQ(got, Records(records.begin(), records.begin() + static_cast<std::ptrdiff_t>(i)));
+      flips++;
+    }
+  }
+  EXPECT_GT(flips, 0u);
+}
+
+TEST_F(LogTest, EveryBitOfTheLengthOfTheLastRecordIsReported) {
+  // Which way the flipped bit moves the length does not matter: shorter, the record has the wrong
+  // checksum; longer and still in the file, the same; longer than the file and inside the block,
+  // the bytes that are there are a whole record; longer than the block, it is a bad length.
+  ExpectEveryDamagedLengthIsReported({"foo", "bar", "0123456789"}, 0);
+}
+
+TEST_F(LogTest, EveryBitOfTheLengthOfAnyRecordIsReported) {
+  // A record in the middle of the file has what follows it inside the length a flipped bit makes
+  // too long, and the checksum of what it really was is still found in the bytes that are there.
+  // The records are those of a MANIFEST: a snapshot of a state, then edits, of every size.
+  ExpectEveryDamagedLengthIsReported({std::string(120, 'a'), "", std::string(700, 'b'),
+                                      std::string(33, 'c'), "d", std::string(250, 'e')},
+                                     0);
+}
+
+TEST_F(LogTest, EveryBitOfTheLengthOfAnyRecordOfTheLastBlockIsReported) {
+  // The first record is as long as a block and a bit, so the last block starts with the end of it
+  // and holds the records after it: where the file is no longer a whole number of blocks, and a
+  // length can run past its end.
+  ExpectEveryDamagedLengthIsReported(
+      {std::string(kBlockSize + 100, 'x'), std::string(90, 'y'), "", "z", std::string(300, 'w')},
+      kBlockSize);
+}
+
+TEST_F(LogTest, ADamagedLengthPastTheEndOfTheFileIsNotCaughtWithoutChecksums) {
+  // With the checksums off there is nothing to find the record by, and the rest of the file is read
+  // as the end of it. That is what the checksum switch means.
+  const std::string intact = WriteContents({"foo", "bar"});
+  std::string damaged = intact;
+  damaged[kHeaderSize + 3 + 4] = 4;
+  ReportCollector reports;
+  EXPECT_EQ(ReadContents(damaged, &reports, /*checksum=*/false), Records{"foo"});
+  EXPECT_EQ(reports.messages, Records{});
+}
+
+TEST_F(LogTest, EveryStrictCutOfARandomLogIsSilent) {
+  // The other side of the search for a record that is whole: a file that ends inside a record never
+  // has the checksum of any length of what it holds, short of a collision of 32 bits, which no
+  // cut of these logs is. So whatever the sizes, cutting the file anywhere returns the records that
+  // were whole and reports nothing.
+  for (uint64_t seed = 0; seed < 4; seed++) {
+    SCOPED_TRACE("seed " + std::to_string(seed));
+    Random rnd(seed);
+    Records written;
+    for (int i = 0; i < 12; i++) {
+      written.push_back(std::to_string(i) + ":" + RandomBinaryString(&rnd, rnd.Skewed(9)));
+    }
+    const std::string contents = WriteContents(written);
+    const std::vector<size_t> offsets = RecordOffsets(contents);
+    for (size_t cut = 0; cut <= contents.size(); cut++) {
+      ReportCollector reports;
+      const Records got = ReadContents(contents.substr(0, cut), &reports);
+      size_t whole = 0;
+      while (whole + 1 < written.size() && offsets[whole + 1] <= cut) {
+        whole++;
+      }
+      // Record `whole` is whole if the file holds all of it: up to where the next starts, or to the
+      // end.
+      const size_t end = whole + 1 < written.size() ? offsets[whole + 1] : contents.size();
+      const size_t count = cut >= end ? whole + 1 : whole;
+      ASSERT_EQ(got, Records(written.begin(), written.begin() + static_cast<std::ptrdiff_t>(count)))
+          << "cut at byte " << cut;
+      ASSERT_EQ(reports.messages, Records{}) << "cut at byte " << cut;
+    }
+  }
 }
 
 TEST_F(LogTest, MiddleWithoutFirstIsReported) {
@@ -982,10 +1118,12 @@ TEST_F(LogTest, RandomCorruptionNeverYieldsUnwrittenRecords) {
   // written, in the order they were written, and nothing else.
   //
   // And the property recovery relies on: if nothing was reported, what was read is a prefix of
-  // what was written. It does not follow that nothing was lost. The one place that damage hides
-  // is documented: a length field in the last block that points past the end of the file but
-  // inside the block cannot be told from a torn tail. Those seeds are counted on their own, and
-  // each must have a flipped bit in the last block.
+  // what was written. It does not follow that nothing was lost. The one place that damage could
+  // hide is a length field in the last block that points past the end of the file but inside the
+  // block, which looks like a torn tail; it is found when the record is whole, by its checksum, so
+  // what is left of it is a length damaged together with the bytes that the checksum would be
+  // found in. Those seeds are counted on their own, and each must have a flipped bit in the last
+  // block.
   size_t seeds_that_reported = 0;
   size_t seeds_that_lost_records = 0;
   size_t silent_short_reads = 0;
@@ -1041,7 +1179,41 @@ TEST_F(LogTest, RandomCorruptionNeverYieldsUnwrittenRecords) {
   // Damage that nothing noticed would make the checks above vacuous.
   EXPECT_GE(seeds_that_reported, kSeeds * 95 / 100);
   EXPECT_GE(seeds_that_lost_records, kSeeds * 99 / 100);
-  EXPECT_LE(silent_short_reads, kSeeds * 5 / 100) << "silent loss is the rare, documented case";
+  EXPECT_LE(silent_short_reads, kSeeds / 100) << "silent loss is the rare, documented case";
+}
+
+TEST_F(LogTest, RandomDamageToALengthIsNeverSilent) {
+  // One bit of the length of one record, whatever the records are and wherever the record falls,
+  // in a log of up to a few blocks: the damage is reported, and what comes back is some of the
+  // records, in order, and not the one that was damaged.
+  for (uint64_t seed = 0; seed < 400; seed++) {
+    SCOPED_TRACE("seed " + std::to_string(seed));
+    Random rnd(seed);
+    Records written;
+    std::map<std::string, size_t> position;
+    for (size_t i = 0; i < 15; i++) {
+      written.push_back(std::to_string(i) + ":" + RandomBinaryString(&rnd, rnd.Skewed(13)));
+      position[written.back()] = i;
+    }
+    std::string contents = WriteContents(written);
+    const std::vector<size_t> offsets = RecordOffsets(contents);
+    const size_t victim = rnd.Uniform(static_cast<uint32_t>(written.size()));
+    const uint32_t bit = rnd.Uniform(16);
+    contents[offsets[victim] + 4 + bit / 8] =
+        static_cast<char>(ByteAt(contents, offsets[victim] + 4 + bit / 8) ^ (1u << (bit % 8)));
+
+    ReportCollector reports;
+    const Records got = ReadContents(contents, &reports);
+    ASSERT_FALSE(reports.messages.empty()) << "bit " << bit << " of record " << victim;
+    size_t next_allowed = 0;
+    for (const std::string& record : got) {
+      const auto found = position.find(record);
+      ASSERT_NE(found, position.end()) << "a record that was never written came back";
+      ASSERT_GE(found->second, next_allowed) << "a record came back twice or out of order";
+      ASSERT_NE(found->second, victim) << "the record with the damaged length came back";
+      next_allowed = found->second + 1;
+    }
+  }
 }
 
 TEST_F(LogTest, RandomCorruptionWithoutChecksumsStillTerminates) {

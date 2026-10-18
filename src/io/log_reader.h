@@ -23,11 +23,19 @@ namespace shale::log {
 ///   a record whose length says it would have fitted in its block, or after a FIRST or MIDDLE
 ///   fragment that no LAST follows. These are the shapes in which a writer that died leaves its
 ///   file. The file ends mid-record whatever the fragment boundaries: reading stops there, and
-///   the records before it were all returned.
+///   the records before it were all returned. A fragment that is cut off is the only silent end.
+///   A header whose length runs past the end of the file is one only if the bytes that are there
+///   are not a whole fragment: where some length, up to what is left of the file, gives the
+///   fragment the checksum that the header holds, the fragment was whole and its length is
+///   damaged, and that is reported. A crash leaves a prefix of a fragment, which has the checksum
+///   of the whole one only by a collision of 32 bits, about one in 2^32 for each byte left in a
+///   file that a crash cut. With `checksum` off there is nothing to find a fragment by, and the
+///   case stays silent.
 /// - **Reported.** Everything else is reported to the Reporter, once for each defect, with the
 ///   number of bytes it makes the reader drop and a Corruption status: a read error (the status
 ///   the file returned); "checksum mismatch"; "bad record length", for a length that would take
-///   the record out of its block; "unknown record type", for a type that is not one of the four
+///   the record out of its block, or past the end of the file when the bytes that are there are a
+///   whole fragment; "unknown record type", for a type that is not one of the four
 ///   (zero included); "missing start of fragmented record", for a MIDDLE or LAST with no FIRST
 ///   before it; and "partial record without end", for a FIRST that something other than a MIDDLE
 ///   or LAST follows. A defect in the header or the contents drops the rest of its block, since
@@ -39,8 +47,10 @@ namespace shale::log {
 /// "the log ends here", wherever in the file it falls, and a caller must not take a report with
 /// nothing valid after it for a torn tail: that would accept the loss of good records. The only
 /// torn-tail signal is the end of the stream without a report. Even that does not prove that
-/// nothing was lost: a damaged length field in the last block that points beyond the end of the
-/// file but inside the block cannot be told from a torn tail, and is treated as one.
+/// nothing was lost where the checksums are off, nor where a length is damaged together with the
+/// bytes of the fragment that the checksum would be found in: a damaged length in the last block
+/// that points beyond the end of the file but inside the block is then taken for a torn tail.
+/// Damage to the length of a fragment that is whole is found, and reported.
 ///
 /// A read error reaches the Reporter as the status the file returned, an IOError, and then the
 /// stream ends, so without a Reporter it looks exactly like the end of the file. A caller that
@@ -99,6 +109,11 @@ class Reader {
   };
 
   Physical ReadPhysicalRecord(RecordType* type, std::string_view* payload);
+
+  // Whether the bytes of buffer_ after the header that starts at `header` are a whole fragment, of
+  // some length up to what is left, that the checksum in the header vouches for: `length`, which
+  // the header gives, is then damaged. `length` must be more than is left.
+  bool HoldsAWholeFragmentShorterThan(const char* header, size_t length) const;
 
   // Drops the rest of the block, and reports `reason` and how many bytes that was.
   Physical DropRestOfBlock(std::string_view reason);
