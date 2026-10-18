@@ -123,6 +123,12 @@ target_compile_definitions(sim_test PRIVATE
 set_tests_properties(sim_test PROPERTIES TIMEOUT 1800)
 shale_add_test(determinism SOURCES sim/determinism_test.cc LIBS shale_simulator)
 
+# The database under real threads, with its own scheduler thread and an in-memory Env. These are
+# the tests that ThreadSanitizer is for, and the sanitize job runs the whole suite three times under
+# it, these included. The label lets one run them alone: ctest -L stress.
+shale_add_test(concurrency SOURCES stress/concurrency_test.cc LIBS shale_dbtest)
+set_tests_properties(concurrency_test PROPERTIES LABELS stress)
+
 # Clang's thread-safety analysis is what makes SHALE_GUARDED_BY more than a comment, and nothing
 # else would notice if it silently stopped working. So the build itself is tested: one translation
 # unit that reads a guarded member without the lock must be rejected, and the same unit with the
@@ -152,6 +158,12 @@ add_test(NAME cmake_options_accept_and_reject
          COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/options_test.sh"
                  "${CMAKE_COMMAND}" "${CMAKE_GENERATOR}" "${CMAKE_CXX_COMPILER}")
 set_tests_properties(cmake_options_accept_and_reject PROPERTIES TIMEOUT 300)
+
+# run-flaws.sh decides whether the simulator can fail, so its verdicts and the list of flaws that
+# CI runs are tested too: the matrix of the flaws job must name every flaw the build defines.
+add_test(NAME flaws_script_and_ci_agree
+         COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/flaws_test.sh")
+set_tests_properties(flaws_script_and_ci_agree PROPERTIES TIMEOUT 120)
 
 # The command-line tools. Their libraries are tested directly; the binary is run by a script that
 # makes its own database in a directory of its own. Both exist only when the tools are built.

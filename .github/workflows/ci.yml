@@ -127,6 +127,48 @@ jobs:
           path: build/**/Testing/Temporary/LastTest.log
           if-no-files-found: ignore
 
+  # A suite that has only passed has not shown that it can fail. Each job builds the simulator with
+  # one deliberate flaw compiled in and requires it to go red, so a green job means the flaw was
+  # caught, and its summary names the invariant that caught it. Keep the names in step with
+  # SHALE_FLAW_NAMES in cmake/ShaleOptions.cmake.
+  flaws:
+    name: flaws (${{ matrix.flaw }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    strategy:
+      fail-fast: false
+      matrix:
+        flaw:
+          - skip_wal_sync
+          - skip_dir_sync
+          - drop_tombstones_early
+          - ignore_snapshots_in_compaction
+          - skip_manifest_sync
+          - delete_live_files
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install the toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build clang-18
+
+      - name: Build the simulator with the flaw in, and require it to fail
+        env:
+          FLAW: ${{ matrix.flaw }}
+        run: scripts/run-flaws.sh "$FLAW"
+
+      - name: Upload the simulator output
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sim-output-${{ matrix.flaw }}
+          path: build/flaw-${{ matrix.flaw }}/sim-output.log
+          if-no-files-found: ignore
+
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

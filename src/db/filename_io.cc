@@ -22,7 +22,16 @@ constexpr size_t kCurrentChecksumLine = 7 + 8 + 1;
 
 }  // namespace
 
-Status SyncDirectory(Env* env, const std::string& dbname) { return env->SyncDir(dbname); }
+Status SyncDirectory(Env* env, const std::string& dbname) {
+#if defined(SHALE_FLAW_SKIP_DIR_SYNC)
+  // Flaw skip_dir_sync: the directory is reported synced without being synced.
+  static_cast<void>(env);
+  static_cast<void>(dbname);
+  return Status::OK();
+#else
+  return env->SyncDir(dbname);
+#endif
+}
 
 std::string CurrentFileContents(const std::string& dbname, uint64_t descriptor_number) {
   // CURRENT names the MANIFEST by its bare name: it sits in the directory it points into, and a

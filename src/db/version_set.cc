@@ -459,9 +459,13 @@ Status VersionSet::LogAndApply(VersionEdit edit) {
   std::string record;
   edit.EncodeTo(&record);
   s = manifest_log_->AddRecord(record);
+#if defined(SHALE_FLAW_SKIP_MANIFEST_SYNC)
+  // Flaw skip_manifest_sync: the edit is installed without making the MANIFEST durable.
+#else
   if (s.ok()) {
     s = manifest_file_->Sync();
   }
+#endif
   if (!s.ok()) {
     // What the file holds is unknown, and a Sync() after a failed one proves nothing. Nothing more
     // goes into it.
