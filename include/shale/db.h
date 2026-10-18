@@ -175,9 +175,9 @@ class DB {
   virtual bool GetProperty(std::string_view property, std::string* value) = 0;
 };
 
-/// Deletes the database in the directory `name`: every file the database makes, a log that a
-/// lenient open set aside as "<log name>.dropped" among them, and then the directory if nothing
-/// else is in it. A file that is not the database's is left alone, and so is the directory that
+/// Deletes the database in the directory `name`: every file the database makes, a log that an
+/// open set aside as "<log name>.dropped" among them, and then the directory if nothing else is
+/// in it. A file that is not the database's is left alone, and so is the directory that
 /// holds it. It is a success if there is no such directory.
 ///
 /// It takes the database's lock first, so that it fails with an IOError that names the LOCK file

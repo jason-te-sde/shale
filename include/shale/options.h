@@ -49,8 +49,11 @@ struct Options {
   bool error_if_exists = false;
 
   /// Whether the database treats damage as an error where it can. At open, it decides what is made
-  /// of a write-ahead log with a defect other than an end cut short, which is what a crash leaves:
-  /// with this set, Open fails with Corruption; without it, Open recovers the writes that come
+  /// of a write-ahead log with a defect other than the two that a crash leaves, which Open
+  /// tolerates whatever this says: an end cut short, and a log that begins after a gap in the
+  /// sequence numbers (a power loss took the unsynced end of the log before it). At a gap, the
+  /// log and every later one are set aside and nothing in them is applied. For any other defect,
+  /// with this set Open fails with Corruption; without it, Open recovers the writes that come
   /// before the first defect and applies nothing after it, in that log or in any later one. Those
   /// logs are not deleted: each is renamed to its own name with ".dropped" added, which the
   /// database never reads or deletes again, and the info log says which and why. They are kept
