@@ -36,15 +36,15 @@ uint64_t SaturatingAdd(uint64_t a, uint64_t b) {
                                                       : a + b;
 }
 
-// An iterator over one table that says which table it is over, and that does not pass on an entry
-// that is no internal key. A corruption found in a block names no file, and by the time it has come
-// up through the merge, the compaction and the background task, the person reading it has nothing
-// else to tell which of the inputs it was. An entry whose key is too short to hold its tag or names
-// a type there is not would abort the merging iterator's comparison, or the filter: here it ends
-// the iteration, as damage in the table, and the iterator stays ended until it is positioned again.
-class NamedTableIterator final : public Iterator {
+// An iterator over one input table that does not pass on an entry that is no internal key. An entry
+// whose key is too short to hold its tag, or whose tag names a type there is not, would abort the
+// merging iterator's comparison or the filter; here it ends the iteration, as a Corruption that
+// names the table, and the iterator stays ended until it is positioned again. The iterator that
+// TableCache::NewIterator() returns has named the file in its own errors already, so those pass
+// through: status() adds the name only to an error that lacks it.
+class GuardedTableIterator final : public Iterator {
  public:
-  NamedTableIterator(std::unique_ptr<Iterator> inner, std::string fname)
+  GuardedTableIterator(std::unique_ptr<Iterator> inner, std::string fname)
       : inner_(std::move(inner)), fname_(std::move(fname)) {}
 
   bool Valid() const override { return !malformed_ && inner_->Valid(); }
@@ -62,7 +62,7 @@ class NamedTableIterator final : public Iterator {
   }
 
   void Next() override {
-    SHALE_CHECK(Valid(), "NamedTableIterator::Next requires Valid");
+    SHALE_CHECK(Valid(), "GuardedTableIterator::Next requires Valid");
     inner_->Next();
     Check();
   }
@@ -78,7 +78,7 @@ class NamedTableIterator final : public Iterator {
     if (s.ok()) {
       return s;
     }
-    // A table that failed to open is already named, by the cache that opened it.
+    // The cache's iterator has named the file, and so has an error for a table that did not open.
     if (s.ToString().find(fname_) != std::string::npos) {
       return s;
     }
@@ -239,7 +239,7 @@ Status CompactionJob::RunImpl() {
   children.reserve(inputs.size());
   for (const FileMetaData* file : inputs) {
     stats_.bytes_read = SaturatingAdd(stats_.bytes_read, file->file_size);
-    children.push_back(std::make_unique<NamedTableIterator>(
+    children.push_back(std::make_unique<GuardedTableIterator>(
         ctx_.table_cache->NewIterator(read_options, file->number, file->file_size),
         TableFileName(ctx_.dbname, file->number)));
   }

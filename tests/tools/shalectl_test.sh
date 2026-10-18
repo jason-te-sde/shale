@@ -297,13 +297,30 @@ expect_eq "verify of a damaged database changed no file" "$damaged" "$(fingerpri
 check "get from a damaged table is an error, not a miss" 3 '' --db="$db2" get a
 err_has "get from a damaged table" "Corruption"
 err_has "get names the damaged table" "$(basename "$table")"
-# Nothing is shown: the failure is found where the scan positions on the table. The error names the
-# table, which the table's own iterator does not.
-check "scan over a damaged table" 3 '' --db="$db2" scan
-err_has "scan over a damaged table" "Corruption"
-err_has "scan names the damaged table" "$(basename "$table")"
+# The middle byte of this one-entry table lies in the filter and index region, which is read when the
+# table is opened: the scan fails before it has an iterator over the table, and the name comes from
+# TableCache::FindTable(). A flaw in a data block is another path, tested below.
+check "scan over a table that cannot be opened" 3 '' --db="$db2" scan
+err_has "scan over a table that cannot be opened" "Corruption"
+err_has "scan names the table that cannot be opened" "$(basename "$table")"
 check "dump-sst of a damaged table" 3 '*' dump-sst "$table"
 err_has "dump-sst of a damaged table" "Corruption"
+
+# A flaw in the data block, byte 10 of the table: the table opens, and the checksum of the block
+# fails when the scan reads it. The error comes from the table's own iterator, which does not know
+# which file it is over, so the name is added by the iterator that TableCache::NewIterator() returns.
+db5="$tmp/db5"
+check "put in a database whose data block is damaged" 0 '' --db="$db5" --create put a 1
+check "flush it" 0 '' --db="$db5" flush
+expect_eq "one table with a data block to damage" "1" "$(count_of "$db5" .sst)"
+table5="$(files_of "$db5" .sst)"
+flip_byte "$table5" 10
+check "scan over a damaged data block" 3 '' --db="$db5" scan
+err_has "scan over a damaged data block" "Corruption"
+err_has "scan names the table with the damaged data block" "$(basename "$table5")"
+check "get from a damaged data block is an error, not a miss" 3 '' --db="$db5" get a
+err_has "get from a damaged data block" "Corruption"
+err_has "get names the table with the damaged data block" "$(basename "$table5")"
 
 # On one stream, the problems come before the line that counts them, as on a terminal.
 "$shalectl" --db="$db2" verify >"$tmp/both" 2>&1

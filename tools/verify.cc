@@ -121,8 +121,9 @@ Status CheckTableEntries(Iterator* iter, const FileMetaData& file, const std::st
     }
     previous.assign(key);
   }
-  // A block that fails its checksum does not know which file it is in, and the error of a table
-  // that could not be opened does. It is named once.
+  // The iterator the table cache hands out has named the file in its errors already. One taken from
+  // a table directly has not: a block that fails its checksum knows where in the file it is and not
+  // which file. Either way the file is named once.
   Status status = iter->status();
   if (status.ok() || status.ToString().find(path) != std::string::npos) {
     return status;
