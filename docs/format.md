@@ -6,9 +6,11 @@ for any of the files without looking at the source.
 Nothing here is a promise by prose alone. The table of constants, the table of fixed layouts, the
 table of file names and the worked examples are read by
 [`tests/docs/format_constants_test.cc`](../tests/docs/format_constants_test.cc), which compares each
-of them with the code that writes the file and feeds the examples to the code that reads it. A number
-in this document that disagrees with the code fails that test. The `<!-- ... -->` lines that you do
-not see when this is rendered are what the test finds its tables and examples by.
+of them with the code that writes the file and feeds the examples to the code that reads it. A number in
+one of those tables, or a byte of one of those examples, that disagrees with the code fails that test.
+A number that appears only in the prose around them is not read by the test; each one that matters is
+also in a table. The `<!-- ... -->` lines that you do not see when this is rendered are what the test
+finds its tables and examples by.
 
 ## Contents
 
@@ -67,8 +69,7 @@ from anything else in the directory, and leave those alone.
 
 A file number is printed in decimal, padded with zeros to six digits; a larger number is printed in
 full, as the second table row shows. **Only that spelling is a name.** `9.log`, `0009.log` and
-`MANIFEST-9` are not database files, and recovery neither reads nor deletes them. (An earlier version
-accepted them, and then went looking for `000009.log`; see commit `0757e6d`.)
+`MANIFEST-9` are not database files, and recovery neither reads nor deletes them.
 
 | File | What it holds |
 | --- | --- |
@@ -272,8 +273,8 @@ filter = bit array ‖ k (1 byte)
 - The bit array has `max(n × bits_per_key, 64)` bits, rounded up to whole bytes, where `n` is the
   number of distinct user keys in the table: a key that appears in several versions is added once.
 - `k`, the number of probes, is `bits_per_key × 0.69` rounded down, kept between 1 and 30.
-- A key is hashed once with the 32-bit `Hash()` of `src/util/hash.cc` and the seed `0xbc9f1d34`, to
-  `h`. Its probes are bit `h mod B`, then `(h + delta) mod B`, and so on, where `B` is the size of the
+- A key is hashed once, with the [hash below](#the-hash) and the seed `0xbc9f1d34`, to a 32-bit `h`. Its
+  probes are bit `h mod B`, then `(h + delta) mod B`, and so on, where `B` is the size of the
   array in bits (its length in bytes times 8), `delta = (h >> 17) | (h << 15)` (a rotation of `h` left
   by 15) and each addition wraps at 32 bits. This is double hashing: one hash value stands in for `k`.
 
@@ -285,6 +286,26 @@ filter = bit array ‖ k (1 byte)
 
 A reader treats a filter it cannot read, one with no bit array or a probe count above 30, as one that
 says "maybe" to every key: a damaged filter costs a read of the table and never a missing key.
+
+#### The hash
+
+The hash of the filter must give the same value for the same bytes on every machine, for ever, since it
+decides which bits of a stored filter are set. It is a 32-bit hash of `n` bytes and a seed, in 32-bit
+wrapping arithmetic, with `m = 0xc6a4a793`:
+
+```
+h = seed XOR ((n × m) mod 2^32)
+for each whole 4-byte word w, read little-endian, in order:
+    h = h + w;   h = h × m;   h = h XOR (h >> 16)
+then, if 1 to 3 bytes are left, b0 being the first of them:
+    if 3 are left:      h = h + (b2 << 16)
+    if 2 or 3 are left: h = h + (b1 << 8)
+    h = h + b0;   h = h × m;   h = h XOR (h >> 24)
+```
+
+With no byte left over the last step does not run, and the hash of nothing is the seed. The
+test recomputes it from the constants `hash_multiplier`, `hash_word_shift` and `hash_tail_shift` below, for
+inputs of every length from 0 to 9 bytes, and compares it with the code.
 
 ### The footer
 
@@ -336,14 +357,15 @@ with no field set is the empty string. The tag is a varint32.
 | --- | --- | --- |
 | 1 | `log_number` | varint64: the number of the oldest log that still holds writes not in a table |
 | 2 | `next_file_number` | varint64: the next number to give a file |
-| 3 | `last_sequence` | varint64: the newest sequence number in the tables |
+| 3 | `last_sequence` | varint64: the sequence number the database had reached when the edit was written, which counts writes that are still only in a log; recovery takes the larger of it and the last number it finds in the logs |
 | 4 | `compact_pointer` | varint32 level, length-prefixed internal key: where the next compaction of the level starts |
 | 5 | `deleted_file` | varint32 level, varint64 file number |
 | 6 | `new_file` | varint32 level, varint64 file number, varint64 file size, length-prefixed smallest internal key, length-prefixed largest internal key |
 
 The encoder writes the fields in tag order, and a field may repeat (a compaction deletes many files
 and adds many), so one edit has one encoding. Every record that the database appends carries
-`next_file_number` and `last_sequence`, so that the last record is always enough to know them.
+`next_file_number` and `last_sequence`, taken from the counters of the database at that moment, so that the
+last record is always enough to know them.
 
 <!-- example:version_edit -->
 ```text
@@ -385,12 +407,14 @@ The checksum is there because `CURRENT` is one small file, read once, and one fl
 number would name another MANIFEST that is in the directory, and the database would open an older
 version of itself without a word. The reader accepts that form and no other, byte for byte:
 
+<!-- table:current_messages -->
 | Message | When |
 | --- | --- |
 | `CURRENT file does not end with newline` | the contents are empty or do not end in a newline |
 | `CURRENT file is malformed` | not a name line and then `crc32c:` and eight lower-case hex digits |
 | `CURRENT checksum mismatch` | the checksum is not that of the name line |
 | `CURRENT names an invalid file` | the name is not a MANIFEST name spelled as it is written |
+<!-- /table:current_messages -->
 
 They are checked in that order, so that a damaged name is reported as damage. `CURRENT` is replaced
 atomically: the new contents are written to `NNNNNN.dbtmp`, synced, renamed over `CURRENT`, and the
@@ -497,6 +521,9 @@ code does, for example the first byte of an encoded edit.
 | `crc32c_mask_delta` | 0xa282ead8 | What is added after the rotation. |
 | `crc32c_check_value` | 0xe3069283 | CRC-32C of the nine ASCII digits `123456789`, which fixes the polynomial. |
 | `bloom_hash_seed` | 0xbc9f1d34 | Seed of the filter's hash. |
+| `hash_multiplier` | 0xc6a4a793 | The multiplier `m` of the hash. |
+| `hash_word_shift` | 16 | `h` is XORed with itself shifted right by this much after each whole word. |
+| `hash_tail_shift` | 24 | The same, after the last 1 to 3 bytes. |
 | `bloom_probe_delta_rotate` | 15 | The probe step is the hash rotated left by this many bits. |
 | `bloom_min_bits` | 64 | The smallest bit array of a filter. |
 | `bloom_max_probes` | 30 | The most probes; a larger count in a file is a filter the reader does not know. |

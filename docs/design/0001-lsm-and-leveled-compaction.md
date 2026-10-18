@@ -45,9 +45,12 @@ oracles and replayed by the simulator.
 
 - Every write is sequential: an append to the log and an insert in memory. Flush and compaction write
   whole new files.
-- Every file except the log is immutable once written. A crash can therefore leave extra files, which
-  recovery deletes, and can never leave a half-modified one. That is what makes the crash argument
-  short: see [ADR 0004](0004-durability.md).
+- A table is immutable once written. The two files that change, the write-ahead log and the MANIFEST,
+  only ever have a record appended, each record checksummed, and the MANIFEST is synced before the
+  version it makes is installed. A crash can therefore leave extra files, which recovery deletes, and a
+  log or MANIFEST whose last record is cut, which the reader takes for its end
+  (`log::Reader`, `VersionSet::Recover`); it can never leave a half-modified table. That is what makes the
+  crash argument short: see [ADR 0004](0004-durability.md).
 - A read looks in the memtables, in each level 0 file whose range covers the key, and in at most one
   file for each deeper level, and a Bloom filter lets it skip most of those without reading a block.
 - The invariant that a level's files are disjoint is checkable: `ApplyEdit` refuses an edit that breaks
@@ -76,7 +79,8 @@ oracles and replayed by the simulator.
 - **A B-tree with in-place updates.** Rejected. Every update is a random write into a page, a crash in
   the middle of one tears the page, and the engine then needs either a write-ahead log *and* a way to
   protect against torn pages, or copy-on-write all the way to the root. An LSM tree needs the log and
-  nothing more, because it never modifies a file after it is written.
+  nothing more, because it never rewrites a byte of a file that it has written: tables are written
+  once, and the log and the MANIFEST only grow.
 - **Universal (size-tiered) compaction.** Rejected. It writes less per byte, but a read has to consult
   every overlapping run, and the space a database takes can be a multiple of its data while runs wait
   to be merged. It also gives the invariant checker less to say: the "levels are disjoint" property that

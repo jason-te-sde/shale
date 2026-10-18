@@ -424,7 +424,8 @@ std::map<std::string, uint64_t> CodeConstants() {
 const std::set<std::string>& ConstantsCheckedByTheirFormulas() {
   static const std::set<std::string> names = {
       "crc32c_mask_rotate",       "crc32c_mask_delta", "crc32c_check_value", "bloom_hash_seed",
-      "bloom_probe_delta_rotate", "bloom_min_bits",    "bloom_max_probes"};
+      "bloom_probe_delta_rotate", "bloom_min_bits",    "bloom_max_probes",   "hash_multiplier",
+      "hash_word_shift",          "hash_tail_shift"};
   return names;
 }
 
@@ -748,6 +749,101 @@ TEST(FormatDocTest, TheFilterFollowsTheDocumentedRules) {
     EXPECT_EQ(static_cast<uint64_t>((builder.Finish().size() - 1) * 8),
               DocConstant(doc, "bloom_min_bits"));
   }
+}
+
+// The hash of the filter, worked out from the rules of the document alone.
+uint32_t HashByTheDocument(const std::string& data, uint32_t seed,
+                           const std::map<std::string, uint64_t>& doc) {
+  const auto m = static_cast<uint32_t>(DocConstant(doc, "hash_multiplier"));
+  const auto word_shift = static_cast<unsigned>(DocConstant(doc, "hash_word_shift"));
+  const auto tail_shift = static_cast<unsigned>(DocConstant(doc, "hash_tail_shift"));
+  uint32_t h = seed ^ static_cast<uint32_t>(static_cast<uint64_t>(data.size()) * m);
+  size_t i = 0;
+  for (; data.size() - i >= 4; i += 4) {
+    uint32_t word = 0;
+    for (size_t j = 0; j < 4; j++) {
+      word |= uint32_t{static_cast<uint8_t>(data[i + j])} << (8 * j);
+    }
+    h += word;
+    h *= m;
+    h ^= h >> word_shift;
+  }
+  const size_t left = data.size() - i;
+  if (left > 0) {
+    if (left == 3) {
+      h += uint32_t{static_cast<uint8_t>(data[i + 2])} << 16;
+    }
+    if (left >= 2) {
+      h += uint32_t{static_cast<uint8_t>(data[i + 1])} << 8;
+    }
+    h += uint32_t{static_cast<uint8_t>(data[i])};
+    h *= m;
+    h ^= h >> tail_shift;
+  }
+  return h;
+}
+
+TEST(FormatDocTest, TheHashFollowsTheDocumentedRules) {
+  const std::vector<std::string> lines = LoadLines();
+  const std::map<std::string, uint64_t> doc = DocConstants(lines);
+  // Bytes that are not text, a zero among them, so that no length of input is treated as special.
+  const std::string pattern = [] {
+    std::string text = "shale";
+    text.insert(text.begin(), {'\x01', static_cast<char>(0x80), static_cast<char>(0xfe), '\x7f'});
+    text.push_back('\0');
+    text.push_back(static_cast<char>(0xff));
+    return text;
+  }();
+  for (size_t length = 0; length <= 9; length++) {
+    for (const uint32_t seed : {uint32_t{0}, uint32_t{0xbc9f1d34}, uint32_t{0xffffffff}}) {
+      const std::string data = pattern.substr(0, length);
+      EXPECT_EQ(Hash(data.data(), data.size(), seed), HashByTheDocument(data, seed, doc))
+          << length << " bytes, seed " << seed;
+    }
+  }
+  // The hash of nothing is the seed.
+  EXPECT_EQ(Hash(nullptr, 0, 12345), uint32_t{12345});
+}
+
+// The messages of the table are those that ParseCurrentFile() gives, each for a CURRENT that it is
+// made for.
+TEST(FormatDocTest, TheCurrentMessagesAreTheOnesTheCodeGives) {
+  const std::vector<std::string> lines = LoadLines();
+  const auto rows = TableRows(lines, "current_messages", {"Message", "When"});
+  ASSERT_FALSE(rows.empty());
+  std::set<std::string> documented;
+  for (const auto& row : rows) {
+    documented.insert(row[0]);
+  }
+
+  // A CURRENT whose checksum line is right for `first_line`.
+  const auto with_checksum = [](const std::string& first_line) {
+    char hex[9];
+    std::snprintf(hex, sizeof hex, "%08x",
+                  crc32c::Mask(crc32c::Value(first_line.data(), first_line.size())));
+    return first_line + "crc32c:" + hex + "\n";
+  };
+  const std::vector<std::string> contents = {
+      "",                                             // does not end with a newline
+      "MANIFEST-000007",                              // nor does this
+      "MANIFEST-000007\nthe checksum is not here\n",  // malformed
+      "MANIFEST-000007\ncrc32c:00000000\n",           // a checksum that is not the name's
+      with_checksum("garbage\n"),                     // right checksum, not a MANIFEST name
+  };
+  std::set<std::string> produced;
+  for (const std::string& text : contents) {
+    uint64_t number = 0;
+    const Status s = ParseCurrentFile("db", text, &number);
+    ASSERT_TRUE(s.IsCorruption()) << "'" << text << "': " << s.ToString();
+    const std::string message = s.ToString();
+    ASSERT_EQ(message.rfind("Corruption: ", 0), size_t{0}) << message;
+    produced.insert(message.substr(std::string("Corruption: ").size()));
+  }
+  EXPECT_EQ(documented, produced);
+  // And the form that is accepted.
+  uint64_t number = 0;
+  EXPECT_OK(ParseCurrentFile("db", CurrentFileContents("db", 7), &number));
+  EXPECT_EQ(number, uint64_t{7});
 }
 
 TEST(FormatDocTest, TheFileNamesAreWhatTheCodePrintsAndParses) {

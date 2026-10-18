@@ -37,13 +37,16 @@ simulator uses:
 - `ManualScheduler`, which runs a task only when its owner says so, on the owner's thread. A flush and a
   compaction are single steps of the simulator, so *when* they happen is a choice of the seed.
 - `shale::Random` (`src/util/random.h`) with an explicit seed for everything else: skip-list heights,
-  fault injection, operation generation. `std::rand`, `std::random_device` and the `<random>`
-  distributions are banned in `src/`, `tests/` and `tools/`, because a distribution is implementation
-  defined, and a seed would then not mean the same run under libstdc++ and libc++.
+  fault injection, operation generation. `std::rand`, `std::random_device` and `<random>` itself are
+  banned in `src/`, `tests/` and `tools/`, because a distribution is implementation defined, and a seed
+  would then not mean the same run under libstdc++ and libc++.
 
-Enforcement is mechanical: `scripts/check-layering.sh` reads every `#include`, the link dependencies
-enforce the rest, and there is no mutable global state (`Env::Default()` is a function-local static that
-holds none).
+What enforces this: the link dependencies keep `shale_core` from reaching the I/O layer;
+`scripts/check-layering.sh` reads every `#include`, fails on `throw` under `src/`, and fails on
+`std::rand`, `std::srand`, `rand(`, `srand(`, `std::random_device` and `#include <random>` under `src/`,
+`tests/` and `tools/` (its own test shows each of these going red). That there is **no mutable global
+state** is a rule that no tool checks, and that review holds: `Env::Default()` is a function-local static
+that holds none.
 
 ## Consequences
 

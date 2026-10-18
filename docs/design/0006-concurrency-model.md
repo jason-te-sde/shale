@@ -57,8 +57,8 @@ to list and delete files.
   reads a guarded member without the lock, which the build must reject, and one with the lock, which it
   must accept (`thread_safety_rejects_unguarded_access`, `thread_safety_accepts_guarded_access`).
 - `tests/stress/concurrency_test.cc` runs real threads against the database (writers, readers, scans that
-  span flushes and compactions, snapshots held across both), and the sanitize job runs the whole suite
-  three times under ThreadSanitizer.
+  span flushes and compactions, snapshots held across both), and the sanitize job runs the suite three
+  times under ThreadSanitizer (the single-threaded simulator and its determinism test once, at 20 seeds).
 - Misuse that no lock can make safe aborts with a message and does not corrupt: closing a database with
   a live iterator or snapshot, releasing a snapshot twice or on another database, a `ManualScheduler`
   entered from two threads at once.

@@ -17,8 +17,8 @@ claim below is backed by a test, a commit or a measurement that you can run.
 
 **1. Every write the database confirmed is still there after a crash.** A deterministic simulator runs
 the real engine over a filesystem that can lose power: it keeps the bytes that were synced and a seeded
-prefix of the rest (so a file is cut at a seeded byte), rolls back the directory changes that were never
-synced, kills the process, fails calls, and flips bits in what is read. After **every** step it compares
+prefix of the rest (so a file is cut at a seeded byte), keeps only a seeded in-order prefix of the
+directory changes (new files, renames, removals) that were never synced, kills the process, fails calls, and flips bits in what is read. After **every** step it compares
 the database with a reference model, and after every reopen it requires the recovered state to be the
 state after some prefix of the acknowledged writes, at least as long as the last synced one, with no
 half-applied batch.
@@ -59,8 +59,10 @@ cmake --preset release && cmake --build --preset release
 ```
 
 The transcript below is the output of these commands as they were run (with `build/release/tools` on the
-`PATH`), not written by hand:
+`PATH`), not written by hand, and [a test](tests/tools/readme_transcript_test.sh) runs them again and
+compares:
 
+<!-- transcript:try-it -->
 ```
 $ shalectl --db=/tmp/shale-demo --create put user:1 alice
 $ shalectl --db=/tmp/shale-demo put user:2 bob
@@ -163,8 +165,9 @@ int main() {
 }
 ```
 
-Every call returns a `shale::Status`, which is `[[nodiscard]]`: nothing throws, and a dropped error is a
-compile error. [`examples/basic.cc`](examples/basic.cc) is a longer tour with batches, an iterator and a
+Every operation that can fail returns a `shale::Status` (an iterator reports its failure through
+`status()`), and `Status` is `[[nodiscard]]`: nothing throws, and a dropped error is a warning, which the
+project's own build, like the examples', turns into an error. [`examples/basic.cc`](examples/basic.cc) is a longer tour with batches, an iterator and a
 snapshot. Every public item in [`include/shale/`](include/shale/) has a Doxygen comment, and the build fails
 without it.
 
@@ -191,9 +194,10 @@ without it.
 ```
 
 A write goes to the log and the memtable; a full memtable is written out as an immutable sorted table;
-compaction merges tables down through seven levels. Every file except the log is written once and made
-whole before anything names it, which is what keeps the crash argument short. The steps of every path
-are in [docs/architecture.md](docs/architecture.md), and every byte of every file is in
+compaction merges tables down through seven levels. A table is written once and made whole before
+anything names it; the two files that change, the log and the MANIFEST, only ever have a checksummed
+record appended, and a crash that cuts the last record is told from damage when the database opens. That
+is what keeps the crash argument short. The steps of every path are in [docs/architecture.md](docs/architecture.md), and every byte of every file is in
 [docs/format.md](docs/format.md).
 
 ## What it promises

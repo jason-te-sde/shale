@@ -13,9 +13,12 @@ line.
 
 **Please do not open a public issue for a security problem.**
 
-Report it privately through GitHub: on the repository's **Security** tab choose **Report a
-vulnerability** (<https://github.com/jason-te-sde/shale/security/advisories/new>). If you cannot use that,
-write to the maintainer at te.r@northeastern.edu with `shale security` in the subject.
+Report it privately, by either of two ways, whichever you can use:
+
+- through GitHub: on the repository's **Security** tab choose **Report a vulnerability**
+  (<https://github.com/jason-te-sde/shale/security/advisories/new>), if the repository has private
+  reporting turned on;
+- by email to the maintainer at te.r@northeastern.edu, with `shale security` in the subject.
 
 Please include:
 

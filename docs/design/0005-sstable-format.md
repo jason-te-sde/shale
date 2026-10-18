@@ -61,8 +61,9 @@ small: a table either yields the entries that were written, in order, or an erro
   that separates two blocks, so the index of a table with long keys is bigger.
 - **No compression.** A table takes the bytes of its keys and values, less prefix compression of keys. A
   value that compresses well takes more disk than it needs to. The type byte reserves the place.
-- **A filter is a probabilistic answer.** At 10 bits per key it lets about 1.5% of absent keys through,
-  as measured in `tests/io/bloom_test.cc`, and each of those costs a data block read.
+- **A filter is a probabilistic answer.** At 10 bits per key it let 1.5% of absent keys through when it was
+  measured once, with 100,000 keys and 2 million probes (commit `adb4509`); `tests/io/bloom_test.cc` asserts
+  only that the rate is at most 2%. Each key that gets through costs a data block read.
 - **There is no prefix or range filter.** A scan cannot skip a table by its range of prefixes.
 - **One filter per table, not per block.** A table's filter cannot be partially loaded; a very large table
   would load a very large filter. Tables here are small by construction (2 MiB targets).

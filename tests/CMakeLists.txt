@@ -112,7 +112,9 @@ target_compile_definitions(format_constants_test PRIVATE
 # and the counters that it states are read from its tables and held to the code.
 shale_add_test(operations_doc SOURCES docs/operations_doc_test.cc LIBS shale_db shale_testkit)
 target_compile_definitions(operations_doc_test PRIVATE
-  SHALE_OPERATIONS_DOC_PATH="${PROJECT_SOURCE_DIR}/docs/operations.md")
+  SHALE_OPERATIONS_DOC_PATH="${PROJECT_SOURCE_DIR}/docs/operations.md"
+  SHALE_OPTIONS_HEADER_PATH="${PROJECT_SOURCE_DIR}/include/shale/options.h"
+  SHALE_DB_HEADER_PATH="${PROJECT_SOURCE_DIR}/include/shale/db.h")
 
 # The program that the README shows is a file that CI builds against an installation, and the README's
 # copy of it, and of the CMake lines around it, is held to the file.
@@ -216,6 +218,14 @@ if(SHALE_BUILD_TOOLS)
            COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/shale_bench_test.sh"
                    "$<TARGET_FILE:shale_bench>")
   set_tests_properties(shale_bench_workloads PROPERTIES TIMEOUT 300)
+
+  # The README's "Try it" is the output of its commands. This runs them again and compares, so that a
+  # change to what shalectl prints, or to which files an open makes, fails here and not in a reader's
+  # terminal.
+  add_test(NAME readme_transcript
+           COMMAND "${SHALE_BASH}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/readme_transcript_test.sh"
+                   "$<TARGET_FILE:shalectl>")
+  set_tests_properties(readme_transcript PROPERTIES TIMEOUT 120)
 
   # The crash test kills a child process that is writing to a real directory, and the parent checks
   # what survived. The tool refuses a directory that already holds a database, so each run of the

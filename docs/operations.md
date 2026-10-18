@@ -101,10 +101,13 @@ to guess. Your choices:
 
 1. **Restore from a backup** and replay what you can from your own record of the writes. This is the
    choice that loses nothing the backup had.
-2. **Open with `paranoid_checks = false`** on a *copy first*. The open then recovers every write
-   **before the first defect**, applies nothing after it (in that log or in any later one), and
-   **renames** the log with the defect and every later log to `NNNNNN.log.dropped`. It deletes nothing.
-   The `LOG` says which files and why. The writes in those files are what you lose, and they are still
+2. **Open with `paranoid_checks = false`** on a *copy first*. `shalectl` has no flag for it: it takes a
+   small program that sets `Options::paranoid_checks` to `false` and calls `DB::Open`. The open then
+   recovers every write **before the first defect**, applies nothing after it (in that log or in any
+   later one), and **renames** the log with the defect and every later log to `NNNNNN.log.dropped`. It
+   deletes none of the logs that it drops. (Like every open, it turns the logs it did replay into a
+   table and starts a new MANIFEST, and then removes what those replace.) The `LOG` says which files
+   and why. The writes in those files are what you lose, and they are still
    on disk, so you can read them with `shalectl dump-wal`. The database is a point-in-time recovery: it
    holds a consistent prefix of the writes.
 3. To read what the log still holds before deciding, `shalectl dump-wal NNNNNN.log` prints every record
@@ -115,14 +118,16 @@ to guess. Your choices:
 `MANIFEST-NNNNNN`** (`the MANIFEST holds no record`, `VersionEdit: ...`, a defect the log reader
 reports, or an edit that breaks a rule of the table set). These two files say which tables are live,
 and there is **no repair tool** and no safe way to rebuild them by hand. Restore from a backup. If
-there is none, the tables are still there and can be read one at a time:
+there is none, the tables and the logs are still there and can be read one file at a time:
 
 ```
 shalectl dump-sst 000012.sst
+shalectl dump-wal 000019.log
 ```
 
-prints every entry of a table (key, sequence number, put or delete, value), checking every block, so a
-new database can be loaded from them in sequence-number order, newest last. This is salvage and not
+`dump-sst` prints every entry of a table (key, sequence number, put or delete, value), checking every
+block; `dump-wal` prints the writes of a log that no table holds yet, and reports each defect. A new
+database can be loaded from them in sequence-number order, newest last. This is salvage and not
 recovery, and it is your job to decide which entries are current.
 
 **`IO error` while opening.** A read of the log, the MANIFEST or a table failed. That says nothing about
@@ -274,7 +279,7 @@ to measure, and [benchmarks](benchmarks.md) shows how `shale_bench` does it.
 | `target_file_size` | Fewer, larger table files below level 0. | More, smaller ones. |
 | `block_size` | Fewer blocks to index; a lookup reads more bytes for the one block it needs, and a block in the cache is larger. | The reverse. A block is also the unit of the checksum. |
 | `block_restart_interval` | Keys are compressed against more of their neighbours; a seek walks further. | The reverse. |
-| `bloom_bits_per_key` | Fewer false positives. About 1.5% of absent keys pass the filter at 10 bits, and about 0.3% at 15 (measured in `tests/io/bloom_test.cc` and noted in `src/io/bloom.h`); each costs a block read. More memory per open table. `0` writes no filters. | The reverse. |
+| `bloom_bits_per_key` | Fewer false positives. Measured once, with 100,000 keys and 2 million absent probes (commit `adb4509`): 1.5% of absent keys pass the filter at 10 bits and 0.26% at 15. The test (`tests/io/bloom_test.cc`) asserts only that the rate at 10 bits is at most 2%. Each key that passes costs a block read. More memory per open table. `0` writes no filters. | The reverse. |
 | `block_cache_capacity` | More data blocks kept in memory for reads. The cache holds data blocks only, charged by their size; the index and filter of each open table are in memory besides, and are not counted here. There is no hit counter: judge it by read latency. | Less memory. |
 | `max_open_files` | More tables kept open. The table cache holds `max_open_files - 10` tables (ten files are reserved for the log, the MANIFEST and the like); a table that is not open is opened again, reading its footer, index and filter, when a read needs it. | If there are more tables than this, reads pay to reopen them. |
 
@@ -291,38 +296,23 @@ you can regenerate, and `Flush()` or a `sync = true` write when you need a point
 ## Backup
 
 A database is a directory. A backup is a copy of it that is **consistent**: the MANIFEST that it holds
-must name tables that it holds. The engine has no checkpoint call ([ADR 0007](design/0007-scope.md)), so
-the consistency comes from you.
+must name tables that it holds. There is one way to take one.
 
-**The simple, certain way: close the database and copy the directory.** Closing does not flush: the
-memtable is in the log, and the log is in the copy, and opening the copy replays it. A copy of a
-closed database is a complete, consistent backup.
+**Close the database (or stop the process that has it open), then copy the whole directory.** `LOCK` and
+`LOG` may be skipped; everything else may not. Closing does not flush: the memtable is in the log, the
+log is in the copy, and opening the copy replays it. Nothing runs while the directory is copied, so no
+file appears or disappears under the copy.
 
-**If the database must stay open:**
+Then **check the copy**: `shalectl verify --db=COPY` reads the MANIFEST and every table, with checksums
+on, and says `ok` or names what is wrong. `verify` finds a table that is missing or damaged; it cannot
+find one that is there and older than it should be, which is another reason to copy only a closed
+database. To **restore**, copy the directory back while the database is closed, and open it.
 
-1. **Stop all writes** in your application. Nothing that writes may run during the copy.
-2. Call `Flush()`. It returns when the memtable is a table; the log that held it is deleted and the
-   current log is empty. (After `Flush()` the copy needs no replay; before it, the copy relies on
-   replay, which also works.)
-3. **Wait until background work has finished.** A flush can make a compaction due, and a compaction
-   adds files and deletes others while you copy: a copy that catches it half-way can hold a MANIFEST
-   that names a table that was already deleted. There is no call that says background work is idle.
-   Poll `shale.counters` twice a few seconds apart. If `flushes` and `compactions` are unchanged and
-   `shale.num-files-at-level0` is below `l0_compaction_trigger`, background work is very probably
-   idle. That is a heuristic and not a guarantee (a level that is over its size limit is compacted
-   too), which is why closing the database is the way to be sure.
-4. Copy **the whole directory**. `LOCK` and `LOG` may be skipped; everything else may not.
-5. Allow writes again.
-6. **Check the copy**: `shalectl verify --db=COPY`. It reads the MANIFEST and every table, with
-   checksums on, and says `ok` or names what is wrong. Then, ideally, open the copy once to see that
-   it starts.
-
-If you cannot meet step 3, use the first way. **Restore** by copying the directory back with the database
-closed and opening it.
-
-A backup made while writes continued, or copied file by file while a compaction ran, is the one
-that fails when you need it. `verify` finds a missing table; it cannot find a table that is there and
-older than it should be, so the discipline above matters.
+No online copy is offered, for one reason: nothing the engine exposes says that no flush or compaction
+is in flight (a counter moves when one *ends*), and a copy that catches one half-way can hold a MANIFEST
+that names a table that was already deleted. Calling `Flush()` first does not change that, and a
+backup that is wrong in that way is the one that fails when it is needed. The engine has no checkpoint
+call ([ADR 0007](design/0007-scope.md)).
 
 ## shalectl
 

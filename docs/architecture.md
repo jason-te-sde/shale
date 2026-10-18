@@ -89,8 +89,9 @@ with a driver that decides when each task runs.
 These rules are checked three ways: by link dependencies in `src/CMakeLists.txt`,
 by [`scripts/check-layering.sh`](../scripts/check-layering.sh), which reads every `#include` (and
 also checks that nothing under `src/` or `include/` writes to standard output or standard error,
-`src/util/check.cc` excepted), and by a test of the script itself that shows it alarming and passing
-(`tests/scripts/layering_test.sh`).
+`src/util/check.cc` excepted, that nothing under `src/` throws, and that no C++ under `src/`, `tests/`
+or `tools/` uses `std::rand` or `std::random_device` or includes `<random>`), and by a test of the
+script itself that shows each rule alarming and passing (`tests/scripts/layering_test.sh`).
 
 ## Threads
 
@@ -326,8 +327,8 @@ The destructor aborts if an iterator or a snapshot is still alive, or if a write
 in progress, since they point into what is about to be freed. It then sets `shutting_down_`, waits for
 the background task that is running (a compaction stops at its next output), closes the log and
 releases the lock. **Closing does not flush**: what the memtables hold is in the logs, which the next
-open replays. That is deliberate, and it is why `Flush()` is the call to make before copying a
-directory (see [operations](operations.md#backup)).
+open replays. That is deliberate, and it is why a copy of a closed database needs no more than the next
+open to be whole (see [operations](operations.md#backup)).
 
 ## Where to look
 

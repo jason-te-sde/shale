@@ -78,10 +78,15 @@ On Linux the engine uses `fdatasync` for files and `fsync` for directories. On m
 
 ## Consequences
 
-**What this buys.** A short, enumerable argument. Every file but the log is written once and made whole
-before anything names it, the log is protected by its checksum and by rule 1, and the one mutable
-pointer, `CURRENT`, changes by an atomic rename. The simulator holds the engine to D1 to D6 after every
-crash, not only at the end of a run.
+**What this buys.** A short, enumerable argument. A table is written once and made whole before anything
+names it. Three files change after they are written, and each changes in one way only. The log and the
+MANIFEST only have a record appended, each record checksummed: the log is protected by rule 1, and the
+MANIFEST by rule 5 (an edit is synced before the version it makes is installed), so a crash that cuts the
+last record of either leaves a file that ends short, which the reader takes for its end
+(`ManifestCutAnywhereAfterItsFirstRecordRecoversTheRecordsBeforeTheCut` in
+`tests/db/version_set_test.cc`) and that no later write is appended to, because every open starts a new
+log and a new MANIFEST. The third, `CURRENT`, is replaced by an atomic rename (rule 6). The simulator
+holds the engine to D1 to D6 after every crash, not only at the end of a run.
 
 **What it costs.**
 

@@ -57,8 +57,10 @@ Four further rules:
    sequence number does not come after the last one, or would run past 2^56, is `Corruption`. (The
    memtable aborts on a repeated sequence number, so a log that repeats one is refused before it gets
    there.)
-4. **A failed or interrupted open loses nothing.** Files that a failed open made are not deleted, because the
-   MANIFEST may name them; the next open finds them and sweeps what nothing names.
+4. **A failed or interrupted open loses nothing.** A file that a failed open made is removed only where the
+   code can show that nothing names it (a new MANIFEST when `CURRENT` is seen to name the old one, a table
+   that failed to seal, an empty new log). Any other is left, because the MANIFEST may name it; the next
+   open finds it and sweeps what nothing names.
 
 ## Consequences
 

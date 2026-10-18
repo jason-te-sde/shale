@@ -39,31 +39,36 @@ hour, which is cheaper than a red build. At the least, run `ctest --preset dev`,
 
 ## The rules
 
-These are checked, by the compiler, by a script, or by a test, and a change that breaks one is refused by
-CI whatever else it does.
+Every rule here is checked by the compiler, by a script or by a test, and a change that breaks one is
+refused by CI whatever else it does, **except one**, which is marked: a rule that no tool checks, and that
+a reviewer holds you to.
 
 - **C++20, no extensions.** No third-party code at runtime.
 - **Warnings are errors**: `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wsign-conversion
   -Wnon-virtual-dtor -Wold-style-cast -Werror`, and `-Wthread-safety` under Clang, on every target
   including tests, tools and fuzzers.
 - **Errors are values.** A function that can fail returns a `shale::Status` (it is `[[nodiscard]]`).
-  **Nothing under `src/` throws.** A caller's mistake is `InvalidArgument`; `SHALE_CHECK` is for an internal
-  invariant that has been broken, and aborts.
+  **Nothing under `src/` throws**: `scripts/check-layering.sh` fails on the word `throw` in code there. A
+  caller's mistake is `InvalidArgument`; `SHALE_CHECK` is for an internal invariant that has been broken,
+  and aborts.
 - **Layering** ([architecture](docs/architecture.md#layers)): `src/core/` includes no thread, mutex, atomic,
   clock, file or random header; `src/util/` includes only `util/`, `shale/` and the standard library; and
   so on. `scripts/check-layering.sh` reads every `#include`.
 - **Nothing under `src/` or `include/` writes to standard output or error**, except the one line that
   `src/util/check.cc` prints before it aborts. Tools under `tools/` may print.
 - **No mutable static or global state.** `Env::Default()` returns a function-local static that holds none.
-- **All randomness is `shale::Random` with an explicit seed.** `std::rand`, `std::random_device` and the
-  `<random>` distributions are banned in `src/`, `tests/` and `tools/`, because a distribution is
-  implementation-defined and a seed would not reproduce across standard libraries.
+  **Not checked by any tool: this is held by review.**
+- **All randomness is `shale::Random` with an explicit seed.** `std::rand`, `std::srand`,
+  `std::random_device` and `#include <random>` (whose distributions are implementation-defined, so a seed
+  would not reproduce across standard libraries) are banned in `src/`, `tests/` and `tools/`, and
+  `scripts/check-layering.sh` fails on them.
 - **Every public item in `include/shale/` has a `///` comment.** Doxygen runs with warnings as errors.
 - **Formatting** is `clang-format` with the repository's `.clang-format` (Google style, 100 columns), at
   the version CI pins, and **`clang-tidy`** with the repository's `.clang-tidy` and warnings as errors, on
   `src/` and `tools/`.
 - **Everything in the repository is English**: code, comments, documents, commit messages, test names.
-  `scripts/check-hygiene.sh` checks that in every tracked file and every commit message.
+  `scripts/check-hygiene.sh` checks that no tracked file and no commit message contains Chinese, Japanese
+  or Korean characters; the rest of the rule is a convention.
 
 ## Tests come first
 

@@ -24,7 +24,7 @@ compaction policy and one background thread**. These are not built, on purpose:
 | **Prefix Bloom filters, partitioned index, direct I/O, memory-mapped reads** | Performance features that do not change what has to be proved. Memory-mapped reads would also turn a read error or a truncated file into a signal instead of a `Status`. |
 | **More than one background thread, subcompactions, universal or FIFO compaction, compaction triggered by seeks** | One background task at a time is what lets the concurrency argument be written down ([ADR 0006](0006-concurrency-model.md)); leveled compaction is the one policy ([ADR 0001](0001-lsm-and-leveled-compaction.md)). |
 | **Index separator shortening** (`FindShortestSeparator`) | A space optimisation. The last key of a block is a valid separator, so the index is correct without it ([ADR 0005](0005-sstable-format.md)). |
-| **A repair tool, a backup or checkpoint API** | [Operations](../operations.md#backup) gives the way to take a backup (close the database, or stop the writes, flush, and copy the directory) and `shalectl verify` checks one. A repair tool that guesses at damaged files is a promise the engine would have to keep. |
+| **A repair tool, a backup or checkpoint API** | [Operations](../operations.md#backup) gives the one way to take a backup (close the database, then copy the directory) and `shalectl verify` checks one. A repair tool that guesses at damaged files is a promise the engine would have to keep. |
 | **A network server, an RPC layer, a metrics endpoint** | shale is a library that a process links. A service that exposes a store over a network is a different program with a different failure model, and sits on top. |
 | **Replication, consensus and failover** | Replicating a store needs log shipping, membership and a leader, and the correctness argument is a distributed one. It belongs to a system built on a storage engine, not in it. |
 | **Queue semantics: consumer groups, retry scheduling, dead-letter queues** | These are the features of a message queue. Such a system would use an ordered store like this one for its state; none of them is a question about how bytes get to a disk safely. |
@@ -44,8 +44,8 @@ is short enough to read.
 
 - A user who needs reverse scans, transactions, compression, a network interface or replication has to
   build them, or use a larger engine. That is the point of this list.
-- Without a checkpoint call, a backup of a database that stays open is a procedure with a condition
-  ([operations](../operations.md#backup)), not an API that is safe by construction.
+- Without a checkpoint call there is no online backup: the database has to be closed to be copied
+  ([operations](../operations.md#backup)), because nothing exposes that no compaction is in flight.
 - Without compression, data takes more disk than it could.
 - Without a repair tool, a database whose MANIFEST or `CURRENT` is damaged is restored from a backup;
   the tables can still be read one file at a time with `shalectl dump-sst`.

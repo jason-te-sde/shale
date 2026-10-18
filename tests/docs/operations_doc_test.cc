@@ -208,6 +208,61 @@ TEST(OperationsDocTest, TheYesOrNoDefaultsMatchTheCode) {
   }
 }
 
+// The data members of `struct NAME` in a header: the lines "  type name = value;" or "  type name;"
+// at two spaces of indent, between "struct NAME {" and the first "};".
+std::set<std::string> MembersOf(const std::vector<std::string>& lines, const std::string& name) {
+  std::set<std::string> members;
+  size_t i = 0;
+  while (i < lines.size() && lines[i] != "struct " + name + " {") {
+    i++;
+  }
+  if (i == lines.size()) {
+    ADD_FAILURE() << "options.h has no 'struct " << name << " {'";
+    return members;
+  }
+  for (i++; i < lines.size() && lines[i] != "};"; i++) {
+    const std::string& line = lines[i];
+    if (line.size() < 3 || line.compare(0, 2, "  ") != 0 || line[2] == ' ' || line[2] == '/') {
+      continue;
+    }
+    const size_t semicolon = line.find(';');
+    if (semicolon == std::string::npos) {
+      continue;
+    }
+    std::string declaration = line.substr(2, semicolon - 2);
+    const size_t equals = declaration.find(" =");
+    if (equals != std::string::npos) {
+      declaration = declaration.substr(0, equals);
+    }
+    members.insert(declaration.substr(declaration.find_last_of(" *&") + 1));
+  }
+  return members;
+}
+
+// A new option is a page of the guide: its default, its range and what raising it costs. So the
+// options of the header are listed here with where each is documented, and one that is added to the
+// header and not to this list fails the test.
+TEST(OperationsDocTest, EveryOptionOfTheHeaderHasAPlaceInTheGuide) {
+  const std::vector<std::string> header = doc_tables::LoadLines(SHALE_OPTIONS_HEADER_PATH);
+  ASSERT_FALSE(header.empty());
+
+  std::set<std::string> options = {"create_if_missing", "error_if_exists", "paranoid_checks",
+                                   // Not tuning: the Env and the Scheduler are what the engine is
+                                   // given, and are described in the headers and in the ADRs.
+                                   "env", "scheduler"};
+  for (const NumericOption& field : NumericOptions()) {
+    options.insert(field.name);
+  }
+  EXPECT_EQ(MembersOf(header, "Options"), options)
+      << "options.h and docs/operations.md disagree about which options there are: document the "
+         "new "
+         "one in the tuning table (or the yes-or-no table) and add it to this test";
+  // snapshot is the snapshot to read at, which is the API's and not a setting.
+  EXPECT_EQ(MembersOf(header, "ReadOptions"),
+            (std::set<std::string>{"verify_checksums", "fill_cache", "snapshot"}));
+  EXPECT_EQ(MembersOf(header, "WriteOptions"), (std::set<std::string>{"sync"}));
+}
+
 // An open, empty database in memory, for the tests of the properties.
 struct OpenDatabase {
   std::unique_ptr<Env> env = NewMemEnv();
@@ -260,6 +315,32 @@ TEST(OperationsDocTest, TheDocumentedPropertiesAreTheOnesTheDatabaseHas) {
   EXPECT_NE(value.find("Level 6: "), std::string::npos) << "a line for each of the 7 levels";
   EXPECT_EQ(value.find("Level 7: "), std::string::npos);
   EXPECT_NE(value.find("Counters: "), std::string::npos);
+}
+
+// db.h lists the properties in its comment, and the guide has to list the same ones.
+TEST(OperationsDocTest, EveryPropertyOfTheHeaderIsInTheGuide) {
+  const std::vector<std::string> header = doc_tables::LoadLines(SHALE_DB_HEADER_PATH);
+  ASSERT_FALSE(header.empty());
+  std::set<std::string> in_header;
+  for (const std::string& line : header) {
+    for (size_t at = line.find("\"shale."); at != std::string::npos;
+         at = line.find("\"shale.", at + 1)) {
+      const size_t end = line.find('"', at + 1);
+      ASSERT_NE(end, std::string::npos);
+      std::string name = line.substr(at + 1, end - at - 1);
+      // The family: "shale.num-files-at-level<N>", and an example of it, are one property.
+      if (name.rfind("shale.num-files-at-level", 0) == 0) {
+        name = "shale.num-files-at-level0";
+      }
+      in_header.insert(name);
+    }
+  }
+  const std::vector<std::string> lines = LoadLines();
+  std::set<std::string> in_guide;
+  for (const auto& row : TableRows(lines, "properties", {"Property", "Value"})) {
+    in_guide.insert(row[0]);
+  }
+  EXPECT_EQ(in_guide, in_header) << "db.h and docs/operations.md disagree about the properties";
 }
 
 TEST(OperationsDocTest, TheDocumentedCountersAreTheOnesInTheOrderThePropertyPrintsThem) {

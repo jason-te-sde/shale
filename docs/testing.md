@@ -23,7 +23,7 @@ tested.
 
 | Layer | What it is for | Where |
 | --- | --- | --- |
-| **Unit tests** | One module at a time. Every decoder (coding, log reader, block, table, version edit) is tested with truncated input, random bit flips and length fields past the end, and must return `Corruption` and never crash or read outside its buffer. | `tests/util`, `tests/io`, `tests/core`, `tests/db` |
+| **Unit tests** | One module at a time. The decoders of what is read from a disk (coding, log reader, block, table, write batch, version edit) are tested with truncated input and with lengths and counts that run past the end, and must return `Corruption` and never crash or read outside the buffer; the log reader, block and table tests add damaged bytes of their own (every bit of a record's length, random bit flips, a flipped byte in a block), and the fuzz targets feed random bytes to all of them. | `tests/util`, `tests/io`, `tests/core`, `tests/db` |
 | **The simulator** | The whole engine over a fault-injecting filesystem and a manual scheduler, driven by a seed, checked against a reference model after **every** step. This is where crash consistency is shown. | `tests/sim`, `tests/testkit` |
 | **Injected flaws** | Proof that the simulator can fail: six deliberate bugs, each of which must make it go red. | `scripts/run-flaws.sh`, the `flaws` CI job |
 | **Stress** | The engine under real threads and ThreadSanitizer: writers, readers, scans and snapshots racing flushes and compactions. | `tests/stress` |
@@ -55,7 +55,7 @@ ctest --preset dev -L stress                             # the stress tests only
 | **Fuzzing** | Needs a Clang that ships libFuzzer (Apple's does not; Homebrew's `llvm` does). `CC=clang CXX=clang++ cmake --preset fuzz && cmake --build --preset fuzz --target fuzz_targets`, then for a target: `build/fuzz/fuzz/fuzz_table -max_total_time=60 build/fuzz/found/fuzz_table build/fuzz/fuzz/corpus/fuzz_table`. The targets are listed in `fuzz/fuzz_targets.txt`; CI and `preflight.sh` read the same file. To reproduce a crash, give the target the crash file as its only argument. |
 | **The crash test** | `cmake -S . -B build/crash -G Ninja -DCMAKE_BUILD_TYPE=Release -DSHALE_BUILD_TESTS=OFF && cmake --build build/crash --target shale_crashtest`, then `build/crash/tools/shale_crashtest --rounds=200 --seed=1 --min_compactions=1 --db=/tmp/crash/db`. The directory must not hold a database. Exit status 0 passed, 1 a check failed, 2 usage, 3 the run could not reach what it is for. |
 | **Benchmark smoke** | `-DSHALE_BUILD_BENCH=ON -DSHALE_BUILD_TESTS=OFF`, then `shale_bench --num=20000 --sync_num=200 --repeat=1 --db=DIR`. It asserts completion and that every read matched what was written; it holds no number. The measured figures are in [benchmarks](benchmarks.md). |
-| **Coverage** | `cmake --preset coverage && cmake --build --preset coverage && ctest --preset coverage`, then `gcovr --root . --filter src/ --gcov-executable gcov-14 --fail-under-line 90 --txt-summary --html-details coverage/index.html` (the `gcov` that goes with your GCC). |
+| **Coverage** | `cmake --preset coverage && cmake --build --preset coverage && ctest --preset coverage`, then `mkdir coverage && gcovr --root . --filter src/ --gcov-executable gcov-14 --fail-under-line 90 --txt-summary --html-details coverage/index.html` (the `gcov` that goes with your GCC). |
 | **Everything CI does** | `scripts/preflight.sh`. It takes about half an hour. |
 
 ## The simulator
@@ -234,26 +234,36 @@ a compaction leaves a database that opens and holds everything it said it did, o
 
 ## Tests of the repository itself
 
-- `tests/scripts/layering_test.sh` and `check-layering.sh`: which headers each layer may include, and
-  that nothing under `src/` or `include/` writes to standard output or error.
-- `tests/scripts/hygiene_test.sh` and `check-hygiene.sh`: no non-English characters, and none of the
-  authorship trailers that `scripts/attribution-patterns.txt` lists, in any tracked file or commit
-  message.
+- `tests/scripts/layering_test.sh` and `check-layering.sh`: which headers each layer may include; that
+  nothing under `src/` or `include/` writes to standard output or error; that nothing under `src/`
+  throws; and that no C++ under `src/`, `tests/` or `tools/` uses `std::rand` or `std::random_device` or
+  includes `<random>`.
+- `tests/scripts/hygiene_test.sh` and `check-hygiene.sh`: no Chinese, Japanese or Korean characters, and
+  none of the authorship trailers that `scripts/attribution-patterns.txt` lists, in any tracked file or
+  commit message.
 - `tests/scripts/links_test.sh` and `check-links.sh`: every relative link in every Markdown file resolves,
   and every `#fragment` names a heading.
 - `tests/scripts/options_test.sh`: the CMake options accept what they should and refuse the rest, and the
   installed package's version rule.
 - `tests/scripts/flaws_test.sh`: the CI matrix of flaws and the list in CMake agree.
 - `tests/docs/format_constants_test.cc`: [format](format.md) says what the code does; its tables of
-  constants, layouts and file names and its worked examples are read and compared with the code.
+  constants, layouts, file names and `CURRENT` messages and its worked examples are read and compared
+  with the code, and the Bloom filter, the checksum mask and the hash are recomputed from the rules it
+  states.
 - `tests/docs/operations_doc_test.cc`: the defaults, limits, properties and counters in
-  [operations](operations.md) are what the code has.
+  [operations](operations.md) are what the code has, and an option or a property that is added to
+  `options.h` or `db.h` and not to the guide fails the test.
+- `tests/docs/readme_test.cc` and `tests/tools/readme_transcript_test.sh`: the README's program is
+  `examples/quickstart.cc`, and its "Try it" transcript is what its commands print when they are run
+  again.
 - `tests/compile_fail/`: Clang's thread-safety analysis rejects an unguarded access (the build is tested
   because the analysis could silently stop working).
 
 ## CI and preflight
 
-Every job has a time limit and uploads its logs, or the seed or input that failed, when it fails.
+Every job has a time limit. The jobs that can fail on a seed, a database or an input upload it when they
+do: `build-test`, `sanitize` and `clean-clone` their test log, `flaws` the simulator's output, `crash` the
+database, `fuzz` the input; `coverage` and `bench-smoke` upload their reports. `lint` uploads nothing.
 
 | Job | What it runs |
 | --- | --- |
