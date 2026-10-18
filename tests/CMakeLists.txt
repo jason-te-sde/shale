@@ -172,6 +172,7 @@ if(SHALE_BUILD_TOOLS)
   shale_add_test(verify SOURCES tools/verify_test.cc LIBS shale_verify shale_testkit)
   shale_add_test(histogram SOURCES tools/histogram_test.cc LIBS shale_bench_support)
   shale_add_test(bench_stats SOURCES tools/bench_stats_test.cc LIBS shale_bench_support)
+  shale_add_test(bench_report SOURCES tools/bench_report_test.cc LIBS shale_bench_support)
   shale_add_test(bench_engine SOURCES tools/bench_engine_test.cc LIBS shale_bench_support
                  shale_testkit)
   shale_add_test(bench_workloads SOURCES tools/bench_workloads_test.cc LIBS shale_bench_support

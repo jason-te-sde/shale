@@ -12,12 +12,14 @@ target_include_directories(shale_verify PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # What shale_bench is made of apart from its command line: the adapter that lets one set of
 # workloads drive the engine, the workloads and the checks of their answers, the medians over a
-# benchmark's runs, and the histogram behind the latency columns. They are a library so that the
+# benchmark's runs, the table and the JSON that show them, and the histogram behind the latency
+# columns. They are a library so that the
 # tests reach them without running the tool, and run the workloads against an engine that lies. The
 # headers are included by their bare names, as "histogram.h".
 shale_add_library(shale_bench_support
   SOURCES
     bench_engine.cc
+    bench_report.cc
     bench_stats.cc
     bench_workloads.cc
     histogram.cc

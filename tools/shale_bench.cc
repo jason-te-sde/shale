@@ -20,10 +20,12 @@
 //   the same for every engine. The JSON gives engine_seconds, the time inside the engine's calls,
 //   next to seconds for every run, so that the share of the harness can be seen.
 // - The latency columns are the nearest-rank percentiles of the time of the engine call alone, from
-//   a clock read before it to one after, over every operation of a run. A latency is a multiple of
-//   the steady clock's tick, which the output and the JSON give: about 42 ns on Apple Silicon,
-//   where a call of a few ticks is a few ticks. readseq has no latencies: a scan is one call, and
-//   the engine's interface does not say when each entry arrived.
+//   a clock read before it to one after, over every operation of a run. The output and the JSON
+//   give the nominal period of the clock and the smallest step seen between two readings of it.
+//   Where the clock is coarse (41 ns on Apple Silicon) that step is its tick and a latency is a
+//   multiple of it, so a call of a few ticks is a few ticks; where it is fine it is what one
+//   reading costs, and says nothing about the resolution. readseq has no latencies: a scan is one
+//   call, and the engine's interface does not say when each entry arrived.
 // - MB/s is the key and value bytes of the entries an operation wrote, returned or visited, over
 //   the same wall-clock time, with a megabyte of 2^20 bytes as in db_bench. A lookup of a key that
 //   is not there moves no entry, so readmissing is 0.
@@ -39,8 +41,8 @@
 // not, all end the run with status 1 and name the key.
 //
 // What the output names of the machine is its system, release and architecture, its CPU and the
-// tick of its clock, and of the database the last component of its path: nothing that says whose
-// machine it was.
+// figures of its clock, and of the database the last component of its path: nothing that says
+// whose machine it was.
 //
 // Run it with --help for the usage.
 
@@ -75,6 +77,7 @@
 #include <vector>
 
 #include "bench_engine.h"
+#include "bench_report.h"
 #include "bench_stats.h"
 #include "bench_workloads.h"
 #include "cli_args.h"
@@ -155,8 +158,10 @@ constexpr char kUsage[] =
     "loop, which also makes each key and value and checks each answer; the JSON gives\n"
     "engine_seconds, the time inside the engine's calls, next to seconds for every run. A\n"
     "latency is the time of one engine call, a difference of two std::chrono::steady_clock\n"
-    "readings, so it is a multiple of the clock's tick: the run prints the tick (Apple\n"
-    "Silicon's is about 42 ns), and a latency of a few ticks is a few ticks. MB/s counts the\n"
+    "readings. The run prints the smallest step it saw between two readings of that clock (41\n"
+    "ns on Apple Silicon). Where the clock is coarse that step is its tick, and every latency\n"
+    "is a multiple of it; where the clock is fine it is what one reading costs, and says\n"
+    "nothing about the resolution, which the clock's nominal period gives. MB/s counts the\n"
     "entries moved, and readmissing moves none, so it shows 0. readseq shows no latencies: a\n"
     "scan is one call.\n"
     "\n"
@@ -167,7 +172,7 @@ constexpr char kUsage[] =
     "the median is a warm run, and only --repeat=1 is a cold one.\n"
     "\n"
     "--json=FILE writes the same figures, every run's own numbers, the machine (the system's\n"
-    "name, release and architecture, the CPU brand, the logical cores, the clock's tick) and\n"
+    "name, release and architecture, the CPU brand, the logical cores, the clock's figures) and\n"
     "the compiler and build type, to FILE, and no host name. A build that is not an optimized\n"
     "one without a sanitizer, coverage or a flaw says so in the output: its numbers are not\n"
     "worth quoting. FILE is made when the run starts, so that a path that cannot be written is\n"
@@ -208,126 +213,12 @@ struct Config {
 
 using Clock = std::chrono::steady_clock;
 
-// ---- The results of a benchmark. ----------------------------------------------------------------
-
-// A benchmark's runs and the figures taken over them.
-struct Summary {
-  Benchmark benchmark = Benchmark::kFillSeq;
-  // The database the benchmark ran on: what wrote it, and how many keys it held.
-  Benchmark source = Benchmark::kFillSeq;
-  uint64_t entries = 0;
-  // How long the compaction before this benchmark took, if there was one.
-  std::optional<double> compact_seconds;
-  std::vector<RunResult> runs;
-
-  double ops_per_sec = 0;
-  double mb_per_sec = 0;
-  std::optional<Latency> latency;
-  std::optional<std::string> write_amplification;
-  // How far apart the fastest and the slowest run were, as a share of the median.
-  double spread_percent = 0;
-};
-
-template <typename Get>
-double MedianOf(const std::vector<RunResult>& runs, Get get) {
-  std::vector<double> values;
-  values.reserve(runs.size());
-  for (const RunResult& run : runs) {
-    values.push_back(get(run));
-  }
-  return Median(std::move(values));
-}
-
-std::string Fixed(double value, int digits) {
-  std::array<char, 64> text{};
-  std::snprintf(text.data(), text.size(), "%.*f", digits, value);
-  return text.data();
-}
-
-void TakeMedians(Summary* summary) {
-  const std::vector<RunResult>& runs = summary->runs;
-  summary->ops_per_sec = MedianOf(runs, [](const RunResult& r) { return r.OpsPerSecond(); });
-  summary->mb_per_sec = MedianOf(runs, [](const RunResult& r) { return r.MbPerSecond(); });
-
-  if (runs.front().latency.has_value()) {
-    Latency latency;
-    latency.p50 = MedianOf(runs, [](const RunResult& r) { return r.latency->p50; });
-    latency.p99 = MedianOf(runs, [](const RunResult& r) { return r.latency->p99; });
-    latency.p999 = MedianOf(runs, [](const RunResult& r) { return r.latency->p999; });
-    latency.average = MedianOf(runs, [](const RunResult& r) { return r.latency->average; });
-    summary->latency = latency;
-  }
-
-  if (runs.front().write_amplification.has_value()) {
-    std::vector<std::string> figures;
-    figures.reserve(runs.size());
-    for (const RunResult& run : runs) {
-      if (run.write_amplification.has_value()) {
-        figures.push_back(*run.write_amplification);
-      }
-    }
-    summary->write_amplification = MedianFigure(figures);
-  }
-
-  double fastest = 0;
-  double slowest = 0;
-  for (size_t i = 0; i < runs.size(); i++) {
-    const double rate = runs[i].OpsPerSecond();
-    fastest = i == 0 ? rate : std::max(fastest, rate);
-    slowest = i == 0 ? rate : std::min(slowest, rate);
-  }
-  summary->spread_percent = (fastest - slowest) / summary->ops_per_sec * 100;
-}
-
 // ---- The output. --------------------------------------------------------------------------------
 
-std::string Notes(const Summary& summary, const Config& config) {
-  std::string notes;
-  if (BenchmarkWrites(summary.benchmark)) {
-    notes = std::to_string(summary.entries) + " keys in the database";
-  } else {
-    notes = std::string("reads ") + BenchmarkName(summary.source) + "'s database (" +
-            std::to_string(summary.entries) + " keys)";
-    const std::optional<uint64_t>& found = summary.runs.front().found;
-    switch (summary.benchmark) {
-      case Benchmark::kReadRandom:
-      case Benchmark::kReadMissing:
-        notes += ", found " + std::to_string(found.value_or(0)) + " of " +
-                 std::to_string(summary.runs.front().operations);
-        break;
-      case Benchmark::kSeekRandom:
-        notes += ", " + std::to_string(found.value_or(0)) + " of " +
-                 std::to_string(summary.runs.front().operations) + " seeks landed on an entry";
-        break;
-      case Benchmark::kReadSeq:
-      case Benchmark::kFillSeq:
-      case Benchmark::kFillRandom:
-      case Benchmark::kFillSync:
-      case Benchmark::kOverwrite:
-        break;
-    }
-  }
-  if (config.repeat > 1) {
-    notes += ", spread " + Fixed(summary.spread_percent, 1) + "%";
-  }
-  return notes;
-}
-
-void PrintTableHeader() {
-  std::printf("%-12s %12s %9s %9s %9s %10s %10s  %s\n", "benchmark", "ops/s", "MB/s", "p50(us)",
-              "p99(us)", "p99.9(us)", "write-amp", "notes");
-}
+void PrintTableHeader() { std::printf("%s\n", FormatTableHeader().c_str()); }
 
 void PrintRow(const Summary& summary, const Config& config) {
-  const std::string none = "-";
-  const std::string p50 = summary.latency ? Fixed(summary.latency->p50, 2) : none;
-  const std::string p99 = summary.latency ? Fixed(summary.latency->p99, 2) : none;
-  const std::string p999 = summary.latency ? Fixed(summary.latency->p999, 2) : none;
-  std::printf("%-12s %12s %9s %9s %9s %10s %10s  %s\n", BenchmarkName(summary.benchmark),
-              Fixed(summary.ops_per_sec, 0).c_str(), Fixed(summary.mb_per_sec, 2).c_str(),
-              p50.c_str(), p99.c_str(), p999.c_str(),
-              summary.write_amplification ? summary.write_amplification->c_str() : "-",
-              Notes(summary, config).c_str());
+  std::printf("%s\n", FormatRow(summary, config.repeat).c_str());
   std::fflush(stdout);
 }
 
@@ -338,8 +229,11 @@ struct Machine {
   std::string uname;
   std::string cpu;
   unsigned logical_cores = 0;
-  // The smallest step of the steady clock, in nanoseconds.
-  uint64_t clock_resolution_ns = 0;
+  // The nominal period of the steady clock, in nanoseconds, as its type says.
+  uint64_t clock_nominal_period_ns = 0;
+  // The smallest step seen between two readings of the steady clock, in nanoseconds: its tick if it
+  // is coarse, and what a reading costs if it is fine.
+  uint64_t clock_smallest_step_ns = 0;
 };
 
 #if defined(__APPLE__)
@@ -370,22 +264,30 @@ std::string CpuBrand() {
 }
 #endif
 
-// The smallest step that std::chrono::steady_clock takes, in nanoseconds: the shortest time, over
-// many tries, for which the clock goes from one reading to the next. Every latency is a multiple of
-// it.
-uint64_t ClockTickNanos() {
-  uint64_t tick = std::numeric_limits<uint64_t>::max();
+// The smallest step seen between two readings of std::chrono::steady_clock, in nanoseconds: the
+// shortest time, over many tries, from one reading to the next one that differs from it. On a clock
+// that is coarse this is its tick, and every latency is a multiple of it. On a clock that is fine
+// two readings never agree, and this is what one reading costs, which says nothing about the
+// resolution.
+uint64_t SmallestClockStepNanos() {
+  uint64_t step = std::numeric_limits<uint64_t>::max();
   for (int i = 0; i < 1000; i++) {
     const Clock::time_point first = Clock::now();
     Clock::time_point next = Clock::now();
     while (next == first) {
       next = Clock::now();
     }
-    tick = std::min(
-        tick, static_cast<uint64_t>(
+    step = std::min(
+        step, static_cast<uint64_t>(
                   std::chrono::duration_cast<std::chrono::nanoseconds>(next - first).count()));
   }
-  return tick;
+  return step;
+}
+
+// The period that the type of the steady clock gives it, in nanoseconds.
+constexpr uint64_t ClockNominalPeriodNanos() {
+  return static_cast<uint64_t>(Clock::period::num) * 1'000'000'000ULL /
+         static_cast<uint64_t>(Clock::period::den);
 }
 
 Machine DescribeMachine() {
@@ -401,7 +303,8 @@ Machine DescribeMachine() {
   }
   machine.cpu = CpuBrand();
   machine.logical_cores = std::thread::hardware_concurrency();
-  machine.clock_resolution_ns = ClockTickNanos();
+  machine.clock_nominal_period_ns = ClockNominalPeriodNanos();
+  machine.clock_smallest_step_ns = SmallestClockStepNanos();
   return machine;
 }
 
@@ -425,148 +328,6 @@ std::string LastComponent(const std::string& path) {
 }
 
 // ---- The JSON. ----------------------------------------------------------------------------------
-
-// Writes JSON text. It adds the commas and the indentation, and escapes strings; the caller says
-// what is in each object and array, and ends each one it began.
-class JsonWriter {
- public:
-  void BeginObject() { Begin('{'); }
-  void EndObject() { End('}'); }
-  void BeginArray() { Begin('['); }
-  void EndArray() { End(']'); }
-
-  void Key(std::string_view name) {
-    Separate();
-    AppendString(name);
-    text_ += ": ";
-    after_key_ = true;
-  }
-
-  void String(std::string_view value) {
-    Separate();
-    AppendString(value);
-  }
-
-  void Integer(uint64_t value) {
-    Separate();
-    text_ += std::to_string(value);
-  }
-
-  // A number that is not finite cannot be said in JSON, so it is null.
-  void Number(double value) {
-    Separate();
-    text_ += std::isfinite(value) ? Fixed(value, 9) : "null";
-  }
-
-  void Bool(bool value) {
-    Separate();
-    text_ += value ? "true" : "false";
-  }
-
-  void Null() {
-    Separate();
-    text_ += "null";
-  }
-
-  void OptionalNumber(const std::optional<double>& value) {
-    if (value.has_value()) {
-      Number(*value);
-    } else {
-      Null();
-    }
-  }
-
-  void OptionalString(const std::optional<std::string>& value) {
-    if (value.has_value()) {
-      String(*value);
-    } else {
-      Null();
-    }
-  }
-
-  void OptionalInteger(const std::optional<uint64_t>& value) {
-    if (value.has_value()) {
-      Integer(*value);
-    } else {
-      Null();
-    }
-  }
-
-  // The document: what was written, and a newline.
-  std::string Finish() const { return text_ + "\n"; }
-
- private:
-  // Before a value or a key: the comma after the one before it, and a new indented line. The value
-  // of a key follows it on its line.
-  void Separate() {
-    if (after_key_) {
-      after_key_ = false;
-      return;
-    }
-    if (!has_items_.empty()) {
-      if (has_items_.back()) {
-        text_ += ',';
-      }
-      has_items_.back() = true;
-      NewLine(has_items_.size());
-    }
-  }
-
-  void NewLine(size_t depth) {
-    text_ += '\n';
-    text_.append(depth * 2, ' ');
-  }
-
-  void Begin(char open) {
-    Separate();
-    text_ += open;
-    has_items_.push_back(false);
-  }
-
-  void End(char close) {
-    const bool had_items = has_items_.back();
-    has_items_.pop_back();
-    if (had_items) {
-      NewLine(has_items_.size());
-    }
-    text_ += close;
-  }
-
-  // The string in quotes. Bytes below 0x20, the quote and the backslash are escaped; the others are
-  // kept, which is right for the UTF-8 that a path is.
-  void AppendString(std::string_view value) {
-    text_ += '"';
-    for (const char c : value) {
-      const auto byte = static_cast<unsigned char>(c);
-      if (c == '"' || c == '\\') {
-        text_ += '\\';
-        text_ += c;
-      } else if (byte < 0x20) {
-        std::array<char, 8> escape{};
-        std::snprintf(escape.data(), escape.size(), "\\u%04x", static_cast<unsigned>(byte));
-        text_ += escape.data();
-      } else {
-        text_ += c;
-      }
-    }
-    text_ += '"';
-  }
-
-  std::string text_;
-  // For each object or array that is open: whether it has an item yet.
-  std::vector<bool> has_items_;
-  bool after_key_ = false;
-};
-
-void WriteLatencyFields(JsonWriter* json, const std::optional<Latency>& latency) {
-  const auto field = [&](const char* name, double Latency::* member) {
-    json->Key(name);
-    json->OptionalNumber(latency ? std::optional<double>(latency.value().*member) : std::nullopt);
-  };
-  field("p50_us", &Latency::p50);
-  field("p99_us", &Latency::p99);
-  field("p999_us", &Latency::p999);
-}
 
 std::string BuildJson(const Config& config, const Machine& machine,
                       const std::vector<Summary>& summaries) {
@@ -609,8 +370,10 @@ std::string BuildJson(const Config& config, const Machine& machine,
   json.String(machine.cpu);
   json.Key("logical_cores");
   json.Integer(machine.logical_cores);
-  json.Key("clock_resolution_ns");
-  json.Integer(machine.clock_resolution_ns);
+  json.Key("clock_nominal_period_ns");
+  json.Integer(machine.clock_nominal_period_ns);
+  json.Key("clock_smallest_step_ns");
+  json.Integer(machine.clock_smallest_step_ns);
   json.EndObject();
 
   json.Key("build");
@@ -633,58 +396,7 @@ std::string BuildJson(const Config& config, const Machine& machine,
   json.Integer(static_cast<uint64_t>(kBenchMegabyte));
 
   json.Key("results");
-  json.BeginArray();
-  for (const Summary& summary : summaries) {
-    json.BeginObject();
-    json.Key("name");
-    json.String(BenchmarkName(summary.benchmark));
-    json.Key("kind");
-    json.String(BenchmarkWrites(summary.benchmark) ? "write" : "read");
-    json.Key("source");
-    json.String(BenchmarkName(summary.source));
-    json.Key("entries");
-    json.Integer(summary.entries);
-    json.Key("compact_seconds");
-    json.OptionalNumber(summary.compact_seconds);
-    json.Key("ops_per_sec");
-    json.Number(summary.ops_per_sec);
-    json.Key("mb_per_sec");
-    json.Number(summary.mb_per_sec);
-    WriteLatencyFields(&json, summary.latency);
-    json.Key("write_amplification");
-    json.OptionalString(summary.write_amplification);
-    json.Key("spread_percent");
-    json.Number(summary.spread_percent);
-
-    json.Key("runs");
-    json.BeginArray();
-    for (const RunResult& run : summary.runs) {
-      json.BeginObject();
-      json.Key("operations");
-      json.Integer(run.operations);
-      json.Key("bytes");
-      json.Integer(run.bytes);
-      json.Key("seconds");
-      json.Number(run.seconds);
-      json.Key("engine_seconds");
-      json.Number(run.engine_seconds);
-      json.Key("ops_per_sec");
-      json.Number(run.OpsPerSecond());
-      json.Key("mb_per_sec");
-      json.Number(run.MbPerSecond());
-      WriteLatencyFields(&json, run.latency);
-      json.Key("average_us");
-      json.OptionalNumber(run.latency ? std::optional<double>(run.latency->average) : std::nullopt);
-      json.Key("write_amplification");
-      json.OptionalString(run.write_amplification);
-      json.Key("found");
-      json.OptionalInteger(run.found);
-      json.EndObject();
-    }
-    json.EndArray();
-    json.EndObject();
-  }
-  json.EndArray();
+  WriteResultsJson(&json, summaries);
   json.EndObject();
   return json.Finish();
 }
@@ -749,8 +461,11 @@ void PrintHeader(const Config& config, const Machine& machine) {
               SHALE_BENCH_COMPILER_VERSION, extras.c_str());
   std::printf("# machine: %s, %u logical cores\n", machine.cpu.c_str(), machine.logical_cores);
   std::printf("# system: %s\n", machine.uname.c_str());
-  std::printf("# clock: steady_clock tick %llu ns, so a latency is a multiple of it\n",
-              static_cast<unsigned long long>(machine.clock_resolution_ns));
+  std::printf(
+      "# clock: steady_clock, nominal period %llu ns, smallest step seen between two readings "
+      "%llu ns (the tick if the clock is coarse, else the cost of a reading)\n",
+      static_cast<unsigned long long>(machine.clock_nominal_period_ns),
+      static_cast<unsigned long long>(machine.clock_smallest_step_ns));
   if (!IsRepresentative()) {
     std::printf(
         "# WARNING: this build is not an optimized one with no sanitizer, coverage or flaw: do not "
