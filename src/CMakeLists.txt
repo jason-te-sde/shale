@@ -15,3 +15,12 @@ shale_add_library(shale_util
     util/hash.cc
     util/status.cc
   LIBS Threads::Threads)
+
+shale_add_library(shale_io
+  SOURCES
+    io/env.cc
+    io/env_posix.cc
+    io/env_util.cc
+    io/mem_env.cc
+    io/scheduler.cc
+  LIBS shale_util Threads::Threads)

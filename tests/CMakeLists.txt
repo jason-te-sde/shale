@@ -22,6 +22,17 @@ foreach(dependency gtest gtest_main gmock gmock_main)
   endif()
 endforeach()
 
+# Helpers every layer's tests share. A later test-support file is added to SOURCES. The library
+# exports the tests/ directory so a test can include "testkit/test_util.h". It links shale_io, which
+# the fault-injecting Env implements, and passes it on: a test that links shale_testkit does not
+# name shale_io too, or the linker reports the library twice.
+shale_add_library(shale_testkit
+  SOURCES
+    testkit/fault_env.cc
+    testkit/test_util.cc
+  LIBS shale_io shale_util GTest::gtest)
+target_include_directories(shale_testkit PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+
 shale_add_test(status SOURCES util/status_test.cc LIBS shale_util)
 shale_add_test(arena SOURCES util/arena_test.cc LIBS shale_util)
 shale_add_test(random SOURCES util/random_test.cc LIBS shale_util)
@@ -32,6 +43,13 @@ shale_add_test(crc32c SOURCES util/crc32c_test.cc LIBS shale_util)
 shale_add_test(hash SOURCES util/hash_test.cc LIBS shale_util)
 shale_add_test(dbformat SOURCES util/dbformat_test.cc LIBS shale_util)
 shale_add_test(filename SOURCES util/filename_test.cc LIBS shale_util)
+
+shale_add_test(env_contract SOURCES io/env_contract_test.cc LIBS shale_testkit)
+shale_add_test(env_posix SOURCES io/env_posix_test.cc LIBS shale_testkit)
+shale_add_test(exclusive_use SOURCES io/exclusive_use_test.cc LIBS shale_io)
+shale_add_test(mem_env SOURCES io/mem_env_test.cc LIBS shale_testkit)
+shale_add_test(fault_env SOURCES io/fault_env_test.cc LIBS shale_testkit)
+shale_add_test(scheduler SOURCES io/scheduler_test.cc LIBS shale_io)
 
 # Clang's thread-safety analysis is what makes SHALE_GUARDED_BY more than a comment, and nothing
 # else would notice if it silently stopped working. So the build itself is tested: one translation
