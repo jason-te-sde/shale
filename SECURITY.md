@@ -13,12 +13,8 @@ line.
 
 **Please do not open a public issue for a security problem.**
 
-Report it privately, by either of two ways, whichever you can use:
-
-- through GitHub: on the repository's **Security** tab choose **Report a vulnerability**
-  (<https://github.com/jason-te-sde/shale/security/advisories/new>), if the repository has private
-  reporting turned on;
-- by email to the maintainer at te.r@northeastern.edu, with `shale security` in the subject.
+Report it privately, by email to the maintainer at te.r@northeastern.edu, with `shale security` in the
+subject. The repository does not use GitHub's private vulnerability reporting.
 
 Please include:
 
@@ -38,10 +34,15 @@ directory**, or a crafted call, handed to a process that links the library. Thes
 
 - a crash, an out-of-bounds read or write, a use after free, an integer overflow that leads to either,
   or any other undefined behaviour, on the bytes of a table, a write-ahead log, a MANIFEST or `CURRENT`.
-  The engine's rule is that everything read from disk is untrusted: a read returns what was written or a
-  `Corruption`, and a decoder stays inside its buffer. A file that breaks that rule is a bug, and a
-  security bug if it can be reached by someone who does not already control the process;
-- a wrong value returned by a read from a file whose checksums are intact;
+  The engine's rule is that everything read from disk is untrusted: a decoder stays inside its buffer,
+  and a read from a file that was damaged returns what was written or a `Corruption`. A file that
+  breaks the first is a bug, and a security bug if it can be reached by someone who does not already
+  control the process;
+- a wrong value returned by a read from a table that the engine wrote and that was damaged afterwards
+  (a bit flip, a truncation), with `verify_checksums` on, the default. A file made by something that
+  computes the checksums for whatever it writes is promised only that no read leaves its buffers
+  ([docs/format.md](docs/format.md#what-a-reader-checks)), so a wrong value from a lookup in one is a known limit and
+  not a vulnerability;
 - an input that makes the engine allocate memory without bound relative to the size of the file or call;
 - a way around the limits documented in [docs/design/0007-scope.md](docs/design/0007-scope.md) and
   `include/shale/options.h` (key and value sizes, option ranges).
