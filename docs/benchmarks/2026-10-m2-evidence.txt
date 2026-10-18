@@ -4,11 +4,13 @@ Evidence behind the explanations in docs/benchmarks.md
 This file holds what was recorded while looking for the reason of each row where shale is slower
 than LevelDB: system call counts, the engines' own counters, and where the time of the calling
 thread went. None of it is a result that the tables quote. The tables of docs/benchmarks.md are
-made from the four JSON files next to this one. What is here comes from separate runs of the same
+made from the JSON files next to this one. What is here comes from separate runs of the same
 workloads, on the same machine and the same Release build, made with the probe at the end of this
 file (which calls shale_bench's own workload functions), while the machine was not held quiet. It
-gives counts and shares. The speeds that the probe printed are not recorded, and are not quoted.
-The probe is compiled with `c++ -O2 -g -std=c++20` and linked with the libraries of the Release build.
+gives counts and shares. The speeds that the probe printed are not recorded, and are not quoted,
+except in section 7.4, which compares runs of the probe with each other. The probe is compiled with
+`c++ -O2 -g -std=c++20` and linked with the libraries of the Release build. Sections 0 to 6 are of the
+build before the four changes; section 7 is of the builds after each of them, and says which.
 
 How each part was made:
 
@@ -682,3 +684,526 @@ __attribute__((destructor)) static void report(void) {
           atomic_load(&fcntl_other));
 }
 
+
+7. After the four changes (2026-10-18, 06:59 to 12:35)
+------------------------------------------------------------
+The four changes are the commits "perf(util): define Status's accessors and the key comparison inline" (A),
+"perf(io): read blocks into buffers that are not zero-filled first" (B), "perf(db): write and sync the MANIFEST
+without holding the DB mutex" (C) and "perf(db): take the memtable-switch syncs off the writers' path" (D). The
+final build is build/release, made with the commands of docs/benchmarks.md at D. $BEFORE, $A, $AB and $ABC are
+clean exports of the commit before A and of the commits A, B and C, each built in Release with
+`cmake --preset release -DSHALE_BUILD_BENCH=ON -DSHALE_BUILD_TESTS=OFF -DCMAKE_PREFIX_PATH=$(brew --prefix leveldb)`
+and `cmake --build --preset release --target shale_bench`: the same compiler and flags as build/release.
+
+7.1 Every run, in order. The check before each waited for a 1-minute load under 2.0 and no
+ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process; `waited` is how long it waited. $DB was an empty directory
+on the internal SSD.
+
+  before, run again
+    quiet: load average (1 min) 1.86, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process, waited 270 s
+    start: 2026-10-18 06:59:54 -0700
+    uptime at start:  6:59 load averages: 1.86 3.44 5.17
+    power at start: Now drawing from 'AC Power'
+    command: caffeinate -ims $BEFORE/build/release/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-before-rerun.json 
+    exit status: 0
+    end: 2026-10-18 07:02:47 -0700
+    uptime at end:  7:02 load averages: 2.65 3.11 4.70
+
+  A
+    quiet: load average (1 min) 1.83, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process, waited 30 s
+    start: 2026-10-18 07:03:17 -0700
+    uptime at start:  7:03 load averages: 1.83 2.87 4.56
+    power at start: Now drawing from 'AC Power'
+    command: caffeinate -ims $A/build/release/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-a.json 
+    exit status: 0
+    end: 2026-10-18 07:05:59 -0700
+    uptime at end:  7:05 load averages: 3.00 2.96 4.30
+
+  A and B
+    quiet: load average (1 min) 1.99, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process, waited 75 s
+    start: 2026-10-18 07:07:14 -0700
+    uptime at start:  7:07 load averages: 1.99 2.65 4.07
+    power at start: Now drawing from 'AC Power'
+    command: caffeinate -ims $AB/build/release/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-ab.json 
+    exit status: 0
+    end: 2026-10-18 07:09:55 -0700
+    uptime at end:  7:09 load averages: 4.68 3.21 4.03
+
+  A, B and C
+    quiet: load average (1 min) 1.82, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process, waited 120 s
+    start: 2026-10-18 07:11:55 -0700
+    uptime at start:  7:11 load averages: 1.82 2.68 3.71
+    power at start: Now drawing from 'AC Power'
+    command: caffeinate -ims $ABC/build/release/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-abc.json 
+    exit status: 0
+    end: 2026-10-18 07:14:34 -0700
+    uptime at end:  7:14 load averages: 3.48 2.89 3.60
+
+  A to D: the run of the tables
+    quiet: load average (1 min) 1.83, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process, waited 195 s
+    start: 2026-10-18 07:17:50 -0700
+    uptime at start:  7:17 load averages: 1.83 2.54 3.32
+    power at start: Now drawing from 'AC Power'
+    command: caffeinate -ims build/release/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2.json 
+    exit status: 0
+    end: 2026-10-18 07:20:37 -0700
+    uptime at end:  7:20 load averages: 2.86 2.55 3.17
+
+  before, run again, compacted before the reads
+    quiet: load average (1 min) 1.93, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process, waited 120 s
+    start: 2026-10-18 07:22:38 -0700
+    uptime at start:  7:22 load averages: 1.93 2.34 3.00
+    power at start: Now drawing from 'AC Power'
+    command: caffeinate -ims $BEFORE/build/release/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-compacted-before-rerun.json --compact_before_reads
+    exit status: 0
+    end: 2026-10-18 07:25:15 -0700
+    uptime at end:  7:25 load averages: 3.14 2.67 3.02
+
+  A, compacted before the reads
+    quiet: load average (1 min) 1.94, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process, waited 240 s
+    start: 2026-10-18 07:29:16 -0700
+    uptime at start:  7:29 load averages: 1.94 2.33 2.78
+    power at start: Now drawing from 'AC Power'
+    command: caffeinate -ims $A/build/release/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-a-compacted.json --compact_before_reads
+    exit status: 0
+    end: 2026-10-18 07:31:57 -0700
+    uptime at end:  7:31 load averages: 3.15 2.62 2.81
+
+  A and B, compacted before the reads
+    quiet: load average (1 min) 1.71, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process, waited 195 s
+    start: 2026-10-18 07:35:13 -0700
+    uptime at start:  7:35 load averages: 1.71 2.28 2.63
+    power at start: Now drawing from 'AC Power'
+    command: caffeinate -ims $AB/build/release/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-ab-compacted.json --compact_before_reads
+    exit status: 0
+    end: 2026-10-18 07:37:48 -0700
+    uptime at end:  7:37 load averages: 4.52 3.20 2.93
+
+  A, B and C, compacted before the reads
+    quiet: load average (1 min) 1.98, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process, waited 465 s
+    start: 2026-10-18 07:45:35 -0700
+    uptime at start:  7:45 load averages: 1.98 2.46 2.66
+    power at start: Now drawing from 'AC Power'
+    command: caffeinate -ims $ABC/build/release/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-abc-compacted.json --compact_before_reads
+    exit status: 0
+    end: 2026-10-18 07:48:16 -0700
+    uptime at end:  7:48 load averages: 3.24 2.82 2.77
+
+  A to D, compacted before the reads: the run of the tables
+    quiet: load average (1 min) 1.91, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process, waited 585 s
+    start: 2026-10-18 07:58:03 -0700
+    uptime at start:  7:58 load averages: 1.91 2.39 2.59
+    power at start: Now drawing from 'AC Power'
+    command: caffeinate -ims build/release/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-compacted.json --compact_before_reads
+    exit status: 0
+    end: 2026-10-18 08:00:38 -0700
+    uptime at end:  8:00 load averages: 3.27 2.86 2.76
+
+  LevelDB: the run of the tables
+    quiet: load average (1 min) 1.96, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process, waited 930 s
+    start: 2026-10-18 08:16:13 -0700
+    uptime at start:  8:16 load averages: 1.96 2.45 2.58
+    power at start: Now drawing from 'AC Power'
+    command: caffeinate -ims build/release/tools/shale_bench --engine=leveldb --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-leveldb.json 
+    exit status: 0
+    end: 2026-10-18 08:18:44 -0700
+    uptime at end:  8:18 load averages: 3.31 2.77 2.68
+
+  LevelDB, compacted before the reads: the run of the tables
+    quiet: load average (1 min) 1.82, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process, waited 585 s
+    start: 2026-10-18 08:28:31 -0700
+    uptime at start:  8:28 load averages: 2.16 2.49 2.59
+    power at start: Now drawing from 'AC Power'
+    command: caffeinate -ims build/release/tools/shale_bench --engine=leveldb --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-leveldb-compacted.json --compact_before_reads
+    exit status: 0
+    end: 2026-10-18 08:30:59 -0700
+    uptime at end:  8:30 load averages: 3.43 2.79 2.68
+
+  A to D, first pass again
+    quiet: load average (1 min) 1.92, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process, waited 1635 s
+    start: 2026-10-18 12:11:08 -0700
+    uptime at start: 12:11 load averages: 1.92 2.57 2.88
+    power at start: Now drawing from 'AC Power'
+    command: caffeinate -ims build/release/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-repeats/final-1.json 
+    exit status: 0
+    end: 2026-10-18 12:13:52 -0700
+    uptime at end: 12:13 load averages: 3.33 2.79 2.90
+
+  A, B and C, first pass again
+    quiet: load average (1 min) 1.84, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process, waited 480 s
+    start: 2026-10-18 12:21:54 -0700
+    uptime at start: 12:21 load averages: 1.84 2.39 2.67
+    power at start: Now drawing from 'AC Power'
+    command: caffeinate -ims $ABC/build/release/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-repeats/abc-1.json 
+    exit status: 0
+    end: 2026-10-18 12:24:34 -0700
+    uptime at end: 12:24 load averages: 2.68 2.53 2.68
+
+  A to D, first pass a third time
+    quiet: load average (1 min) 1.98, no ninja|clang|cmake|ctest|ld64|shale_|fuzz_ process, waited 75 s
+    start: 2026-10-18 12:25:49 -0700
+    uptime at start: 12:25 load averages: 1.98 2.36 2.60
+    power at start: Now drawing from 'AC Power'
+    command: caffeinate -ims build/release/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-repeats/final-2.json 
+    exit status: 0
+    end: 2026-10-18 12:28:45 -0700
+    uptime at end: 12:28 load averages: 3.32 2.77 2.72
+
+7.2 The interleaved write rounds: shale_bench --engine=<shale|leveldb> --benchmarks=fillseq,fillrandom,overwrite
+--num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-writes/<build>-<round>.json, under
+caffeinate -ims, each after the same check. ab is $AB, abc is $ABC, final and leveldb are build/release.
+
+  == ab round 1: start 08:33:48, waited 150 s, uptime:  8:33 load averages: 1.97 2.47 2.57
+     exit 0 end 08:34:36
+  == abc round 1: start 08:42:38, waited 480 s, uptime:  8:42 load averages: 1.85 2.36 2.49
+     exit 0 end 08:43:20
+  == final round 1: start 08:44:50, waited 90 s, uptime:  8:44 load averages: 1.98 2.40 2.50
+     exit 0 end 08:45:27
+  == leveldb round 1: start 08:51:44, waited 375 s, uptime:  8:51 load averages: 1.87 2.36 2.46
+     exit 0 end 08:52:20
+  == ab round 2: start 08:57:37, waited 315 s, uptime:  8:57 load averages: 1.89 2.38 2.46
+     exit 0 end 08:58:17
+  == abc round 2: start 09:07:05, waited 525 s, uptime:  9:07 load averages: 1.96 2.42 2.47
+     exit 0 end 09:07:45
+  == final round 2: start 09:13:32, waited 345 s, uptime:  9:13 load averages: 1.89 2.44 2.49
+     exit 0 end 09:14:09
+  == leveldb round 2: start 09:20:11, waited 360 s, uptime:  9:20 load averages: 1.70 2.28 2.41
+     exit 0 end 09:20:47
+  == ab round 3: start 09:26:34, waited 345 s, uptime:  9:26 load averages: 1.83 2.43 2.48
+     exit 0 end 09:27:14
+  == abc round 3: start 09:28:14, waited 60 s, uptime:  9:28 load averages: 1.83 2.33 2.44
+     exit 0 end 09:28:55
+  == final round 3: start 09:30:40, waited 105 s, uptime:  9:30 load averages: 1.89 2.41 2.47
+     exit 0 end 09:31:21
+  == leveldb round 3: start 09:33:22, waited 120 s, uptime:  9:33 load averages: 1.89 2.36 2.45
+     exit 0 end 09:34:03
+
+7.3 Where the time of the calling thread went (probe of section 6, built against each build's Release libraries
+with the same `c++ -O2 -g -std=c++20`, run with the counting library loaded, and sampled with `sample` for 4 to 5
+seconds; the parser and the classification are at the end of this section). The machine was not held quiet: a
+browser renderer, the window server, and at times another build, were running. Shares of the thread that calls
+the engine, by kind of function at the top of the stack.
+
+Writes (fillseq with 3,000,000 keys, sampled from the first second; overwrite of 1,000,000, sampled from its
+second open, after the load):
+  A and B    fillseq     3906 samples; write syscall (log append) 75.4%; F_FULLFSYNC 8.0%; waiting for the DB mutex 7.1%; engine and harness code 5.8%; memmove, memcmp 1.7%; malloc, free, memset 1.3%; clock reads (harness) 0.6%; crc32c 0.1%
+  A, B, C    fillseq     4298 samples; write syscall (log append) 67.7%; F_FULLFSYNC 15.8%; engine and harness code 10.1%; memmove, memcmp 2.9%; malloc, free, memset 2.0%; clock reads (harness) 1.1%; crc32c 0.2%; waiting for the DB mutex 0.2%
+  A to D     fillseq     4277 samples; write syscall (log append) 81.4%; engine and harness code 10.3%; memmove, memcmp 4.0%; malloc, free, memset 2.1%; clock reads (harness) 1.2%; waiting for the DB mutex 0.8%; crc32c 0.2%
+  A to D     overwrite   2559 samples; write syscall (log append) 78.5%; engine and harness code 10.1%; sleep (write slowdown) 5.5%; memmove, memcmp 3.4%; malloc, free, memset 1.3%; clock reads (harness) 0.7%; waiting for the DB mutex 0.2%; crc32c 0.1%
+
+Reads, A to D, 1,000,000 keys after fillrandom and overwrite (first state), and compacted before the reads:
+  readrandom  3390 samples; engine and harness code 40.1%; pread syscall 29.6%; crc32c 12.8%; malloc, free, memset 10.6%; memmove, memcmp 6.4%; clock reads (harness) 0.4%; waiting for the DB mutex 0.0%
+  compacted   3409 samples; pread syscall 35.5%; engine and harness code 30.4%; crc32c 16.5%; malloc, free, memset 12.4%; memmove, memcmp 4.2%; clock reads (harness) 1.0%
+  readseq     3413 samples; engine and harness code 69.4%; pread syscall 10.7%; memmove, memcmp 9.2%; crc32c 6.0%; malloc, free, memset 4.6%
+  compacted   3400 samples; engine and harness code 64.0%; pread syscall 15.1%; memmove, memcmp 7.9%; crc32c 7.9%; malloc, free, memset 5.1%
+  seekrandom  3399 samples; engine and harness code 37.9%; pread syscall 23.7%; malloc, free, memset 20.3%; crc32c 10.8%; memmove, memcmp 5.8%; clock reads (harness) 1.6%
+  compacted   3096 samples; engine and harness code 32.2%; pread syscall 27.6%; malloc, free, memset 22.3%; crc32c 12.1%; memmove, memcmp 4.5%; clock reads (harness) 1.3%
+
+The writing thread and the background thread of fillseq, by call stack ('inclusive' counts every sample with the
+named function anywhere below the thread's root, once):
+
+A and B:
+  --- thread 'Thread_7019757   DispatchQueue_1: com.apple.main-thread  (se': 3906 samples
+      self    2947  75.4%  write
+      self     312   8.0%  __fcntl
+      self     278   7.1%  __psynch_mutexwait
+      inclusive     318   8.1%  SwitchMemTable
+      inclusive    3408  87.3%  CommitGroup
+      inclusive       0   0.0%  LogAndApply
+      inclusive     281   7.2%  std::mutex::lock
+      inclusive       0   0.0%  FlushImmutable
+  --- thread 'Thread_7020180': 3906 samples
+      self    3072  78.6%  __psynch_cvwait
+      self     519  13.3%  __fcntl
+      self     228   5.8%  write
+      inclusive       0   0.0%  SwitchMemTable
+      inclusive       0   0.0%  CommitGroup
+      inclusive     258   6.6%  LogAndApply
+      inclusive       0   0.0%  std::mutex::lock
+      inclusive     644  16.5%  FlushImmutable
+
+A, B and C:
+  --- thread 'Thread_6712200   DispatchQueue_1: com.apple.main-thread  (se': 4298 samples
+      self    2911  67.7%  write
+      self     679  15.8%  __fcntl
+      inclusive     684  15.9%  SwitchMemTable
+      inclusive    3264  75.9%  CommitGroup
+      inclusive       0   0.0%  LogAndApply
+      inclusive      30   0.7%  std::mutex::lock
+      inclusive       0   0.0%  FlushImmutable
+  --- thread 'Thread_6712204': 4298 samples
+      self    3108  72.3%  __psynch_cvwait
+      self     993  23.1%  __fcntl
+      inclusive       0   0.0%  SwitchMemTable
+      inclusive       0   0.0%  CommitGroup
+      inclusive     471  11.0%  LogAndApply
+      inclusive       0   0.0%  std::mutex::lock
+      inclusive     849  19.8%  FlushImmutable
+
+A to D:
+  --- thread 'Thread_6712069   DispatchQueue_1: com.apple.main-thread  (se': 4277 samples
+      self    3482  81.4%  write
+      inclusive       4   0.1%  SwitchMemTable
+      inclusive    3876  90.6%  CommitGroup
+      inclusive       0   0.0%  LogAndApply
+      inclusive      48   1.1%  std::mutex::lock
+      inclusive       0   0.0%  FlushImmutable
+  --- thread 'Thread_6712073': 4277 samples
+      self    2541  59.4%  __psynch_cvwait
+      self    1471  34.4%  __fcntl
+      inclusive       0   0.0%  SwitchMemTable
+      inclusive       0   0.0%  CommitGroup
+      inclusive     881  20.6%  LogAndApply
+      inclusive       0   0.0%  std::mutex::lock
+      inclusive    1006  23.5%  FlushImmutable
+
+overwrite, A to D (the counting library's totals cover the load and the overwrites):
+  --- thread 'Thread_6713149   DispatchQueue_1: com.apple.main-thread  (se': 2559 samples
+      self    2010  78.5%  write
+      self     142   5.5%  __semwait_signal
+      self      87   3.4%  shale::SkipList<char const*, shale::MemTable::KeyComparator>::Insert(char const* const&)
+      inclusive     149   5.8%  MakeRoomForWrite
+      inclusive     144   5.6%  SleepForMicroseconds
+      inclusive    2237  87.4%  CommitGroup
+      inclusive       0   0.0%  LogAndApply
+      inclusive       0   0.0%  FlushImmutable
+      inclusive       0   0.0%  BackgroundCompaction
+  --- thread 'Thread_6713301': 2559 samples
+      self    1366  53.4%  __fcntl
+      self     114   4.5%  __psynch_cvwait
+      inclusive       0   0.0%  MakeRoomForWrite
+      inclusive       0   0.0%  SleepForMicroseconds
+      inclusive       0   0.0%  CommitGroup
+      inclusive     102   4.0%  LogAndApply
+      inclusive     401  15.7%  FlushImmutable
+      inclusive    2372  92.7%  BackgroundCompaction
+  interpose: F_FULLFSYNC=779; shale.stats after the overwrites: flush_bytes_written=114158760
+  compaction_bytes_written=417419701 write_slowdowns=303 (109 MiB flushed, 398 MiB compacted)
+
+overwrite, LevelDB (the same probe, --engine leveldb; the same scope for the counts):
+  --- thread 'Thread_6713879   DispatchQueue_1: com.apple.main-thread  (se': 2578 samples
+      self    2114  82.0%  write
+      self     134   5.2%  leveldb::SkipList<char const*, leveldb::MemTable::KeyComparator>::FindGreaterOrEqual(char const* const&, level
+      inclusive      15   0.6%  MakeRoomForWrite
+      inclusive       0   0.0%  CompactMemTable
+      inclusive       0   0.0%  DoCompactionWork
+      inclusive       0   0.0%  BackgroundCompaction
+  --- thread 'Thread_6713881': 2578 samples
+      self    1221  47.4%  __fcntl
+      self     460  17.8%  write
+      self     324  12.6%  __psynch_cvwait
+      self      84   3.3%  _platform_memmove
+      inclusive       0   0.0%  MakeRoomForWrite
+      inclusive     525  20.4%  CompactMemTable
+      inclusive    1955  75.8%  DoCompactionWork
+      inclusive    2023  78.5%  BackgroundCompaction
+  interpose: F_FULLFSYNC=624; leveldb.stats after the overwrites: level 0 wrote 107 MiB, levels 1 and 2 wrote
+  157 and 165 MiB
+
+7.4 The first pass replayed with the probe, in shale_bench's order (fillseq, fillrandom, fillsync, overwrite
+three times, then each read benchmark three times), to see the tree under the reads. Five replays, four of the
+final build and one of $ABC, all read at the higher of the two levels that docs/benchmarks.md describes, and all
+left the same tree once the compactions that overwrite owed were done, during readrandom (level 0 empty, then 4,
+51 and 9 files). readseq and seekrandom, ops/s: the final build 4,190,924 and 155,293; 4,219,951 and 156,826;
+4,217,503 and 158,520; 4,212,792 and 156,471; $ABC 4,228,932 and 133,112. In the runs of shale_bench in 7.1 the
+same rows were 3,478,488 and 103,190 (A to D, the run of the tables), 4,130,391 and 157,988 (again), 3,172,705 and
+82,037 (a third time), 4,221,056 and 160,061 ($ABC) and 4,192,786 and 157,522 ($ABC again).
+
+A run of the final build with the counting library, one run of each read benchmark after fillseq, fillrandom and
+overwrite, for the calls and the tree:
+
+  == shale fillseq: 369309 ops/s, 2.708 s, engine 2.649 s, wa 2.17
+  Level 0: 3 files, 9706763 bytes
+  == shale fillrandom: 237196 ops/s, 4.216 s, engine 4.084 s, wa 4.96
+  Level 0: 3 files, 9789401 bytes
+  == shale overwrite: 207872 ops/s, 4.811 s, engine 4.687 s, wa 5.70
+  Level 0: 4 files, 13051159 bytes
+  SNAP after 1 x readrandom         pread=961868 (3949834197 B) read=0 write=2350 (136716068 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=157 fsync=0
+  == shale readrandom: 300669 ops/s, 3.326 s, engine 3.214 s, wa -
+  Level 0: 0 files, 0 bytes
+  SNAP after 1 x readmissing        pread=9690 (39795810 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  == shale readmissing: 1512732 ops/s, 0.661 s, engine 0.636 s, wa -
+  Level 0: 0 files, 0 bytes
+  SNAP after 1 x readseq            pread=31928 (130984202 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  == shale readseq: 4203827 ops/s, 0.238 s, engine 0.238 s, wa -
+  Level 0: 0 files, 0 bytes
+  SNAP after 1 x seekrandom         pread=1476058 (6061147427 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+  == shale seekrandom: 157097 ops/s, 6.366 s, engine 6.337 s, wa -
+  Level 0: 0 files, 0 bytes
+
+7.5 The sources of the profile driver, of the parser of `sample`'s call graph, and of the classification
+($SCRATCH is the scratch directory the probe was built in).
+
+--- profile.sh ---
+#!/usr/bin/env bash
+# profile.sh <probe> <label> <num> <benchmarks> <mark-or-delay> <seconds> [loops] [compact]
+# Runs the probe and samples it: after a line matching the pattern <mark> appears, or after <delay> seconds
+# when the mark is a number.
+set -uo pipefail
+S=$SCRATCH
+probe=$1 label=$2 num=$3 benches=$4 mark=$5 secs=$6 loops=${7:-1} compact=${8:-}
+db="$S/probe-db"; rm -rf "$db"; mkdir -p "$db"
+out="$S/prof-$label"
+if [ -n "$compact" ]; then export PROBE_COMPACT=1; else unset PROBE_COMPACT; fi
+DYLD_INSERT_LIBRARIES="$S/interpose.dylib" "$probe" "${ENGINE:-shale}" "$num" "$db" "$benches" 0 "$loops" > "$out.out" 2>&1 &
+pid=$!
+if [[ "$mark" =~ ^[0-9]+$ ]]; then
+  sleep "$mark"
+else
+  until grep -qE "$mark" "$out.out" || ! kill -0 $pid 2>/dev/null; do sleep 0.2; done
+  sleep 0.3
+fi
+sample $pid "$secs" -file "$out.sample.txt" > /dev/null 2>&1
+wait $pid
+echo "$label: probe exit $?"
+rm -rf "$db"
+--- sample_parse.py ---
+"""Summarizes the call graph of a macOS `sample` report, thread by thread.
+
+Usage: sample_parse.py <report> [inclusive-name ...]
+
+For each thread: its total samples, the functions at the top of the stack with 3% or more of them
+(self samples: a node's count less its children's), and the inclusive samples of each named
+function (summed over every node whose symbol contains the name, outermost occurrence only).
+"""
+import re
+import sys
+from collections import defaultdict
+
+LINE = re.compile(r"^(?P<lead>[ +|!:]*)(?P<count>\d+) (?P<sym>.*)$")
+
+
+def parse(path):
+    threads = []
+    in_graph = False
+    with open(path, errors="replace") as f:
+        for raw in f:
+            line = raw.rstrip("\n")
+            if line.startswith("Call graph:"):
+                in_graph = True
+                continue
+            if not in_graph:
+                continue
+            if line.strip() == "" or line.startswith("Total number in stack"):
+                if threads and line.startswith("Total number in stack"):
+                    break
+                continue
+            m = LINE.match(line)
+            if not m:
+                continue
+            depth = len(m.group("lead"))
+            count = int(m.group("count"))
+            sym = m.group("sym")
+            if depth == 4:
+                threads.append({"name": sym, "total": count, "nodes": []})
+                continue
+            if threads:
+                threads[-1]["nodes"].append((depth, count, sym))
+    return threads
+
+
+def summarize(thread, names):
+    nodes = thread["nodes"]
+    selfs = defaultdict(int)
+    inclusive = defaultdict(int)
+    stack = []  # (depth, matched names)
+    for i, (depth, count, sym) in enumerate(nodes):
+        child_sum = 0
+        # direct children: the next nodes at the smallest depth greater than this one
+        j = i + 1
+        child_depth = None
+        while j < len(nodes) and nodes[j][0] > depth:
+            if child_depth is None:
+                child_depth = nodes[j][0]
+            if nodes[j][0] == child_depth:
+                child_sum += nodes[j][1]
+            j += 1
+        func = re.sub(r"\s+\(in [^)]*\).*$", "", sym).strip()
+        selfs[func] += count - child_sum
+        while stack and stack[-1][0] >= depth:
+            stack.pop()
+        enclosing = set()
+        for _, matched in stack:
+            enclosing |= matched
+        matched_here = set()
+        for n in names:
+            if n in func:
+                matched_here.add(n)
+                if n not in enclosing:
+                    inclusive[n] += count
+        stack.append((depth, enclosing | matched_here))
+    return selfs, inclusive
+
+
+def main():
+    path = sys.argv[1]
+    names = sys.argv[2:]
+    for t in parse(path):
+        total = t["total"]
+        if total == 0:
+            continue
+        selfs, inclusive = summarize(t, names)
+        print(f"--- thread '{t['name'][:60]}': {total} samples")
+        for func, c in sorted(selfs.items(), key=lambda kv: -kv[1]):
+            if c * 100 < 3 * total:
+                break
+            print(f"    self {c:7d} {100.0 * c / total:5.1f}%  {func[:110]}")
+        for n in names:
+            c = inclusive.get(n, 0)
+            print(f"    inclusive {c:7d} {100.0 * c / total:5.1f}%  {n}")
+
+
+main()
+--- categories.py ---
+"""Shares of the calling (main) thread's samples by kind of function at the top of the stack."""
+import importlib.util
+import re
+import sys
+
+spec = importlib.util.spec_from_file_location(
+    "sp", "$SCRATCH/sample_parse.py")
+sp = importlib.util.module_from_spec(spec)
+sys.argv_saved = sys.argv
+sys.argv = [sys.argv[0], "/dev/null"]
+spec.loader.exec_module(sp)
+sys.argv = sys.argv_saved
+
+CATS = [
+    ("pread syscall", r"^pread$"),
+    ("write syscall (log append)", r"^write$"),
+    ("F_FULLFSYNC", r"^__fcntl$"),
+    ("waiting for the DB mutex", r"__psynch_mutexwait"),
+    ("sleep (write slowdown)", r"__semwait_signal|nanosleep"),
+    ("crc32c", r"crc32c"),
+    ("malloc, free, memset", r"malloc|^free|_free|szone|nanov2|_platform_memset|bzero|operator new|operator delete|xzm"),
+    ("memmove, memcmp", r"_platform_mem(move|cmp)|DYLD-STUB\$\$mem"),
+    ("clock reads (harness)", r"mach_absolute_time|clock_gettime|steady_clock"),
+    ("Status::ok() (out of line)", r"Status::ok"),
+]
+
+
+def main():
+    path = sys.argv[1]
+    threads = sp.parse(path)
+    main_thread = next(t for t in threads if "main-thread" in t["name"])
+    selfs, _ = sp.summarize(main_thread, [])
+    total = main_thread["total"]
+    sums = {c: 0 for c, _ in CATS}
+    other = 0
+    for func, c in selfs.items():
+        for cat, rx in CATS:
+            if re.search(rx, func):
+                sums[cat] += c
+                break
+        else:
+            other += c
+    parts = [("engine and harness code", other)] + list(sums.items())
+    parts = [(k, v) for k, v in parts if v > 0]
+    parts.sort(key=lambda kv: -kv[1])
+    print(f"{total} samples; " + "; ".join(f"{k} {100.0 * v / total:.1f}%" for k, v in parts))
+    top = sorted(selfs.items(), key=lambda kv: -kv[1])[:12]
+    for func, c in top:
+        print(f"    self {c:6d} {100.0 * c / total:5.1f}%  {func[:110]}")
+
+
+main()
