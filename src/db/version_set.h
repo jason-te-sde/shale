@@ -259,12 +259,18 @@ class VersionSet {
   /// Returns the number that NewFileNumber() will return next.
   uint64_t NextFileNumber() const { return next_file_number_; }
 
-  /// Returns the sequence number of the newest write: of the tables at first, and moved forward as
-  /// the database writes and replays.
+  /// Returns the sequence number of the newest write that the database has made. Recover() sets it
+  /// to the newest write that the tables hold, and it moves forward as the database replays its
+  /// logs and writes. It is not what an edit records: an edit records the newest write of the
+  /// tables, which a flush says and every other edit leaves as it was. The first record of a new
+  /// MANIFEST, WriteNewManifest(), is the one place that records this number, since the writes it
+  /// counts are in a table by then.
   SequenceNumber LastSequence() const { return last_sequence_; }
 
-  /// Moves LastSequence() forward to `sequence`, which is the number the next edit records. Aborts
-  /// if it is below the one now, since a sequence number is never reused.
+  /// Moves LastSequence() forward to `sequence`. Aborts if it is below the one now. The writes of
+  /// one open never reuse a number. Across an open that set a log aside after a gap, the writes in
+  /// that log, which are kept as a `.dropped` file, share their numbers with the writes that
+  /// follow.
   void SetLastSequence(SequenceNumber sequence);
 
   /// Returns the number of the oldest write-ahead log that still holds writes not in a table.

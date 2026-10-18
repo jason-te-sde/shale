@@ -159,8 +159,11 @@ Status DBImpl::SwitchMemTable() {
   //    the hole at the new log's first write and replays nothing from there on (ReplayLog()); the
   //    tables' newest write, which the flush records, is what the first log replayed is held to.
   //
-  // The simulator's I4 checks both after every crash it makes: a reopened database must equal the
-  // writes up to some point at or after the last one acknowledged as synced.
+  // The simulator checks both after every crash it makes: I4, a reopened database must equal the
+  // writes up to some point at or after the last one acknowledged as synced; and I2's durable
+  // floor, its last sequence number is not below that of the last write acknowledged as synced.
+  // Leaving out the sync of the old log or of the directory fails I2 first, and leaving out the
+  // check of ReplayLog() fails I4.
   SHALE_CHECK(unsynced_log_ == nullptr,
               "a log from before the last switch is still waiting for a sync at the next switch");
   uint64_t number = 0;

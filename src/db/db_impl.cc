@@ -589,8 +589,9 @@ Status DBImpl::ApplyRecoveredBatch(std::string_view record, SequenceNumber* max_
   const uint32_t count = WriteBatchInternal::Count(&batch);
   // The memtable aborts on two entries for one key and sequence number, so a log whose numbers go
   // back, or repeat, is refused here, whatever put it in that state. The numbers are those of this
-  // replay and not of the MANIFEST: a flush records the number the database had reached, which can
-  // be above those of the writes that are still in the log.
+  // replay and not of the MANIFEST: a MANIFEST records the newest write that its tables hold, and
+  // one written before an edit did so recorded the number the database had reached, which can be
+  // above those of the writes that are still in the log.
   if (sequence <= *max_sequence) {
     return Status::Corruption("sequence number " + std::to_string(sequence) +
                               " does not come after " + std::to_string(*max_sequence));
