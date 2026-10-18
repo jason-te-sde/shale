@@ -70,7 +70,9 @@ class TableCache {
 
   /// Returns an iterator over every entry of table `number`. It holds the table, so the cache may
   /// evict it, and the file may be deleted, while the iterator is in use. If the table cannot be
-  /// opened the iterator is NewErrorIterator() with the reason, never null.
+  /// opened the iterator is NewErrorIterator() with the reason, never null. A Corruption that the
+  /// iterator stops with, a data block that fails its checksum among them, names the file, as
+  /// that of Get() does.
   /// @param options how to read.
   /// @param number the file number of the table.
   /// @param file_size the size of the file in bytes.
