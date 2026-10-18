@@ -177,20 +177,20 @@ if(SHALE_BUILD_TOOLS)
   set_tests_properties(shalectl_commands PROPERTIES TIMEOUT 300)
 
   # The crash test kills a child process that is writing to a real directory, and the parent checks
-  # what survived. The tool refuses a directory that already holds a database, so a setup test
-  # removes the one the smoke test uses, and a run that failed leaves its database there to be
-  # looked at.
-  set(_crashtest_smoke_db "${CMAKE_CURRENT_BINARY_DIR}/crashtest_smoke_db")
-  add_test(NAME crashtest_clean_dirs
-           COMMAND "${CMAKE_COMMAND}" -E rm -rf "${_crashtest_smoke_db}")
-  set_tests_properties(crashtest_clean_dirs PROPERTIES FIXTURES_SETUP crashtest_dirs)
-
+  # what survived. The tool refuses a directory that already holds a database, so each run of the
+  # smoke test makes a new one, and removes it only if the run passed: a failed run leaves its
+  # database where the tool's output says. A directory shared between runs broke the test under
+  # `ctest --repeat`, which runs a test again without running its fixtures again.
+  #
   # Three rounds, so that a break in the tool or in the engine's reopen shows up in every build of
-  # the suite. The crash job in .github/workflows/ci.yml runs two hundred in a Release build, and asks
-  # that the kills have reached a compaction, which three rounds of a slow build need not do.
+  # the suite. The crash job in .github/workflows/ci.yml runs two hundred in a Release build, and
+  # asks that the kills have reached a compaction, which three rounds of a slow build need not do.
   add_test(NAME crashtest_smoke
-           COMMAND $<TARGET_FILE:shale_crashtest> --rounds=3 --seed=1 "--db=${_crashtest_smoke_db}")
-  set_tests_properties(crashtest_smoke PROPERTIES TIMEOUT 120 FIXTURES_REQUIRED crashtest_dirs)
+           COMMAND "${SHALE_BASH}" -c [=[
+             dir="$(mktemp -d "${TMPDIR:-/tmp}/crashtest_smoke.XXXXXX")" || exit 1
+             "$0" --rounds=3 --seed=1 --db="$dir/db" && rm -rf "$dir"
+           ]=] "$<TARGET_FILE:shale_crashtest>")
+  set_tests_properties(crashtest_smoke PROPERTIES TIMEOUT 120)
 
   # A check that has only passed has not shown that it can fail. This script has the tool overwrite
   # one key with a wrong value before the check, and requires exit status 1 and the line that says
