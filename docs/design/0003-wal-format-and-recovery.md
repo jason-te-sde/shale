@@ -45,8 +45,8 @@ acts on the difference.**
 | a read error | `Open` fails with `IOError` | `Open` fails with `IOError` |
 
 A read that failed says nothing about what the log holds, so it is never taken for a defect of the
-contents. A log that is set aside is never deleted: the data may be there, and may be the operator's
-only copy.
+contents. A log that is set aside is never deleted except by `DestroyDB()`: the data may be there,
+and may be the operator's only copy.
 
 The gap is the one case in which recovery drops writes although no byte is damaged, and it is treated
 as what a power loss leaves, whatever `paranoid_checks` says. A memtable switch does not sync the old
@@ -133,7 +133,8 @@ Four further rules:
   `ALengthDamagedPastTheEndOfTheLogIsNotMistakenForATornTail`, `ZeroFilledTailFailsParanoidOpen`,
   `AReadErrorAnywhereInOpenIsAnIOErrorAndLosesNothing`,
   `LenientOpenSetsAsideTheLogWithTheDefectAndEveryLaterLog`); `fuzz/fuzz_log_reader.cc`
-- Commits: [`89915a1`][89915a1], [`956bdc1`][956bdc1], [`39793ad`][39793ad], [`b07bbcd`][b07bbcd] (`DestroyDB` removes `.dropped` logs).
+- Commits: [`89915a1`][89915a1], [`956bdc1`][956bdc1], [`39793ad`][39793ad], [`b07bbcd`][b07bbcd]
+  (`DestroyDB` removes `.dropped` logs).
 
 [39793ad]: https://github.com/jason-te-sde/shale/commit/39793ada1cbde96f02a4011bd4abddf4bce2eb96
 [89915a1]: https://github.com/jason-te-sde/shale/commit/89915a11fe4fc0b9c394960b096fef976f928463

@@ -179,7 +179,8 @@ resynchronise.
 ```
 
 What the reader reports, and what it does not, is the difference between a crash and corruption, and
-it is exact:
+it is exact except for one rare false report, which is loud
+([ADR 0003](design/0003-wal-format-and-recovery.md)):
 
 - **Silent.** The file stops inside a header, inside a record whose length says it would have fit in
   its block, or after a `FIRST` or `MIDDLE` fragment with no `LAST` after it. That is what a writer
@@ -334,16 +335,17 @@ magic number.
 
 ### What a reader checks
 
-`Table::Open()` reads the footer, the index and the filter, and checks that the index is a sorted list
-of keys with one handle each, every handle naming a different block in the part of the file before the
-filter, in order. After that, a table whose bytes were damaged after it was written is caught by the checksum of
-the block: a read returns the entry that was written or a `Corruption`, never a crash, a read outside the
-buffer or a value that was not stored. A file made by something that computes the checksums for whatever
-it writes has no such promise beyond staying inside its buffers: an iterator over a table returns keys in
-strictly increasing order whatever the file holds, so that a table can be fed to a table builder, which
-aborts on a key that is not, and a block with its keys out of order ends the iteration with `Corruption`;
-but a lookup does not walk a block, so in such a block it can land on another entry and return its value.
-See [`src/io/table.h`](../src/io/table.h).
+`Table::Open()` reads the footer, the index and the filter, and checks that the index is a sorted
+list of keys with one handle each, every handle naming a different block in the part of the file
+before the filter, in order. After that, with `verify_checksums` on (the default), a table whose
+bytes were damaged after it was written is caught by the checksum of the block: a read returns the
+entry that was written or a `Corruption`, never a crash, a read outside the buffer or a value that
+was not stored. A file made by something that computes the checksums for whatever it writes has no
+such promise beyond staying inside its buffers: an iterator over a table returns keys in strictly
+increasing order whatever the file holds, so that a table can be fed to a table builder, which
+aborts on a key that is not, and a block with its keys out of order ends the iteration with
+`Corruption`; but a lookup does not walk a block, so in such a block it can land on another entry
+and return its value. See [`src/io/table.h`](../src/io/table.h).
 
 ## The MANIFEST and version edits
 

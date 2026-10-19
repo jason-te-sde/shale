@@ -299,9 +299,9 @@ to measure, and [benchmarks](benchmarks.md) shows how `shale_bench` does it.
 | `block_cache_capacity` | More data blocks kept in memory for reads. The cache holds data blocks only, charged by their size; the index and filter of each open table are in memory besides, and are not counted here. There is no hit counter: judge it by read latency. | Less memory. |
 | `max_open_files` | More tables kept open. The table cache holds `max_open_files - 10` tables (ten files are reserved for the log, the MANIFEST and the like); a table that is not open is opened again, reading its footer, index and filter, when a read needs it. | If there are more tables than this, reads pay to reopen them. |
 
-**Memory** is about `write_buffer_size` for the memtable, as much again while one is being written out,
-plus `block_cache_capacity`, plus the filter and the index of every open table. `GetProperty("shale.approximate-memory-usage")`
-reports the memtables and the block cache only.
+**Memory** is about `write_buffer_size` for the memtable, as much again while one is being written
+out, plus `block_cache_capacity`, plus the filter and the index of every open table.
+`GetProperty("shale.approximate-memory-usage")` reports the memtables and the block cache only.
 
 **`WriteOptions::sync`** is the one setting that trades safety for speed. With `true` (the default) a
 write that returns is on stable storage, and writers that arrive together share one sync. With `false`
