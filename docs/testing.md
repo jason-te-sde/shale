@@ -328,7 +328,7 @@ The author's machine is a Mac (arm64) with Apple Clang, Homebrew Clang and GCC 1
   default, under which an open that reads a corrupted byte of a log fails with `Corruption` instead of
   working, so `damaged_opens`, the count of opens that worked with a corrupted read, was 0 in CI's 50
   seeds and in a run of 600. So the clause of I4 about an open that read corrupted bytes and worked is
-  not exercised by CI's simulator runs, and lenient recovery has that one test and no other.
+  not exercised by CI's simulator runs, and lenient recovery is tested only by the tests in that file.
 - **Runs longer or bigger than CI's.** The simulator runs 50 seeds of 2000 steps over 200 keys, the crash
   test 200 rounds, each fuzz target 60 seconds, and the stress tests a few thousand writes. A database of
   tens of gigabytes, a year of uptime and a compaction that takes an hour have never been run.

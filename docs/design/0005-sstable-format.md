@@ -61,10 +61,11 @@ small: a table either yields the entries that were written, in order, or an erro
   that separates two blocks, so the index of a table with long keys is bigger.
 - **No compression.** A table takes the bytes of its keys and values, less prefix compression of keys. A
   value that compresses well takes more disk than it needs to. The type byte reserves the place.
-- **A filter is a probabilistic answer.** With 100,000 keys of four binary bytes and 10 bits per key it lets
-  1.5% of absent keys through (0.26% at 15 bits; commit [`adb4509`][adb4509]), and with text keys of ten or so bytes
-  about half as much; `BloomTest.FalsePositiveRatesAtTenAndFifteenBitsPerKey` in `tests/io/bloom_test.cc`
-  measures and bounds all four. Each key that gets through costs a data block read.
+- **A filter is a probabilistic answer.** With 100,000 keys of four binary bytes and 10 bits per key
+  it lets 1.5% of absent keys through (0.26% at 15 bits; commit [`adb4509`][adb4509]), and with text
+  keys of ten or so bytes about half as much;
+  `BloomTest.FalsePositiveRatesAtTenAndFifteenBitsPerKey` in `tests/io/bloom_test.cc` measures and
+  bounds all four. Each key that gets through costs a data block read.
 - **There is no prefix or range filter.** A scan cannot skip a table by its range of prefixes.
 - **One filter per table, not per block.** A table's filter cannot be partially loaded; a very large table
   would load a very large filter. Tables here are small by construction (2 MiB targets).
@@ -96,8 +97,8 @@ small: a table either yields the entries that were written, in order, or an erro
 - Tests: `tests/io/table_format_test.cc`, `table_builder_test.cc`, `block_test.cc`, `bloom_test.cc`,
   `table_test.cc`; `fuzz/fuzz_block.cc`, `fuzz/fuzz_table.cc`; and
   `tests/docs/format_constants_test.cc`, which holds [format](../format.md) to the code.
-- Commits [`216e7fc`][216e7fc] (an unverified block must not enter the shared cache), [`07376bb`][07376bb] (refuse short
-  block keys before the comparator sees them).
+- Commits [`216e7fc`][216e7fc] (an unverified block must not enter the shared cache),
+  [`07376bb`][07376bb] (refuse short block keys before the comparator sees them).
 
 [07376bb]: https://github.com/jason-te-sde/shale/commit/07376bbaa4d6178471e8e9ffdaa01796f0a6ae41
 [216e7fc]: https://github.com/jason-te-sde/shale/commit/216e7fca4ca3e22326ec97f062b00308df9a4475

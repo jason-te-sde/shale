@@ -12,7 +12,8 @@ namespace shale {
 /// definitely not in it, so that a lookup can skip a table without reading it.
 ///
 /// A filter never says a key is absent when it was added, and says a key is present for some that
-/// were not, about 1.5% of them at 10 bits per key (measured, see the constructor). The filter is
+/// were not, about 1.5% of them at 10 bits per key for four-byte binary keys and about half that
+/// for text keys (measured, see the constructor). The filter is
 /// stored in tables, so its bytes are part of the file format. The bit array has `max(n *
 /// bits_per_key, 64)` bits rounded up to whole bytes, and a last byte holds the number of probes
 /// `k`, which is `bits_per_key * 0.69` rounded down and kept between 1 and 30. A key is hashed once

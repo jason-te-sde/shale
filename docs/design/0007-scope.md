@@ -35,9 +35,9 @@ Also by design: a database is opened by **one process at a time** (a `LOCK` file
 
 ## Consequences
 
-**What this buys.** Every feature that is there is there fully. The failure paths and crash behaviour of
-each are tested, and the list of what the test suite does not cover ([testing](../testing.md#what-the-tests-do-not-cover))
-is short enough to read.
+**What this buys.** Every feature that is there is there fully. The failure paths and crash
+behaviour of each are tested, and the list of what the test suite does not cover
+([testing](../testing.md#what-the-tests-do-not-cover)) is short enough to read.
 
 **What it costs.**
 

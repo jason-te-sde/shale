@@ -62,12 +62,11 @@ are in the code in the places named.
    synced and closed, opened again through the table cache to see that it reads, and only then is the
    directory synced.
 5. **An edit is durable in the MANIFEST before the version it makes is installed** (`LogAndApply`,
-   `src/db/version_set.cc`). The record is appended and synced (with the DB mutex given up, and only one
-   writer at a time, which the version set enforces), then the version is installed. A version that
-   readers see is one a crash will not take back, and a table a version names is one the MANIFEST
-   names too. If the append
-   or the sync fails, the MANIFEST is not trusted again until a new one is written, because a `Sync()`
-   that succeeds after a failed one proves nothing.
+   `src/db/version_set.cc`). The record is appended and synced (with the DB mutex given up, and only
+   one writer at a time, which the version set enforces), then the version is installed. A version
+   that readers see is one a crash will not take back, and a table a version names is one the
+   MANIFEST names too. If the append or the sync fails, the MANIFEST is not trusted again until a
+   new one is written, because a `Sync()` that succeeds after a failed one proves nothing.
 6. **`CURRENT` changes by atomic rename and a synced directory** (`SetCurrentFile`). The new
    MANIFEST is written and synced, the directory is synced (so `CURRENT` never names a MANIFEST whose
    directory entry a crash could take back), a temporary file with the new contents is written and
@@ -124,7 +123,7 @@ holds the engine to D1 to D6 after every crash, not only at the end of a run.
 - **A power loss can set a log aside.** After a power loss that takes the unsynced end of one log and
   keeps unsynced writes of the next, an open sets the later logs aside as `.dropped` files (D6). They hold
   no write that was acknowledged as synced, and one or more of them can appear after each such power
-  loss; the engine never deletes them ([operations](../operations.md)).
+  loss; the engine never deletes them except in `DestroyDB()` ([operations](../operations.md)).
 - **Two logs can end in unsynced bytes.** Because a switch does not sync the old log, a zero-filled or
   garbage tail, which the reader reports as a defect and a default open refuses, can be in either of the
   last two logs and not only the newest. The simulator's filesystem leaves clean prefixes only, and does
@@ -143,11 +142,12 @@ holds the engine to D1 to D6 after every crash, not only at the end of a run.
   can lose an acknowledged write has chosen speed over the one property that makes it a database.
 - **`O_DSYNC` or `O_SYNC` on the log file** instead of `fdatasync` after the write. Rejected: it gives up
   the choice of syncing a group once, which is the point of group commit.
-- **Sync the old log and the directory at every memtable switch, on the writers' path.** This was the first
-  design, and it is simpler to argue. Rejected for what it costs the writer that makes the switch: it is a
-  sync of the old log and one of the directory with the DB mutex held, shown in the profiles in
-  [benchmarks](../benchmarks.md). The first synced write after the switch does the same work only when
-  somebody asked for durability, and the flush makes it unnecessary when nobody does (commit [`824b318`][824b318]).
+- **Sync the old log and the directory at every memtable switch, on the writers' path.** This was
+  the first design, and it is simpler to argue. Rejected for what it costs the writer that makes the
+  switch: it is a sync of the old log and one of the directory with the DB mutex held, shown in the
+  profiles in [benchmarks](../benchmarks.md). The first synced write after the switch does the same
+  work only when somebody asked for durability, and the flush makes it unnecessary when nobody does
+  (commit [`824b318`][824b318]).
 - **Let a background thread sync the old log while writes go into the new one.** Rejected: it leaves the
   same hole for recovery to find, and adds a thread that touches the log.
 - **Delete the logs after a gap.** Rejected: they hold writes that were acknowledged, if not synced, and
