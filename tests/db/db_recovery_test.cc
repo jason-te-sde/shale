@@ -44,8 +44,9 @@ bool Contains(const std::string& haystack, const std::string& needle) {
   return haystack.find(needle) != std::string::npos;
 }
 
-// The size of a log record's header.
+// The size of a log record's header, and of a block of the log format.
 constexpr uint64_t kLogHeaderSize = 7;
+constexpr size_t kLogBlockSize = 32768;
 
 class DBRecoveryTest : public DBTestBase {
  protected:
@@ -434,6 +435,40 @@ TEST_F(DBRecoveryTest, ZerosFollowedByAnotherByteInTheManifestFailOpen) {
     EXPECT_TRUE(Contains(s, "unknown record type")) << s.ToString();
     EXPECT_TRUE(Contains(s, manifest)) << s.ToString();
   }
+}
+
+TEST_F(DBRecoveryTest, AReadErrorWhileReadingPastZerosIsAnIOErrorAndLosesNothing) {
+  // The newest log and the MANIFEST both end in zeros that run past a block boundary, which the
+  // reader reads to the end to know that they are zeros to the end. A read that fails there, or
+  // anywhere else in Open, is an IOError, never a Corruption: the files may be whole, and the next
+  // open, with nothing failing, holds every write. Each read that Open makes is failed in turn.
+  int next_key = 0;
+  int failures = 0;
+  for (int n = 0; n < 40; n++) {
+    PutRange(next_key, next_key + 5);
+    next_key += 5;
+    Close();
+    for (const std::string& file : {NewestLogFile(env_.get(), kDb), CurrentManifestPath()}) {
+      const std::string contents = env_->FileContents(file);
+      const size_t to_the_next_block = kLogBlockSize - contents.size() % kLogBlockSize;
+      env_->SetFileContents(file, contents + std::string(to_the_next_block + 100, '\0'));
+    }
+    env_->FailOpAfter(Op::kRead, n);
+    const uint64_t injected_before = env_->injected_errors();
+    const Status s = TryReopen(CurrentOptions());
+    const bool fired = env_->injected_errors() > injected_before;
+    env_->ClearFaults();
+    if (fired) {
+      EXPECT_TRUE(s.IsIOError()) << "read number " << n << ": " << s.ToString();
+      failures++;
+    }
+    ASSERT_OK(TryReopen(CurrentOptions()));
+    ExpectPresent(0, next_key);
+    if (!fired) {
+      break;
+    }
+  }
+  EXPECT_GE(failures, 5) << "Open reads CURRENT, two blocks of the MANIFEST and two of the log";
 }
 
 TEST_F(DBRecoveryTest, AReadErrorAnywhereInOpenIsAnIOErrorAndLosesNothing) {

@@ -1101,6 +1101,45 @@ TEST_F(VersionSetTest, AManifestWhoseZerosAreNotItsWholeEndIsRefused) {
   }
 }
 
+TEST_F(VersionSetTest, AReadErrorWhileReadingPastAManifestsZerosIsAnIOError) {
+  // The MANIFEST from CI, cut where its zeros start and padded with zeros to 40000 bytes, so that
+  // they run past the first block: the reader reads on, block by block, to know that they are zeros
+  // to the end of the file. A read that fails on the way says nothing about a file that may be
+  // whole, and a retry would open it, so recovery fails with the IOError, which names the file, and
+  // never with a Corruption, which would send an operator to a backup. Every read that Recover()
+  // makes is failed in turn: CURRENT's, and then the MANIFEST's first and second blocks.
+  const std::string manifest = RegressionFile("manifest-zero-tail/MANIFEST-016123");
+  ASSERT_EQ(manifest.size(), 12389u);
+  const std::string padded = manifest.substr(0, 11951) + std::string(40000 - 11951, '\0');
+  env_.SetFileContents(CurrentFileName(kDb), CurrentText(16123));
+  env_.SetFileContents(DescriptorFileName(kDb, 16123), padded);
+  int failures = 0;
+  int of_the_manifest = 0;
+  for (int n = 0; n < 10; n++) {
+    SCOPED_TRACE("read " + std::to_string(n) + " fails");
+    env_.FailOpAfter(Op::kRead, n);
+    const uint64_t before = env_.injected_errors();
+    const auto recovered = NewVersionSet();
+    const Status s = recovered->Recover();
+    const bool fired = env_.injected_errors() > before;
+    env_.ClearFaults();
+    if (!fired) {
+      ASSERT_OK(s);
+      EXPECT_EQ(recovered->RecoveredZeroTailBytes(), 40000u - 11951u);
+      break;
+    }
+    failures++;
+    EXPECT_TRUE(s.IsIOError()) << s.ToString();
+    if (Names(s, DescriptorFileName(kDb, 16123))) {
+      of_the_manifest++;
+    } else {
+      EXPECT_TRUE(Names(s, CurrentFileName(kDb)));
+    }
+  }
+  EXPECT_GE(failures - of_the_manifest, 1) << "CURRENT is read first";
+  EXPECT_EQ(of_the_manifest, 2) << "the MANIFEST is read in two blocks";
+}
+
 TEST_F(VersionSetTest, StateOfManyBlocksIsRecoveredFromRecordsThatSpanThem) {
   // One edit of four hundred files is a record of about ninety kilobytes, which the log cuts into
   // fragments across blocks, and so is the snapshot of the state it makes.
