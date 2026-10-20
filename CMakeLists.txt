@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(shale
-  VERSION 0.1.0
+  VERSION 0.1.1
   DESCRIPTION "An LSM-tree storage engine written from scratch in C++20"
   LANGUAGES CXX)
 

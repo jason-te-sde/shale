@@ -7,6 +7,19 @@ a minor release may change the API.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-20
+
+### Fixed
+
+- A database could refuse to open after a process kill on macOS, when the operating system left the
+  MANIFEST ending in zero bytes; a zero-filled tail from a record boundary is now tolerated as a crash
+  trace (D6). Zeros that start at a record boundary and run to the end of a write-ahead log or the
+  MANIFEST are dropped whatever `paranoid_checks` says, once the reader has checked every byte to the
+  end of the file, and the `LOG` names the file and the number of zero bytes. Zeros followed by any other
+  byte, zeros that begin inside a record and garbage tails are defects, as before. The simulator's power
+  loss now leaves such zeros too ([durability](docs/design/0004-durability.md),
+  [operations](docs/operations.md#a-database-that-will-not-open)).
+
 ## [0.1.0] - 2026-10-18
 
 The first release.
@@ -42,5 +55,6 @@ The first release.
   [format](docs/format.md), the [operations guide](docs/operations.md), [testing](docs/testing.md), the
   [benchmarks](docs/benchmarks.md) and seven [design records](docs/design/).
 
-[Unreleased]: https://github.com/jason-te-sde/shale/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jason-te-sde/shale/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/jason-te-sde/shale/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jason-te-sde/shale/releases/tag/v0.1.0
