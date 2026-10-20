@@ -21,6 +21,8 @@ Reader::Reader(SequentialFile* file, Reporter* reporter, bool checksum)
 
 uint64_t Reader::LastRecordOffset() const { return last_record_offset_; }
 
+uint64_t Reader::ZeroTailBytes() const { return zero_tail_bytes_; }
+
 bool Reader::ReadRecord(std::string_view* record, std::string* scratch) {
   scratch->clear();
   *record = std::string_view();

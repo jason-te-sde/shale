@@ -112,8 +112,10 @@ void IncrementByteInFile(Env* env, const std::string& path, size_t offset, int d
   });
 }
 
-// Reads `contents` as a log, in a file of its own, until the Reader says it is done.
-Records ReadContents(std::string_view contents, ReportCollector* reports, bool checksum = true) {
+// Reads `contents` as a log, in a file of its own, until the Reader says it is done. If `zero_tail`
+// is not null it receives how many zero bytes at the end the Reader dropped as the end of the log.
+Records ReadContents(std::string_view contents, ReportCollector* reports, bool checksum = true,
+                     uint64_t* zero_tail = nullptr) {
   const std::unique_ptr<Env> env = NewMemEnv();
   EXPECT_OK(WriteStringToFile(env.get(), contents, "/log", /*sync=*/false));
   std::unique_ptr<SequentialFile> source;
@@ -125,8 +127,35 @@ Records ReadContents(std::string_view contents, ReportCollector* reports, bool c
   while (reader.ReadRecord(&record, &scratch)) {
     records.emplace_back(record);
   }
+  if (zero_tail != nullptr) {
+    *zero_tail = reader.ZeroTailBytes();
+  }
   return records;
 }
+
+// A sequential file over `data` whose reads succeed `good_reads` times and then fail.
+class FailingSource : public SequentialFile {
+ public:
+  FailingSource(std::string data, int good_reads)
+      : data_(std::move(data)), good_reads_(good_reads) {}
+  Status Read(size_t n, std::string_view* result, char* scratch) override {
+    if (good_reads_-- <= 0) {
+      *result = {};
+      return Status::IOError("injected read failure");
+    }
+    const size_t count = std::min(n, data_.size() - position_);
+    data_.copy(scratch, count, position_);
+    position_ += count;
+    *result = std::string_view(scratch, count);
+    return Status::OK();
+  }
+  Status Skip(uint64_t) override { return Status::OK(); }
+
+ private:
+  std::string data_;
+  size_t position_ = 0;
+  int good_reads_;
+};
 
 // Writes `records` with a Writer into a new file and returns the file's bytes.
 std::string WriteContents(const Records& records) {
@@ -955,67 +984,236 @@ TEST_F(LogTest, ADefectSwallowsTheRestOfItsBlockIncludingIntactRecords) {
   EXPECT_EQ(reports.dropped, contents.size());
 }
 
-TEST_F(LogTest, AZeroFilledTailIsReportedAndNeverSilentlyAccepted) {
-  // A crash can leave a file that is longer than what was written, with zeros where the data
-  // never arrived. Zero is no record type, so every block of zeros is reported, and the records
-  // before them are all returned. Only a cut-off header, which is shorter than a header, is a
-  // torn tail.
+// --- A zero-filled tail (D6) ---------------------------------------------------------------------
+//
+// A crash can leave a file longer than what reached it: the filesystem kept the new length and not
+// the data, and the end reads back as zeros. Where the zeros start at a record boundary and every
+// byte from there to the end of the file is zero, no record can come after them, so the Reader
+// takes them for the end of the log, as it does a record cut short. Zeros followed by anything
+// else, and zeros that begin inside a record, are what they were: defects.
+
+TEST_F(LogTest, ZerosFromARecordBoundaryToTheEndOfTheFileAreTheEndOfTheLog) {
   const std::string valid = WriteContents({"foo", "bar"});
-  {
-    const size_t tail = 3 * kBlockSize - valid.size();  // zeros to the end of the third block
-    ReportCollector reports;
-    EXPECT_EQ(ReadContents(valid + std::string(tail, '\0'), &reports), (Records{"foo", "bar"}));
-    EXPECT_EQ(reports.messages, Records(3, Report("unknown record type")))
-        << "one report for each block that the zeros cover";
-    EXPECT_EQ(reports.dropped, tail);
+  // A header's worth, more, and to the last byte of the first block.
+  for (const size_t zeros : {kHeaderSize, size_t{100}, kBlockSize - valid.size()}) {
+    for (const bool checksum : {true, false}) {
+      SCOPED_TRACE(std::to_string(zeros) + " zeros, checksum " + std::to_string(checksum));
+      ReportCollector reports;
+      uint64_t zero_tail = 0;
+      EXPECT_EQ(ReadContents(valid + std::string(zeros, '\0'), &reports, checksum, &zero_tail),
+                (Records{"foo", "bar"}));
+      EXPECT_EQ(reports.messages, Records{});
+      EXPECT_EQ(reports.dropped, 0u);
+      EXPECT_EQ(zero_tail, zeros) << "the Reader says how many zero bytes it dropped";
+    }
   }
-  {
-    ReportCollector reports;
-    EXPECT_EQ(ReadContents(valid + std::string(100, '\0'), &reports), (Records{"foo", "bar"}));
-    EXPECT_EQ(reports.messages, Records{Report("unknown record type")});
-    EXPECT_EQ(reports.dropped, 100u);
+}
+
+TEST_F(LogTest, ZerosToTheEndOfTheFileAcrossBlockBoundariesAreTheEndOfTheLog) {
+  {  // From inside the first block to the end of the third, and on into a fourth.
+    const std::string valid = WriteContents({"foo", "bar"});
+    for (const size_t end : {3 * kBlockSize, 3 * kBlockSize + 100}) {
+      SCOPED_TRACE("zeros to offset " + std::to_string(end));
+      ReportCollector reports;
+      uint64_t zero_tail = 0;
+      EXPECT_EQ(ReadContents(valid + std::string(end - valid.size(), '\0'), &reports,
+                             /*checksum=*/true, &zero_tail),
+                (Records{"foo", "bar"}));
+      EXPECT_EQ(reports.messages, Records{});
+      EXPECT_EQ(zero_tail, end - valid.size());
+    }
   }
-  {  // A header's worth of zeros is a header, and its type is zero.
+  {  // From a block boundary: the record before the zeros fills its block to the last byte.
+    const std::string record = BigString("x", kBlockSize - kHeaderSize);
+    const std::string full = WriteContents({record});
+    ASSERT_EQ(full.size(), kBlockSize);
     ReportCollector reports;
-    EXPECT_EQ(ReadContents(valid + std::string(kHeaderSize, '\0'), &reports),
-              (Records{"foo", "bar"}));
-    EXPECT_EQ(reports.messages, Records{Report("unknown record type")});
-    EXPECT_EQ(reports.dropped, kHeaderSize);
-  }
-  {  // One byte fewer cannot hold a header: it is the cut-off kind, and silent.
-    ReportCollector reports;
-    EXPECT_EQ(ReadContents(valid + std::string(kHeaderSize - 1, '\0'), &reports),
-              (Records{"foo", "bar"}));
+    uint64_t zero_tail = 0;
+    EXPECT_EQ(ReadContents(full + std::string(2 * kBlockSize, '\0'), &reports, true, &zero_tail),
+              Records{record});
     EXPECT_EQ(reports.messages, Records{});
+    EXPECT_EQ(zero_tail, 2 * kBlockSize);
   }
+  {  // Where the next fragment of a record would start: the half-read record is dropped without a
+     // word, as it is when the file ends there.
+    const std::string spanning = WriteContents({"foo", BigString("y", kBlockSize)});
+    ASSERT_GT(spanning.size(), kBlockSize);
+    ReportCollector reports;
+    uint64_t zero_tail = 0;
+    EXPECT_EQ(ReadContents(spanning.substr(0, kBlockSize) + std::string(kBlockSize + 10, '\0'),
+                           &reports, true, &zero_tail),
+              Records{"foo"});
+    EXPECT_EQ(reports.messages, Records{});
+    EXPECT_EQ(zero_tail, kBlockSize + 10);
+  }
+}
+
+TEST_F(LogTest, AFileOfNothingButZerosIsAnEmptyLog) {
+  for (const size_t size : {kHeaderSize, size_t{100}, kBlockSize, 2 * kBlockSize + 5}) {
+    SCOPED_TRACE(std::to_string(size) + " zeros");
+    ReportCollector reports;
+    uint64_t zero_tail = 0;
+    EXPECT_EQ(ReadContents(std::string(size, '\0'), &reports, true, &zero_tail), Records{});
+    EXPECT_EQ(reports.messages, Records{});
+    EXPECT_EQ(zero_tail, size);
+  }
+  {  // Fewer than a header's worth is a header cut off by the end of the file, silent as before.
+    ReportCollector reports;
+    uint64_t zero_tail = 99;
+    EXPECT_EQ(ReadContents(std::string(kHeaderSize - 1, '\0'), &reports, true, &zero_tail),
+              Records{});
+    EXPECT_EQ(reports.messages, Records{});
+    EXPECT_EQ(zero_tail, 0u) << "no header, so no zeros where a header would be";
+  }
+}
+
+TEST_F(LogTest, AnIntactOrTornLogHasNoZeroTail) {
+  const std::string valid = WriteContents({"foo", "bar"});
+  for (const size_t size : {valid.size(), valid.size() - 2, size_t{3}}) {
+    SCOPED_TRACE(size);
+    ReportCollector reports;
+    uint64_t zero_tail = 99;
+    ReadContents(valid.substr(0, size), &reports, true, &zero_tail);
+    EXPECT_EQ(zero_tail, 0u);
+  }
+}
+
+TEST_F(LogTest, ZerosFollowedByAnyOtherByteAreStillADefect) {
+  // A byte that is not zero may be where a record after the zeros starts, so the zeros are not the
+  // end of the log. What is reported is exactly what any zero header gets: one report for each
+  // block the zeros reach into, and nothing taken for the end of the file.
+  const std::string valid = WriteContents({"foo", "bar"});
+  struct Case {
+    size_t end;     // the size of the file; its last byte is the one that is not zero
+    size_t blocks;  // the blocks that the zeros reach into, each reported
+  };
+  for (const Case c : {Case{100, 1}, Case{kBlockSize, 1}, Case{3 * kBlockSize, 3},
+                       Case{3 * kBlockSize + 100, 4}}) {
+    SCOPED_TRACE("a byte that is not zero at offset " + std::to_string(c.end - 1));
+    std::string contents = valid + std::string(c.end - valid.size(), '\0');
+    contents.back() = '\x01';
+    ReportCollector reports;
+    uint64_t zero_tail = 99;
+    EXPECT_EQ(ReadContents(contents, &reports, true, &zero_tail), (Records{"foo", "bar"}));
+    EXPECT_EQ(reports.messages, Records(c.blocks, Report("unknown record type")));
+    EXPECT_EQ(reports.dropped, c.end - valid.size());
+    EXPECT_EQ(zero_tail, 0u);
+  }
+  {  // A record after the zeros, at the start of a later block, is read: nothing after the zeros is
+     // swallowed beyond the blocks that they fill.
+    const std::string contents =
+        valid + std::string(3 * kBlockSize - valid.size(), '\0') + Fragment(kFullType, "later");
+    ReportCollector reports;
+    uint64_t zero_tail = 99;
+    EXPECT_EQ(ReadContents(contents, &reports, true, &zero_tail), (Records{"foo", "bar", "later"}));
+    EXPECT_EQ(reports.messages, Records(3, Report("unknown record type")));
+    EXPECT_EQ(reports.dropped, 3 * kBlockSize - valid.size());
+    EXPECT_EQ(zero_tail, 0u);
+  }
+  {  // After a FIRST fragment: the record that the zeros interrupt is reported as abandoned, after
+     // the first block of zeros and before the next, as with any defect.
+    const std::string spanning = WriteContents({"foo", BigString("y", kBlockSize)});
+    std::string contents = spanning.substr(0, kBlockSize) + std::string(2 * kBlockSize, '\0');
+    contents.back() = '\x01';
+    ReportCollector reports;
+    uint64_t zero_tail = 99;
+    EXPECT_EQ(ReadContents(contents, &reports, true, &zero_tail), Records{"foo"});
+    EXPECT_EQ(reports.messages,
+              (Records{Report("unknown record type"), Report("partial record without end"),
+                       Report("unknown record type")}));
+    EXPECT_EQ(zero_tail, 0u);
+  }
+}
+
+TEST_F(LogTest, ZerosWithOneOtherByteAnywhereAreNeverTakenForTheEnd) {
+  // Wherever the one byte that is not zero falls, in the first header, at the end of a block, in a
+  // later block or at the very end, the zeros are reported and the zero tail is empty.
+  const std::string valid = WriteContents({"foo", "bar"});
+  Random rnd(301);
+  for (int i = 0; i < 300; i++) {
+    const size_t zeros = 1 + rnd.Uniform(3 * kBlockSize);
+    const size_t at = rnd.Uniform(static_cast<uint32_t>(zeros));
+    SCOPED_TRACE(std::to_string(zeros) + " zeros, a byte that is not zero " + std::to_string(at) +
+                 " bytes into them");
+    std::string contents = valid + std::string(zeros, '\0');
+    contents[valid.size() + at] = static_cast<char>(1 + rnd.Uniform(255));
+    ReportCollector reports;
+    uint64_t zero_tail = 99;
+    const Records records = ReadContents(contents, &reports, true, &zero_tail);
+    EXPECT_EQ(zero_tail, 0u);
+    ASSERT_GE(records.size(), 2u);
+    EXPECT_EQ(records[0], "foo");
+    EXPECT_EQ(records[1], "bar");
+    if (zeros >= kHeaderSize) {
+      // Fewer bytes than a header are a header that the end of the file cut off, which is silent.
+      EXPECT_FALSE(reports.messages.empty());
+    }
+  }
+}
+
+TEST_F(LogTest, AGarbageTailIsStillADefect) {
+  // Bytes after the last record that are not all zeros are reported as they were.
+  const std::string valid = WriteContents({"foo", "bar"});
+  for (const std::string& tail : {std::string(100, '\xff'), std::string(100, 'x'),
+                                  std::string(4, '\xab') + std::string(96, '\0')}) {
+    ReportCollector reports;
+    uint64_t zero_tail = 99;
+    EXPECT_EQ(ReadContents(valid + tail, &reports, true, &zero_tail), (Records{"foo", "bar"}));
+    EXPECT_EQ(reports.messages, Records{Report("unknown record type")});
+    EXPECT_EQ(zero_tail, 0u);
+  }
+}
+
+TEST_F(LogTest, ZerosThatBeginInsideARecordAreStillADefect) {
+  // The rule is for zeros from a record boundary. Zeros that begin inside a record leave a header,
+  // or a part of one, that is not zero: a damaged record, reported as it was.
+  const std::string valid = WriteContents({"foo", "bar", "baz"});
+  ASSERT_EQ(valid.size(), 3 * (kHeaderSize + 3));
+  const size_t baz = 2 * (kHeaderSize + 3);
+  {  // The last record's header is whole and its payload is zeros, as are the bytes after it.
+    ReportCollector reports;
+    uint64_t zero_tail = 99;
+    const std::string contents = valid.substr(0, baz + kHeaderSize) + std::string(100, '\0');
+    EXPECT_EQ(ReadContents(contents, &reports, true, &zero_tail), (Records{"foo", "bar"}));
+    EXPECT_EQ(reports.messages, Records{Report("checksum mismatch")});
+    EXPECT_EQ(zero_tail, 0u);
+  }
+  {  // The zeros begin inside the last record's header, after its checksum.
+    ReportCollector reports;
+    uint64_t zero_tail = 99;
+    const std::string contents = valid.substr(0, baz + 4) + std::string(100, '\0');
+    EXPECT_EQ(ReadContents(contents, &reports, true, &zero_tail), (Records{"foo", "bar"}));
+    EXPECT_EQ(reports.messages, Records{Report("unknown record type")});
+    EXPECT_EQ(zero_tail, 0u);
+  }
+}
+
+TEST_F(LogTest, AReadErrorPastTheZerosIsNotTakenForTheirEnd) {
+  // To know that the zeros run to the end of the file, the Reader reads on to it. A read that fails
+  // on the way says nothing about the rest of the file: the zeros before it are reported as they
+  // would be without the failure, and so is the failure.
+  const std::string valid = WriteContents({"foo", "bar"});
+  const std::string contents = valid + std::string(3 * kBlockSize - valid.size(), '\0');
+  ReportCollector reports;
+  FailingSource source(contents, /*good_reads=*/2);  // blocks 0 and 1, then the read of 2 fails
+  Reader reader(&source, &reports, true);
+  std::string scratch;
+  std::string_view record;
+  ASSERT_TRUE(reader.ReadRecord(&record, &scratch));
+  EXPECT_EQ(record, "foo");
+  ASSERT_TRUE(reader.ReadRecord(&record, &scratch));
+  EXPECT_EQ(record, "bar");
+  EXPECT_FALSE(reader.ReadRecord(&record, &scratch));
+  ASSERT_EQ(reports.messages.size(), 3u);
+  EXPECT_EQ(reports.messages[0], Report("unknown record type"));
+  EXPECT_EQ(reports.messages[1], Report("unknown record type"));
+  EXPECT_NE(reports.messages[2].find("IO error"), std::string::npos) << reports.messages[2];
+  EXPECT_EQ(reader.ZeroTailBytes(), 0u);
 }
 
 TEST_F(LogTest, ReadErrorIsReportedAndEndsTheLog) {
   // A failed read is neither a clean end of file nor a damaged record, and must not look like the
   // first: recovery would then take a log it could not read for one that simply ended.
-  class FailingSource : public SequentialFile {
-   public:
-    FailingSource(std::string data, int good_reads)
-        : data_(std::move(data)), good_reads_(good_reads) {}
-    Status Read(size_t n, std::string_view* result, char* scratch) override {
-      if (good_reads_-- <= 0) {
-        *result = {};
-        return Status::IOError("injected read failure");
-      }
-      const size_t count = std::min(n, data_.size() - position_);
-      data_.copy(scratch, count, position_);
-      position_ += count;
-      *result = std::string_view(scratch, count);
-      return Status::OK();
-    }
-    Status Skip(uint64_t) override { return Status::OK(); }
-
-   private:
-    std::string data_;
-    size_t position_ = 0;
-    int good_reads_;
-  };
-
   const std::string contents = WriteContents({"foo", std::string(2 * kBlockSize, 'x')});
 
   {  // The very first read fails.

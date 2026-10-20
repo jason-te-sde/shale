@@ -100,6 +100,11 @@ class Reader {
   /// returned, and zero before it has returned any.
   uint64_t LastRecordOffset() const;
 
+  /// Returns how many zero bytes the log ended in, from a record boundary to the end of the file,
+  /// which ReadRecord() took for the end of the log once it returned false; zero if the log did
+  /// not end so.
+  uint64_t ZeroTailBytes() const;
+
  private:
   // What ReadPhysicalRecord() found.
   enum class Physical : uint8_t {
@@ -130,6 +135,7 @@ class Reader {
   bool eof_ = false;                   // the last read returned less than a block, or failed
   uint64_t end_of_buffer_offset_ = 0;  // the file offset just past the end of buffer_
   uint64_t last_record_offset_ = 0;
+  uint64_t zero_tail_bytes_ = 0;
 };
 
 }  // namespace shale::log
