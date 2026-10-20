@@ -251,7 +251,7 @@ bool Reader::HoldsAWholeFragmentShorterThan(const char* header, size_t length) c
 Status Reader::ReadBlock() {
   buffer_ = std::string_view();
   std::string_view block;
-  const Status s = file_->Read(kBlockSize, &block, backing_store_.data());
+  Status s = file_->Read(kBlockSize, &block, backing_store_.data());
   if (!s.ok()) {
     eof_ = true;
     block_length_ = 0;
