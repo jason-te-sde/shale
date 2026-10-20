@@ -197,8 +197,9 @@ it is exact except for one rare false report, which is loud
   record length`; `unknown record type` (zero included, unless the zeros run to the end of the file as
   above); `missing start of fragmented record`; and `partial record without end`. A defect drops the
   rest of its block. Zeros followed by any byte that is not zero are reported this way, one report for
-  each block they reach into, and so are zeros that begin inside a record: its header, or a part of it,
-  is not zero, and it is a damaged record.
+  each block they reach into, and so are zeros that begin inside a record that the file holds in full:
+  its header, or a part of it, is not zero, and the record fails its checksum. A record that the file
+  ends inside is cut short, as above, whatever its last bytes are.
 
 A report is never "the log ends here", wherever in the file it falls, because dropping the rest of a
 block can drop intact records that were acknowledged. Zeros that end the log are different only

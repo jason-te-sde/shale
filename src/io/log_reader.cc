@@ -169,8 +169,8 @@ Reader::Physical Reader::ReadPhysicalRecord(RecordType* type, std::string_view* 
     // zero, so no record, whole or damaged, comes after them to be swallowed, and the only bytes
     // dropped are the zeros. Under D1's premise a synced byte is never zeroed, so none of them was
     // acknowledged as synced. A zero header followed by any byte that is not zero is reported
-    // below, exactly as before, and so are zeros that start inside a record, whose header is not
-    // zero.
+    // below, exactly as before, and so are zeros that start inside a record that the file holds in
+    // full, whose header is not zero.
     if (raw_type == kZeroType && AllZeros(buffer_)) {
       const size_t in_this_block = buffer_.size();
       uint64_t after = 0;

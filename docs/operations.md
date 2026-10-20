@@ -385,6 +385,10 @@ is from, and open nothing else:
   (`add L1 #12 size=... smallest=... largest=...`). The first record is the snapshot of the whole
   table set; each later one is one flush or compaction.
 
+A log or a MANIFEST that ends in zeros from a record boundary to the end of the file, as a crash can leave
+it, is dumped up to the zeros, and the dump says on standard error `FILE: ends in N zero byte(s), ...: not
+records, and not damage`, and exits with status 0, as an open drops the zeros and says so in the `LOG`.
+
 ## Reading the LOG
 
 `LOG` in the database directory is for people; the engine never reads it. Each line begins with the time

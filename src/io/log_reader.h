@@ -28,15 +28,16 @@ namespace shale::log {
 ///   filesystem leaves when it kept the length of a file and not its data. That holds wherever a
 ///   header would start, after a defect too, where reading starts again at a block. ZeroTailBytes()
 ///   then says how many zeros were dropped; the reader reads to the end of the file to know it.
-///   Zeros followed by any byte that is not zero, and zeros that begin inside a record, are not
-///   this, and are reported as below. Apart from these zeros, a fragment that is cut off is the
-///   only silent end. A header whose length runs past the end of the file is one only if the bytes
-///   that are there are not a whole fragment: where some length, up to what is left of the file,
-///   gives the fragment the checksum that the header holds, the fragment was whole and its length
-///   is damaged, and that is reported. A crash leaves a prefix of a fragment, which has the
-///   checksum of the whole one only by a collision of 32 bits, about one in 2^32 for each byte left
-///   in a file that a crash cut. With `checksum` off there is nothing to find a fragment by, and
-///   the case stays silent.
+///   Zeros followed by any byte that is not zero, and zeros that begin inside a record that the
+///   file holds in full, are not this, and are reported as below; a record that the file ends
+///   inside is cut short, whatever its last bytes are. Apart from these zeros, a fragment that is
+///   cut off is the only silent end. A header whose length runs past the end of the file is one
+///   only if the bytes that are there are not a whole fragment: where some length, up to what is
+///   left of the file, gives the fragment the checksum that the header holds, the fragment was
+///   whole and its length is damaged, and that is reported. A crash leaves a prefix of a fragment,
+///   which has the checksum of the whole one only by a collision of 32 bits, about one in 2^32 for
+///   each byte left in a file that a crash cut. With `checksum` off there is nothing to find a
+///   fragment by, and the case stays silent.
 /// - **Reported.** Everything else is reported to the Reporter, once for each defect, with the
 ///   number of bytes it makes the reader drop and a Corruption status: a read error (the status
 ///   the file returned); "checksum mismatch"; "bad record length", for a length that would take

@@ -218,7 +218,7 @@ keeps the crash argument short. The steps of every path are in
 | **D3** | A `WriteBatch` is entirely visible or entirely invisible after any crash. |
 | **D4** | A read returns the right value or an error. Never a wrong value, even after a bit flips on disk (with `verify_checksums`, the default). |
 | **D5** | After a background I/O error every write returns that error until the database is reopened. Reads keep working. |
-| **D6** | Three traces of a crash are tolerated whatever `paranoid_checks` says. In the logs and the MANIFEST: a record cut off by the end of a file, and zeros from a record boundary to the end of the file, which a filesystem leaves when it kept a file's length and not its data (the reader checks every byte to the end, and the `LOG` names the file). In the logs: a gap in the sequence numbers at the start of a log, which is what a power loss leaves when it takes the unsynced end of one log and keeps unsynced writes of the next (that log and the later ones are set aside as `.dropped` files, never deleted except by `DestroyDB()`). None drops a write that was acknowledged as synced. Any other defect fails `Open` (`paranoid_checks = true`, the default): a garbage tail, zeros followed by any other byte, and zeros inside a record among them. |
+| **D6** | Three traces of a crash are tolerated whatever `paranoid_checks` says. In the logs and the MANIFEST: a record cut off by the end of a file, and zeros from a record boundary to the end of the file, which a filesystem leaves when it kept a file's length and not its data (the reader checks every byte to the end, and the `LOG` names the file). In the logs: a gap in the sequence numbers at the start of a log, which is what a power loss leaves when it takes the unsynced end of one log and keeps unsynced writes of the next (that log and the later ones are set aside as `.dropped` files, never deleted except by `DestroyDB()`). None drops a write that was acknowledged as synced. Any other defect fails `Open` (`paranoid_checks = true`, the default): a garbage tail, zeros followed by any other byte, and zeros inside a record that the file holds in full among them (a record that the file ends inside is cut off, the first trace). |
 | **D7** | One `DB` per directory at a time, enforced with `flock`. |
 <!-- /table:contract -->
 
@@ -335,8 +335,8 @@ GitHub.
 
 The fuzz targets and the stress tests did not find an engine bug in the runs their commits record, and the
 real crash test found the one in the last row; the stress tests were shown to fail on engines that were
-broken on purpose in three ways, and the crash test fails on a database that it damages itself. That is evidence about those runs and not a
-proof, and the next section says what is outside them.
+broken on purpose in three ways, and the crash test fails on a database that it damages itself. That is
+evidence about those runs and not a proof, and the next section says what is outside them.
 
 ## What the test suite does not cover
 

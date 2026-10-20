@@ -16,7 +16,8 @@ a minor release may change the API.
   trace (D6). Zeros that start at a record boundary and run to the end of a write-ahead log or the
   MANIFEST are dropped whatever `paranoid_checks` says, once the reader has checked every byte to the
   end of the file, and the `LOG` names the file and the number of zero bytes. Zeros followed by any other
-  byte, zeros that begin inside a record and garbage tails are defects, as before. The simulator's power
+  byte, zeros that begin inside a record that the file holds in full, and garbage tails are defects, as
+  before. The simulator's power
   loss now leaves such zeros too ([durability](docs/design/0004-durability.md),
   [operations](docs/operations.md#a-database-that-will-not-open)).
 

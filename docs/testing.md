@@ -91,9 +91,12 @@ make the whole simulator worthless, so each wrapper must make a run fail with th
 **The simulator is held to be fierce.** At the end of the default run it checks that it provoked enough:
 the number of power losses, process crashes, flushes, compactions, tombstones dropped, snapshots and
 iterators held across a compaction, injected errors, corrupted reads and opens that dropped a zero-filled
-tail all have floors, and the run fails under them, as it does if no table ever reached level 2 or no
-open ever dropped the zeros at the end of a MANIFEST. A simulator that quietly stopped crashing the
-database would otherwise pass.
+tail all have floors, and the run fails under them, as it does if no table ever reached level 2. A
+simulator that quietly stopped crashing the database would otherwise pass. What is too rare for a
+floor is pinned to a seed instead: about one seed in 50 has an open that drops the zeros at the end of a
+MANIFEST, which seeds do moves with every change to what a run does, and seed 1462, a regression seed,
+must have one (`OneRegressionSeedDropsTheZerosThatAManifestEndedIn`); a change that loses it names the
+seed, and another is chosen.
 
 **It is deterministic.** One seed is one run, on every toolchain that CI builds with:
 `tests/sim/determinism_test.cc` asserts that a seed run twice has the same trace digest and pins the

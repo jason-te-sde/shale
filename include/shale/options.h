@@ -54,13 +54,13 @@ struct Options {
   /// file (the info log names the file and the number of zero bytes), and a log that begins after
   /// a gap in the sequence numbers (a power loss took the unsynced end of the log before it). At a
   /// gap, the log and every later one are set aside and nothing in them is applied. For any other
-  /// defect, zeros followed by any byte that is not zero and zeros inside a record among them,
-  /// with this set Open fails with Corruption; without it, Open recovers the writes that come
-  /// before the first defect and applies nothing after it, in that log or in any later one. Those
-  /// logs are not deleted: each is renamed to its own name with ".dropped" added, which the
-  /// database never reads or deletes again, and the info log says which and why. They are kept
-  /// until DestroyDB() or until somebody removes them by hand. A log that cannot be read is not a
-  /// damaged one: a read error fails Open with its IOError whatever this says.
+  /// defect, zeros followed by any byte that is not zero and zeros inside a record that the file
+  /// holds in full among them, with this set Open fails with Corruption; without it, Open recovers
+  /// the writes that come before the first defect and applies nothing after it, in that log or in
+  /// any later one. Those logs are not deleted: each is renamed to its own name with ".dropped"
+  /// added, which the database never reads or deletes again, and the info log says which and why.
+  /// They are kept until DestroyDB() or until somebody removes them by hand. A log that cannot be
+  /// read is not a damaged one: a read error fails Open with its IOError whatever this says.
   bool paranoid_checks = true;
 
   /// The size in bytes that a memtable may reach before it is written out as a table.

@@ -33,7 +33,9 @@ acts on the difference.**
   block, a type that is not one of the four (zero included, unless the zeros run to the end of the
   file), a fragment with no start, a record that is abandoned. A defect drops the rest of its block.
   Zeros followed by any byte that is not zero are reported, one report for each block they reach into,
-  and so are zeros that begin inside a record, whose header is not all zero.
+  and so are zeros that begin inside a record that the file holds in full, whose header is not all
+  zero and whose payload then fails its checksum. A record that the file ends inside is cut short, the
+  first case, whatever its last bytes are.
 - A header whose length runs past the end of the file is a torn tail only if the bytes that are there
   are not a whole fragment. The reader looks for a length, up to what is left, that gives the checksum
   the header holds; if there is one, the fragment was whole and its length has been damaged, and it
@@ -56,7 +58,8 @@ acts on the difference.**
 
 A MANIFEST is read the same way: a record cut by the end of the file, or zeros from a record
 boundary to the end of it, are its end, and the `LOG` names the zeros; every other defect fails the
-open, whatever `paranoid_checks` says.
+open, whatever `paranoid_checks` says. A read that fails is an `IOError` there too, even where the
+reader had reported zeros before it that it was reading on to the end of the file to judge.
 
 A read that failed says nothing about what the log holds, so it is never taken for a defect of the
 contents. A log that is set aside is never deleted except by `DestroyDB()`: the data may be there,
@@ -99,8 +102,9 @@ Four further rules:
   files that are named in the `LOG`.
 - A crash that leaves a log or a MANIFEST ending in zeros leaves a database that opens. The simulator's
   filesystem leaves zeros in place of a file's unsynced tail at one power loss in four for each file,
-  and holds the default run to a floor of opens that drop them (seeds 0 and 48 are in
-  `tests/sim/regression_seeds.txt`; the MANIFEST from CI is in `tests/db/regression`).
+  and holds the default run to a floor of opens that drop them, and one seed, 1462, to an open that
+  drops a MANIFEST's (seeds 0, 48 and 1462 are in `tests/sim/regression_seeds.txt`; the MANIFEST from
+  CI is in `tests/db/regression`).
 
 **What it costs.**
 
@@ -113,10 +117,11 @@ Four further rules:
   zeroed, so they can only be bytes that were not acknowledged as synced. A device or filesystem that
   zeroes synced bytes at the end of a file breaks D1, and the writes in them are then dropped at open
   without a failure; the `LOG` line is the only trace. Before 0.1.1 such a tail failed the open.
-- **Zeros that begin inside a record are still a defect.** A filesystem that kept the first part of
-  the unsynced bytes and zeroed the rest, from a byte that is not a record boundary, leaves a database
-  that the default refuses. Such a database opens with `paranoid_checks = false` if it is a log, and
-  not at all if it is the MANIFEST.
+- **Zeros that begin inside a record are still a defect** when the file holds the record in full. A
+  filesystem that kept the first part of the unsynced bytes and zeroed the rest, from a byte that is
+  not a record boundary, and kept the file's length past the record's end, leaves a database that the
+  default refuses. Such a database opens with `paranoid_checks = false` if it is a log, and not at all
+  if it is the MANIFEST. (If the file ends inside that record, it is a record cut short, and silent.)
 - **A read to the end of the file**, once, at open, for a log or a MANIFEST that ends in zeros.
 - **Without checksums nothing is found.** The reader's check of a damaged length needs the checksum; a
   caller that turns checksums off gets the older, silent behaviour. The engine never does.
