@@ -1076,12 +1076,16 @@ TEST_F(VersionSetTest, AManifestWhoseZerosAreNotItsWholeEndIsRefused) {
   env_.SetFileContents(DescriptorFileName(kDb, 16123), manifest);
   const ManifestRecords records = ReadManifest(16123);
   ASSERT_EQ(records.offsets.size(), 89u);
-  // Zeros from five bytes into the payload of the last whole record, whose header stays.
-  const size_t inside = static_cast<size_t>(records.offsets.back()) + 7 + 5;
-  ASSERT_LT(inside, size_t{11951});
+  // Zeros from five bytes into the payload of the last whole record, whose header stays, and from
+  // its first byte, so that the payload and everything after it are zeros.
+  const size_t payload = static_cast<size_t>(records.offsets.back()) + 7;
+  ASSERT_LT(payload + 5, size_t{11951});
   std::string zeros_inside_a_record = manifest;
-  std::fill(zeros_inside_a_record.begin() + static_cast<std::ptrdiff_t>(inside),
+  std::fill(zeros_inside_a_record.begin() + static_cast<std::ptrdiff_t>(payload + 5),
             zeros_inside_a_record.end(), '\0');
+  std::string zeros_for_a_payload = manifest;
+  std::fill(zeros_for_a_payload.begin() + static_cast<std::ptrdiff_t>(payload),
+            zeros_for_a_payload.end(), '\0');
   struct Case {
     const char* what;
     std::string contents;
@@ -1089,7 +1093,10 @@ TEST_F(VersionSetTest, AManifestWhoseZerosAreNotItsWholeEndIsRefused) {
   };
   for (const Case& c :
        {Case{"a byte after the zeros", manifest + "\x01", "unknown record type"},
-        Case{"zeros inside a record", zeros_inside_a_record, "checksum mismatch"}}) {
+        Case{"a byte past the next block boundary", manifest + std::string(40000, '\0') + "\x01",
+             "unknown record type"},
+        Case{"zeros inside a record", zeros_inside_a_record, "checksum mismatch"},
+        Case{"zeros for a whole payload", zeros_for_a_payload, "checksum mismatch"}}) {
     SCOPED_TRACE(c.what);
     env_.SetFileContents(CurrentFileName(kDb), CurrentText(16123));
     env_.SetFileContents(DescriptorFileName(kDb, 16123), c.contents);

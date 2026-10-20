@@ -384,20 +384,27 @@ TEST_F(DBRecoveryTest, AZeroFilledTailOfALogIsDroppedByAParanoidOpen) {
 }
 
 TEST_F(DBRecoveryTest, ZerosFollowedByAnotherByteInALogFailAParanoidOpen) {
-  PutRange(0, 5);
-  Close();
-  const std::string log = NewestLogFile(env_.get(), kDb);
-  env_->SetFileContents(log, env_->FileContents(log) + std::string(4096, '\0') + "\x01");
+  // The byte that is not zero is in the block where the zeros start, or past the next block
+  // boundary, where the reader finds it only by reading on.
+  for (const size_t zeros : {size_t{4096}, size_t{40000}}) {
+    SCOPED_TRACE(std::to_string(zeros) + " zeros");
+    StartOver();
+    Reopen();
+    PutRange(0, 5);
+    Close();
+    const std::string log = NewestLogFile(env_.get(), kDb);
+    env_->SetFileContents(log, env_->FileContents(log) + std::string(zeros, '\0') + "\x01");
 
-  const Status s = TryReopen(CurrentOptions());
-  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
-  EXPECT_TRUE(Contains(s, "WAL corruption in")) << s.ToString();
-  EXPECT_TRUE(Contains(s, "unknown record type")) << s.ToString();
+    const Status s = TryReopen(CurrentOptions());
+    EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+    EXPECT_TRUE(Contains(s, "WAL corruption in")) << s.ToString();
+    EXPECT_TRUE(Contains(s, "unknown record type")) << s.ToString();
 
-  Options lenient = CurrentOptions();
-  lenient.paranoid_checks = false;
-  Reopen(lenient);
-  ExpectPresent(0, 5);
+    Options lenient = CurrentOptions();
+    lenient.paranoid_checks = false;
+    ASSERT_OK(TryReopen(lenient));
+    ExpectPresent(0, 5);
+  }
 }
 
 TEST_F(DBRecoveryTest, AZeroFilledTailOfTheManifestIsDroppedByAParanoidOpen) {
@@ -423,16 +430,49 @@ TEST_F(DBRecoveryTest, AZeroFilledTailOfTheManifestIsDroppedByAParanoidOpen) {
 }
 
 TEST_F(DBRecoveryTest, ZerosFollowedByAnotherByteInTheManifestFailOpen) {
+  // In the block where the zeros start, or past the next block boundary.
+  for (const size_t zeros : {size_t{438}, size_t{40000}}) {
+    SCOPED_TRACE(std::to_string(zeros) + " zeros");
+    StartOver();
+    Reopen();
+    PutRange(0, 5);
+    Close();
+    const std::string manifest = CurrentManifestPath();
+    env_->SetFileContents(manifest,
+                          env_->FileContents(manifest) + std::string(zeros, '\0') + "\x01");
+    for (const bool paranoid : {true, false}) {
+      Options options = CurrentOptions();
+      options.paranoid_checks = paranoid;
+      const Status s = TryReopen(options);
+      EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+      EXPECT_TRUE(Contains(s, "unknown record type")) << s.ToString();
+      EXPECT_TRUE(Contains(s, manifest)) << s.ToString();
+    }
+  }
+}
+
+TEST_F(DBRecoveryTest, AManifestRecordWhosePayloadIsZerosFailsOpen) {
+  // Zeros that begin inside a record that the file holds in full: the last edit's header is whole,
+  // and its payload and everything after it are zeros. The header is no zero header, and the
+  // payload does not have its checksum: a defect, which a MANIFEST fails the open on whatever
+  // paranoid_checks says.
   PutRange(0, 5);
+  ASSERT_OK(db_->Flush());
   Close();
   const std::string manifest = CurrentManifestPath();
-  env_->SetFileContents(manifest, env_->FileContents(manifest) + std::string(438, '\0') + "\x01");
+  const std::vector<uint64_t> offsets = LogRecordOffsets(env_.get(), manifest);
+  ASSERT_GE(offsets.size(), 2u);
+  std::string contents = env_->FileContents(manifest);
+  const size_t payload = static_cast<size_t>(offsets.back() + kLogHeaderSize);
+  ASSERT_LT(payload, contents.size());
+  std::fill(contents.begin() + static_cast<std::ptrdiff_t>(payload), contents.end(), '\0');
+  env_->SetFileContents(manifest, contents + std::string(1000, '\0'));
   for (const bool paranoid : {true, false}) {
     Options options = CurrentOptions();
     options.paranoid_checks = paranoid;
     const Status s = TryReopen(options);
     EXPECT_TRUE(s.IsCorruption()) << s.ToString();
-    EXPECT_TRUE(Contains(s, "unknown record type")) << s.ToString();
+    EXPECT_TRUE(Contains(s, "checksum mismatch")) << s.ToString();
     EXPECT_TRUE(Contains(s, manifest)) << s.ToString();
   }
 }
