@@ -357,8 +357,11 @@ class PrintingReporter final : public log::Reader::Reporter {
 
 // Reads every record of the log-format file at `path` — a write-ahead log or a MANIFEST — and
 // hands each to `on_record`, which prints it and returns the Status of a record that is not what
-// it should be. Returns kExitOk if the file and every record were whole, and kExitEngine if not:
-// each defect has been reported, and the records that can be read have all been shown.
+// it should be. Returns kExitOk if every record was whole and the file had no defect, and
+// kExitEngine if not: each defect has been reported, and the records that can be read have all
+// been shown. A file that ends as a crash leaves it, in a record cut short or in zeros from a
+// record boundary to its end, has no defect; the zeros are said on standard error, as the LOG of an
+// open says them (D6).
 int DumpLog(const std::string& path,
             const std::function<Status(std::string_view record)>& on_record) {
   std::unique_ptr<SequentialFile> file;
@@ -378,6 +381,11 @@ int DumpLog(const std::string& path,
                  ": " + s.ToString());
       records_whole = false;
     }
+  }
+  if (reader.ZeroTailBytes() > 0) {
+    PrintError(path + ": ends in " + std::to_string(reader.ZeroTailBytes()) +
+               " zero byte(s), from a record boundary to the end of the file, which a crash leaves "
+               "(D6): not records, and not damage");
   }
   return records_whole && !reporter.damaged() ? kExitOk : kExitEngine;
 }

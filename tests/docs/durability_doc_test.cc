@@ -7,10 +7,12 @@
 // in the code and not in the document is a claim that nobody can check. So:
 //
 //   - both tables of the contract have the rows D1 to D7, in that order;
-//   - the row D6, which is the one that has been restated, names in both places the two traces of a
-//     crash that an open tolerates whatever `paranoid_checks` says (an end cut off, and a gap in
-//     the sequence numbers), that what is set aside is a `.dropped` file that the engine does not
-//     delete, and that no synced write is lost;
+//   - the row D6, which is the one that has been restated, names in both places the three traces of
+//     a crash that an open tolerates whatever `paranoid_checks` says (an end cut off, zeros from a
+//     record boundary to the end of the file, in the MANIFEST too, and a gap in the sequence
+//     numbers), that what is set aside is a `.dropped` file that the engine does not delete, that
+//     no synced write is lost, and that garbage, zeros followed by another byte and zeros inside a
+//     record are still defects;
 //   - every test that the table of checks in ADR 0004 names is a test of the source tree, and every
 //     file it names is a file;
 //   - every long identifier that a document puts between backticks is one that the source tree has,
@@ -108,14 +110,19 @@ TEST(DurabilityDocTest, BothStatementsOfTheContractHaveD1ToD7InOrder) {
 
 // The row D6 is held to the words that carry its meaning, in both places. Where the words are is
 // not held: a document may phrase it as it likes, as long as it says each of these things.
-TEST(DurabilityDocTest, D6NamesBothTolerableTracesAndWhatBecomesOfTheLogsSetAside) {
+TEST(DurabilityDocTest, D6NamesTheTolerableTracesAndWhatBecomesOfTheLogsSetAside) {
   const std::vector<std::string> needed = {
       "paranoid_checks",
       "cut off by the end of a file",
       "gap in the sequence numbers at the start of a log",
+      "zeros from a record boundary to the end of the file",
+      "MANIFEST",
       ".dropped",
       "deleted",
       "acknowledged as synced",
+      "garbage",
+      "zeros followed by",
+      "inside a record",
   };
   for (const auto& [document, column] : Statements()) {
     const Contract contract = ReadContract(Root() / document, column);
@@ -207,12 +214,18 @@ TEST(DurabilityDocTest, TheChecksTableNamesTestsAndFilesThatExist) {
       }
     }
   }
-  // The row D6 names the two tests of the gap; if they stop being named here, so does the claim.
-  EXPECT_GE(named, size_t{4});
-  EXPECT_GE(files, size_t{8});
-  EXPECT_NE(rows[3][1].find("ALaterLogIsSetAsideWhenAnEarlierLogLostItsEnd"), std::string::npos);
-  EXPECT_NE(rows[3][1].find("AFirstLogThatLostEverythingIsCaughtByTheManifestsSequenceNumber"),
-            std::string::npos);
+  // The row D6 names the two tests of the gap and those of the zeros, the MANIFEST from CI among
+  // them; if they stop being named here, so does the claim.
+  EXPECT_GE(named, size_t{8});
+  EXPECT_GE(files, size_t{9});
+  for (const char* test : {"ALaterLogIsSetAsideWhenAnEarlierLogLostItsEnd",
+                           "AFirstLogThatLostEverythingIsCaughtByTheManifestsSequenceNumber",
+                           "AZeroFilledTailOfALogIsDroppedByAParanoidOpen",
+                           "AZeroFilledTailOfTheManifestIsDroppedByAParanoidOpen",
+                           "ZerosFollowedByAnyOtherByteAreStillADefect",
+                           "TheManifestThatAKillOnMacOs14LeftEndingInZerosRecovers"}) {
+    EXPECT_NE(rows[3][1].find(test), std::string::npos) << "the row D6 does not name " << test;
+  }
 }
 
 TEST(DurabilityDocTest, EveryLongNameInTheDocumentsIsAnIdentifierOfTheSource) {

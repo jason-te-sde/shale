@@ -63,9 +63,11 @@ SimResult RunSeed(const SimOptions& options) {
   }
   SimResult result = RunSimulation(options);
   if (Verbose()) {
-    std::printf("[sim] seed %llu: %s, trace digest %016llx\n",
+    std::printf("[sim] seed %llu: %s, trace digest %016llx, zero_tail_opens=%llu (MANIFEST %llu)\n",
                 static_cast<unsigned long long>(options.seed), result.ok ? "ok" : "FAILED",
-                static_cast<unsigned long long>(result.trace_digest));
+                static_cast<unsigned long long>(result.trace_digest),
+                static_cast<unsigned long long>(result.stats.zero_tail_opens),
+                static_cast<unsigned long long>(result.stats.manifest_zero_tail_opens));
   }
   return result;
 }
@@ -91,6 +93,8 @@ void Add(SimStats* total, const SimStats& part) {
   total->open_failures += part.open_failures;
   total->orphan_checks += part.orphan_checks;
   total->damaged_opens += part.damaged_opens;
+  total->zero_tail_opens += part.zero_tail_opens;
+  total->manifest_zero_tail_opens += part.manifest_zero_tail_opens;
   total->deepest_level = std::max(total->deepest_level, part.deepest_level);
 }
 
@@ -110,6 +114,16 @@ void Add(SimStats* total, const SimStats& part) {
 //   injected errors                            671      335
 //   injected corruptions                      1408      704
 //
+// and, from when a power loss began to leave zeros in place of a file's unsynced tail (the totals
+// above were 1370, 1064, 5442, 3653, 14963, 744, 864, 701 and 1386 then, all above their floors):
+//
+//   opens that dropped a zero-filled tail      142       71
+//
+// Of those opens, 3 dropped the zeros of a MANIFEST, at seeds 7, 13 and 48; 4000 seeds made 84, in
+// 84 seeds, about one in 50. That is too few for a floor over the seeds of a run: which seeds have
+// one moves with every change to what a run does, and then 20 seeds have none two times in three,
+// 50 seeds one time in three. One seed is held to it instead (kManifestZeroTailSeed, below).
+//
 // A simulator that stops provoking something, because an operation was reweighted or a
 // precondition began to skip it, falls under its floor and fails here, where a run that merely
 // passes would not say so.
@@ -123,8 +137,9 @@ struct Floors {
   uint64_t iterators_across_compaction;
   uint64_t injected_errors;
   uint64_t injected_corruptions;
+  uint64_t zero_tail_opens;
 };
-constexpr Floors kFloors = {663, 550, 2747, 1863, 7425, 389, 438, 335, 704};
+constexpr Floors kFloors = {663, 550, 2747, 1863, 7425, 389, 438, 335, 704, 71};
 
 // The floors are those of kDefaultSeeds seeds of kDefaultSteps steps, and scale with the number of
 // seeds, which is what a longer run is for. A run with other steps, or with too few seeds for the
@@ -136,7 +151,8 @@ void ExpectFierce(const SimStats& total, uint64_t seeds, int steps, int keys) {
       "trivial_moves=%llu tombstones_dropped=%llu snapshots_across_compaction=%llu "
       "iterators_across_compaction=%llu injected_errors=%llu injected_corruptions=%llu "
       "write_failures=%llu read_failures=%llu open_failures=%llu orphan_checks=%llu "
-      "damaged_opens=%llu deepest_level=%llu\n",
+      "damaged_opens=%llu zero_tail_opens=%llu manifest_zero_tail_opens=%llu "
+      "deepest_level=%llu\n",
       static_cast<unsigned long long>(seeds), steps, static_cast<unsigned long long>(total.steps),
       static_cast<unsigned long long>(total.writes),
       static_cast<unsigned long long>(total.sync_writes),
@@ -156,6 +172,8 @@ void ExpectFierce(const SimStats& total, uint64_t seeds, int steps, int keys) {
       static_cast<unsigned long long>(total.open_failures),
       static_cast<unsigned long long>(total.orphan_checks),
       static_cast<unsigned long long>(total.damaged_opens),
+      static_cast<unsigned long long>(total.zero_tail_opens),
+      static_cast<unsigned long long>(total.manifest_zero_tail_opens),
       static_cast<unsigned long long>(total.deepest_level));
   if (steps != kDefaultSteps || keys != kDefaultKeys || seeds < 20) {
     return;
@@ -183,6 +201,8 @@ void ExpectFierce(const SimStats& total, uint64_t seeds, int steps, int keys) {
   EXPECT_GE(total.injected_errors, floor_of(kFloors.injected_errors)) << "injected errors";
   EXPECT_GE(total.injected_corruptions, floor_of(kFloors.injected_corruptions))
       << "injected corruptions";
+  EXPECT_GE(total.zero_tail_opens, floor_of(kFloors.zero_tail_opens))
+      << "opens that dropped a zero-filled tail";
 }
 
 TEST(SimulationTest, RandomSeedsHoldAllInvariants) {
@@ -234,6 +254,33 @@ TEST(SimulationTest, RegressionSeeds) {
     const SimResult result = RunSeed(options);
     EXPECT_TRUE(result.ok) << "regression seed " << seed << ": " << result.failure;
   }
+}
+
+// The seed that holds the simulator to the zeros at the end of a MANIFEST, the shape that a kill
+// left on macOS 14 in CI. At step 40 an armed failure of a sync stops a compaction after its edit
+// was handed to the MANIFEST, and the power loss of the reopen leaves the edit as 66 zero bytes,
+// which the open drops. Of the 84 seeds in 0 to 3999 that drop such zeros, it is the one whose open
+// comes first, so that the fewest changes to what a run does reach it. A seed is a function of its
+// run: this fails only when the run of this seed changes, whatever seeds a run of the simulator is
+// given, and then it names the seed. A change that does that changes what runs do, and usually the
+// golden digests of determinism_test with it. Choose another seed then, from a run of
+// `SHALE_SIM_VERBOSE=1 SHALE_SIM_SEEDS=2000` and a seed whose line says "(MANIFEST 1)", and put it
+// here and in regression_seeds.txt.
+constexpr uint64_t kManifestZeroTailSeed = 1462;
+
+TEST(SimulationTest, OneRegressionSeedDropsTheZerosThatAManifestEndedIn) {
+  const std::vector<uint64_t> regression = RegressionSeeds();
+  EXPECT_NE(std::find(regression.begin(), regression.end(), kManifestZeroTailSeed),
+            regression.end())
+      << "seed " << kManifestZeroTailSeed << " is not in regression_seeds.txt";
+  SimOptions options;
+  options.seed = kManifestZeroTailSeed;
+  const SimResult result = RunSeed(options);
+  ASSERT_TRUE(result.ok) << "seed " << kManifestZeroTailSeed << ": " << result.failure;
+  EXPECT_GT(result.stats.manifest_zero_tail_opens, 0u)
+      << "seed " << kManifestZeroTailSeed
+      << " no longer has an open that drops the zeros at the end of a MANIFEST; choose another, as "
+         "the comment on kManifestZeroTailSeed says";
 }
 
 TEST(SimulationTest, CrashFreeRunsToo) {

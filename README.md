@@ -218,7 +218,7 @@ keeps the crash argument short. The steps of every path are in
 | **D3** | A `WriteBatch` is entirely visible or entirely invisible after any crash. |
 | **D4** | A read returns the right value or an error. Never a wrong value, even after a bit flips on disk (with `verify_checksums`, the default). |
 | **D5** | After a background I/O error every write returns that error until the database is reopened. Reads keep working. |
-| **D6** | Two traces of a crash are tolerated in the logs whatever `paranoid_checks` says: a record cut off by the end of a file, and a gap in the sequence numbers at the start of a log, which is what a power loss leaves when it takes the unsynced end of one log and keeps unsynced writes of the next (that log and the later ones are set aside as `.dropped` files, never deleted except by `DestroyDB()`). Neither drops a write that was acknowledged as synced. Any other defect fails `Open` (`paranoid_checks = true`, the default). |
+| **D6** | Three traces of a crash are tolerated whatever `paranoid_checks` says. In the logs and the MANIFEST: a record cut off by the end of a file, and zeros from a record boundary to the end of the file, which a filesystem leaves when it kept a file's length and not its data (the reader checks every byte to the end, and the `LOG` names the file). In the logs: a gap in the sequence numbers at the start of a log, which is what a power loss leaves when it takes the unsynced end of one log and keeps unsynced writes of the next (that log and the later ones are set aside as `.dropped` files, never deleted except by `DestroyDB()`). None drops a write that was acknowledged as synced. Any other defect fails `Open` (`paranoid_checks = true`, the default): a garbage tail, zeros followed by any other byte, and zeros inside a record that the file holds in full among them (a record that the file ends inside is cut off, the first trace). |
 | **D7** | One `DB` per directory at a time, enforced with `flock`. |
 <!-- /table:contract -->
 
@@ -317,8 +317,8 @@ say are in [docs/benchmarks.md](docs/benchmarks.md), with the latency and write-
 
 ## Bugs found while building it
 
-The simulator and reviews found real bugs in the engine while it was being built, and each one is pinned
-by a test that fails without its fix.
+The simulator and reviews found real bugs in the engine while it was being built, and the crash test in CI
+found one after the first release. Each one is pinned by a test that fails without its fix.
 
 | Found by | The bug | Fixed in | Pinned by |
 | --- | --- | --- | --- |
@@ -328,23 +328,26 @@ by a test that fails without its fix.
 | the simulator, comparing toolchains | The arena padded to `alignof(std::max_align_t)`, 8 on one compiler and 16 on another, so the same seed filled a memtable one write apart: a failure under one toolchain could pass under the other. | [`b082176`][b082176] | [`arena_test.cc`](tests/util/arena_test.cc); the pinned digests of [`determinism_test.cc`](tests/sim/determinism_test.cc) |
 | review of the open path | A lenient open took a transient read error for a defect in the log, succeeded, and then deleted that log and every later one. Now a read error fails `Open`, and what a lenient open drops is renamed to `.dropped`, never deleted except by `DestroyDB()`. | [`39793ad`][39793ad] | [`db_recovery_test.cc`](tests/db/db_recovery_test.cc) (`LenientOpenSetsAsideTheLogWithTheDefectAndEveryLaterLog`, `AFailureAnywhereInALenientOpenLosesNeitherDataNorDroppedLogs`) |
 | review of the table reader | A read with `verify_checksums` off put the block it read into the cache that verifying readers share, and a later verifying read was served a block nothing had checked. | [`216e7fc`][216e7fc] | [`table_test.cc`](tests/io/table_test.cc) (`UnverifiedReadDoesNotLeaveAnUnverifiedBlockInTheCache`) |
+| the real crash test, in CI on macOS 14, after 0.1.0 | A kill of the writer left its MANIFEST ending in 438 zero bytes, the edit it was appending, which the operating system had allotted and not written. The reader took the zeros for a damaged record and the database would not open. The simulator's filesystem left only clean prefixes, so it could not have found this. | [`88ef8f7`][88ef8f7] | the MANIFEST from CI in [`tests/db/regression`](tests/db/regression/manifest-zero-tail); seeds 0 and 48, now that a simulated power loss can leave zeros; [`log_test.cc`](tests/io/log_test.cc) |
 
 The commits are those of the milestone pull requests, which were squash-merged; the links open them on
 GitHub.
 
-The fuzz targets, the stress tests and the real crash test did not find an engine bug in the runs their
-commits record; the stress tests were shown to fail on engines that were broken on purpose in three ways,
-and the crash test fails on a database that it damages itself. That is evidence about those runs and not a
-proof, and the next section says what is outside them.
+The fuzz targets and the stress tests did not find an engine bug in the runs their commits record, and the
+real crash test found the one in the last row; the stress tests were shown to fail on engines that were
+broken on purpose in three ways, and the crash test fails on a database that it damages itself. That is
+evidence about those runs and not a proof, and the next section says what is outside them.
 
 ## What the test suite does not cover
 
-- **A real power loss.** The simulator models "bytes that were not synced are lost", and a process kill
-  leaves the page cache behind. Neither models a drive that acknowledges a flush it has not done.
+- **A real power loss.** The simulator models "bytes that were not synced are lost, or come back as
+  zeros", and a process kill leaves the page cache behind. Neither models a drive that acknowledges a
+  flush it has not done.
 - **How a controller or a filesystem reorders writes**, beyond what the simulator's model of ordered
-  directory changes and prefix-only loss says. What it also leaves out: files with zero-filled or garbage
-  tails after a power loss (which, since a memtable switch syncs nothing, can be in either of the last two
-  logs), durable-at-once `CreateDir`, and bytes that change at rest.
+  directory changes and prefix-only loss says. What it also leaves out: files with garbage tails after a
+  power loss (which, since a memtable switch syncs nothing, can be in either of the last two logs), zeros
+  that start inside the unsynced part of a file, durable-at-once `CreateDir`, and bytes that change at
+  rest.
 - **Runs longer or bigger than CI's**: 50 seeds of 2000 steps, 200 killed writers, 60 seconds a fuzz target.
   Tens of gigabytes and months of uptime have not been run.
 - **Other filesystems and platforms**: ext4 and APFS only, x86-64 Linux and arm64 macOS only.
@@ -384,6 +387,7 @@ ctest --preset dev
 
 [216e7fc]: https://github.com/jason-te-sde/shale/commit/216e7fca4ca3e22326ec97f062b00308df9a4475
 [39793ad]: https://github.com/jason-te-sde/shale/commit/39793ada1cbde96f02a4011bd4abddf4bce2eb96
+[88ef8f7]: https://github.com/jason-te-sde/shale/commit/88ef8f759091f2b1b40d0c2368b7018420bc687b
 [89915a1]: https://github.com/jason-te-sde/shale/commit/89915a11fe4fc0b9c394960b096fef976f928463
 [b082176]: https://github.com/jason-te-sde/shale/commit/b0821763439d9306d7427686350ae8995f54d7d7
 [cacf403]: https://github.com/jason-te-sde/shale/commit/cacf403bbc7d37e67e02db58e74334de391a5ef9

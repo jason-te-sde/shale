@@ -30,22 +30,22 @@ TEST(DeterminismTest, SameSeedSameTrace) {
 }
 
 // The digests of three seeds, taken with AppleClang and again with GCC 16, which agree. They were
-// last pinned when a memtable switch stopped syncing the old log and the directory, which changed
-// what a run's power losses keep and when its injected failures of a sync fire. A run depends on
-// the engine only through what it does, and not through how a compiler or a standard library lays
-// things out, so these are the digests on every toolchain, and CI proves it on GCC 13 and 14,
-// Clang 17 and 18 and AppleClang. A digest that changes is a change of what a run does: of the
-// simulator, of the engine's behaviour, or of a toolchain's, and the first two are meant when they
-// come with a commit that says so, and are accepted by pinning the new values. The third is a bug
-// of the replay that this test is for.
+// last pinned when a power loss began to leave zeros in place of the unsynced tail of one file in
+// four, which an open now drops instead of failing on, and the run began to count the opens that
+// do, a count that the digest ends with. A run depends on the engine only through what it does, and
+// not through how a compiler or a standard library lays things out, so these are the digests on
+// every toolchain, and CI proves it on GCC 13 and 14, Clang 17 and 18 and AppleClang. A digest that
+// changes is a change of what a run does: of the simulator, of the engine's behaviour, or of a
+// toolchain's, and the first two are meant when they come with a commit that says so, and are
+// accepted by pinning the new values. The third is a bug of the replay that this test is for.
 struct Golden {
   uint64_t seed;
   uint64_t digest;
 };
 constexpr Golden kGolden[] = {
-    {1, 0x433946348c10a5dcULL},
-    {42, 0x248f8ed598891aedULL},
-    {8123, 0x768ede64434f4558ULL},
+    {1, 0xe1bf1aefdca57240ULL},
+    {42, 0x5c9c227db1d1a209ULL},
+    {8123, 0xfa27bd5c9f5a64adULL},
 };
 
 TEST(DeterminismTest, TracesAreTheSameOnEveryToolchain) {

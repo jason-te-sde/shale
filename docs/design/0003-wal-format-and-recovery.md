@@ -21,28 +21,45 @@ where a reader that has met a defect can always start again. The exact bytes are
 **The reader separates a crash from corruption, with one rare false report that is loud, and recovery
 acts on the difference.**
 
-- The only thing that is silent is the file *ending* inside a record: inside a header, inside a record
-  that would have fitted in its block, or after a `FIRST` or `MIDDLE` fragment with no `LAST`. That is
-  what a writer that died leaves behind.
+- The file *ending* inside a record is silent: inside a header, inside a record that would have
+  fitted in its block, or after a `FIRST` or `MIDDLE` fragment with no `LAST`. That is what a writer
+  that died leaves behind.
+- So are **zeros from a record boundary to the end of the file**: where a header would begin, every
+  byte from there to the end of the file is zero, at least a header's worth. A filesystem leaves that
+  when it kept the length of a file and not its data, as XFS and ext4 can after a power loss and as a
+  killed process left a MANIFEST on macOS 14 in CI. The reader reads every byte to the end of the file
+  to know it, and says how many zeros it dropped.
 - Everything else is reported to the caller: a checksum that does not match, a length that leaves its
-  block, a type that is not one of the four (zero included, so a zero-filled tail is reported), a
-  fragment with no start, a record that is abandoned. A defect drops the rest of its block.
+  block, a type that is not one of the four (zero included, unless the zeros run to the end of the
+  file), a fragment with no start, a record that is abandoned. A defect drops the rest of its block.
+  Zeros followed by any byte that is not zero are reported, one report for each block they reach into,
+  and so are zeros that begin inside a record that the file holds in full, whose header is not all
+  zero and whose payload then fails its checksum. A record that the file ends inside is cut short, the
+  first case, whatever its last bytes are.
 - A header whose length runs past the end of the file is a torn tail only if the bytes that are there
   are not a whole fragment. The reader looks for a length, up to what is left, that gives the checksum
   the header holds; if there is one, the fragment was whole and its length has been damaged, and it
   is reported (commit [`89915a1`][89915a1]).
 - A report is **never benign by its position in the file**. After a defect the reader drops the rest
   of the block, which can include records that were acknowledged, so "nothing valid follows" does not
-  mean "this is where the log ended".
+  mean "this is where the log ended". Zeros to the end of the file are not taken for the end by their
+  position either: they are the end because every byte after the boundary has been read and is zero,
+  so no record, whole or damaged, can be among them.
 
 **Recovery** (`DBImpl::OpenLocked`, `ReplayLog`) acts on that:
 
 | What the reader says | `paranoid_checks = true` (default) | `paranoid_checks = false` |
 | --- | --- | --- |
 | nothing, or a record cut by the end of the file | the writes before it are recovered | the same |
+| zeros from a record boundary to the end of the file | the writes before them are recovered, and the `LOG` names the file and the number of zero bytes | the same |
 | a first write beyond the one after the newest write of the tables and of the logs before it (a gap) | the writes before the gap are recovered; that log and every later one are renamed `<name>.dropped`, never deleted except by `DestroyDB()`, and the `LOG` says which and why | the same |
 | a defect in the contents | `Open` fails with `Corruption`, naming the file | the writes before the defect are recovered, nothing after it is applied, in that log or in any later one; the logs from the defect on are renamed `<name>.dropped`, never deleted except by `DestroyDB()`, and the `LOG` says which and why |
 | a read error | `Open` fails with `IOError` | `Open` fails with `IOError` |
+
+A MANIFEST is read the same way: a record cut by the end of the file, or zeros from a record
+boundary to the end of it, are its end, and the `LOG` names the zeros; every other defect fails the
+open, whatever `paranoid_checks` says. A read that fails is an `IOError` there too, even where the
+reader had reported zeros before it that it was reading on to the end of the file to judge.
 
 A read that failed says nothing about what the log holds, so it is never taken for a defect of the
 contents. A log that is set aside is never deleted except by `DestroyDB()`: the data may be there,
@@ -83,6 +100,11 @@ Four further rules:
 - The default is the safe one: a log that is damaged is not opened and is not guessed at.
 - Lenient mode is a point-in-time recovery, and loses nothing silently: what it did not apply is in
   files that are named in the `LOG`.
+- A crash that leaves a log or a MANIFEST ending in zeros leaves a database that opens. The simulator's
+  filesystem leaves zeros in place of a file's unsynced tail at one power loss in four for each file,
+  and holds the default run to a floor of opens that drop them, and one seed, 1462, to an open that
+  drops a MANIFEST's (seeds 0, 48 and 1462 are in `tests/sim/regression_seeds.txt`; the MANIFEST from
+  CI is in `tests/db/regression`).
 
 **What it costs.**
 
@@ -91,11 +113,16 @@ Four further rules:
   whole fragment at some shorter length is reported as a damaged length. The chance is at most about
   one in 2^17 for a crashed log whose cut leaves a full block of bytes, and the result is a refused
   open (or a stop, in lenient mode), never silent loss.
-- **A filesystem that leaves a zero-filled tail after a power loss** makes the default refuse to open,
-  because zeros read as a record of type zero, a defect. Such a database opens with
-  `paranoid_checks = false`. The simulator does not model zero-filled tails (see
-  [testing](../testing.md#what-the-tests-do-not-cover)), so this is argued and tested at the level of
-  one log, not shown over crashes.
+- **A zero-filled tail rests on D1's premise.** The zeros are dropped because a synced byte is never
+  zeroed, so they can only be bytes that were not acknowledged as synced. A device or filesystem that
+  zeroes synced bytes at the end of a file breaks D1, and the writes in them are then dropped at open
+  without a failure; the `LOG` line is the only trace. Before 0.1.1 such a tail failed the open.
+- **Zeros that begin inside a record are still a defect** when the file holds the record in full. A
+  filesystem that kept the first part of the unsynced bytes and zeroed the rest, from a byte that is
+  not a record boundary, and kept the file's length past the record's end, leaves a database that the
+  default refuses. Such a database opens with `paranoid_checks = false` if it is a log, and not at all
+  if it is the MANIFEST. (If the file ends inside that record, it is a record cut short, and silent.)
+- **A read to the end of the file**, once, at open, for a log or a MANIFEST that ends in zeros.
 - **Without checksums nothing is found.** The reader's check of a damaged length needs the checksum; a
   caller that turns checksums off gets the older, silent behaviour. The engine never does.
 - **`.dropped` files accumulate.** A lenient open leaves them, and so does any open after a power loss that
@@ -121,18 +148,30 @@ Four further rules:
   a defect, `Open` succeeded, and the sweep deleted that log and every later one. A read error now fails
   `Open`, and what a lenient open drops is renamed, not deleted (commit [`39793ad`][39793ad]).
 - **Continue appending to the last log.** Rejected for the reason above: the torn record.
+- **Refuse a zero-filled tail**, as 0.1.0 did, and leave it to `paranoid_checks = false`. Rejected
+  after CI's crash test on macOS 14 left a MANIFEST ending in 438 zero bytes, one edit's record, after
+  a kill, and the database would not open at all: a MANIFEST has no lenient mode. An ordinary crash on
+  a common filesystem must leave a database that opens.
+- **Take a zero header in the last block for the end of the log.** Rejected: that is a guess by
+  position, which the first alternative above shows to be wrong. The reader reads to the end of the
+  file instead.
 
 ## References
 
 - `src/io/log_format.h`, `log_reader.h`, `log_writer.h`; `src/db/db_impl.cc` (`ReplayLog`,
   `SetAsideLogs`)
 - Tests: `tests/io/log_test.cc` (a cut at every byte stays silent; every one of the 16 bits of a record's
-  length, 400 random single-bit damages to a length, none silent); `tests/db/db_recovery_test.cc`
+  length, 400 random single-bit damages to a length, none silent; zeros to the end of the file silent,
+  with one byte that is not zero anywhere in them reported, 300 placements); `tests/db/db_recovery_test.cc`
   (`TornWalTailIsTruncated`, `MidWalCorruptionFailsParanoidOpen`,
   `MidWalCorruptionStopsReplayWhenNotParanoid`, `CorruptionInTheLastBlockIsNotMistakenForATornTail`,
-  `ALengthDamagedPastTheEndOfTheLogIsNotMistakenForATornTail`, `ZeroFilledTailFailsParanoidOpen`,
+  `ALengthDamagedPastTheEndOfTheLogIsNotMistakenForATornTail`,
+  `AZeroFilledTailOfALogIsDroppedByAParanoidOpen`, `ZerosFollowedByAnotherByteInALogFailAParanoidOpen`,
+  `AZeroFilledTailOfTheManifestIsDroppedByAParanoidOpen`,
   `AReadErrorAnywhereInOpenIsAnIOErrorAndLosesNothing`,
-  `LenientOpenSetsAsideTheLogWithTheDefectAndEveryLaterLog`); `fuzz/fuzz_log_reader.cc`
+  `LenientOpenSetsAsideTheLogWithTheDefectAndEveryLaterLog`); `tests/db/version_set_test.cc`
+  (`TheManifestThatAKillOnMacOs14LeftEndingInZerosRecovers`,
+  `AManifestWhoseZerosAreNotItsWholeEndIsRefused`); `fuzz/fuzz_log_reader.cc`
 - Commits: [`89915a1`][89915a1], [`956bdc1`][956bdc1], [`39793ad`][39793ad], [`b07bbcd`][b07bbcd]
   (`DestroyDB` removes `.dropped` logs).
 

@@ -527,6 +527,50 @@ TEST_F(DBCompactionTest, AFailedEditKeepsTheOutputsThatItMayHaveNamed) {
   ExpectNoStrayTables();
 }
 
+TEST_F(DBCompactionTest, AKillThatLeavesACompactionsEditAsZerosLosesNothing) {
+  // What the crash test left in CI on macOS 14: the writer was killed while a compaction's edit was
+  // being written to the MANIFEST, with the output on the disk and named by nothing, and the
+  // operating system kept the new length of the MANIFEST and not the edit, which reads back as
+  // zeros (D6). A process crash keeps every write that was acknowledged, synced or not: the open
+  // must drop the zeros, have every write, and sweep the output. The writes are not synced, and the
+  // MANIFEST append of the edit is the second sync of the compaction, after the output's.
+  ASSERT_NO_FATAL_FAILURE(WriteTable(0, 20, "a-"));
+  ASSERT_NO_FATAL_FAILURE(WriteTable(10, 20, "b-"));
+  const std::set<uint64_t> inputs = TableNumbers();
+  ASSERT_EQ(inputs.size(), 2u);
+  const std::string current = env_->FileContents(CurrentFileName(kDb));
+  const std::string manifest = std::string(kDb) + "/" + current.substr(0, current.find('\n'));
+  const std::string before = env_->FileContents(manifest);
+
+  env_->FailOpAfter(Op::kSync, 1);
+  EXPECT_TRUE(db_->CompactRange(std::nullopt, std::nullopt).IsIOError());
+  env_->ClearFaults();
+  ASSERT_EQ(env_->injected_errors(), 1u);
+  ASSERT_EQ(TableNumbers(), inputs) << "the failed edit was installed";
+  ASSERT_EQ(CountFiles(FileType::kTableFile), 3) << "the two inputs and the output";
+  const std::string after = env_->FileContents(manifest);
+  ASSERT_GT(after.size(), before.size()) << "the edit was handed to the MANIFEST";
+  ASSERT_EQ(after.substr(0, before.size()), before);
+
+  env_->SimulateProcessCrash();
+  const size_t zeros = after.size() - before.size();
+  env_->SetFileContents(manifest, before + std::string(zeros, '\0'));
+  ASSERT_OK(TryReopen(CurrentOptions()));  // a failed open leaves no database to read
+  for (int i = 0; i < 10; i++) {
+    EXPECT_EQ(Get(UserKey(i)), "a-" + ValueOf(i));
+  }
+  for (int i = 10; i < 30; i++) {
+    EXPECT_EQ(Get(UserKey(i)), "b-" + ValueOf(i));
+  }
+  ExpectNoStrayTables();
+  EXPECT_EQ(CountFiles(FileType::kTableFile), 2) << "the output is swept";
+  const std::string info = env_->FileContents(InfoLogFileName(kDb));
+  EXPECT_NE(
+      info.find("MANIFEST " + manifest + ": dropped " + std::to_string(zeros) + " zero byte(s)"),
+      std::string::npos)
+      << info;
+}
+
 TEST_F(DBCompactionTest, ReopenSchedulesCompactionWhenRecoveryAddsTheTableThatMakesItDue) {
   // Two tables, below the trigger of three; the third is what the next open makes of the writes
   // that were only in the log, and nothing but the open can notice that it makes a compaction due.

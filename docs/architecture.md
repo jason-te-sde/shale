@@ -282,8 +282,10 @@ compaction because a write may be stalled for it.
 3. No `CURRENT`: `VersionSet::CreateNew` writes `MANIFEST-000001`, syncs it and the directory, and
    writes `CURRENT`. Otherwise `VersionSet::Recover`: read `CURRENT` and check it
    (`ParseCurrentFile`), then replay the MANIFEST it names with the log reader, decoding each record
-   as a version edit and applying it with `ApplyEdit`. Any defect the reader reports, any record that
-   does not decode and any edit `ApplyEdit` refuses is `Corruption` naming the MANIFEST.
+   as a version edit and applying it with `ApplyEdit`. A MANIFEST that ends short, or in zeros from a
+   record boundary to the end of the file, as a crash leaves it, is read up to there, and the `LOG`
+   names the zeros. Any defect the reader reports, any record that does not decode and any edit
+   `ApplyEdit` refuses is `Corruption` naming the MANIFEST.
 4. `FindLogsToReplay`: every log numbered at or above the MANIFEST's `log_number`, in ascending
    order. Every log and table number found in the directory is marked as used, so that a stray file
    is never overwritten.
@@ -293,10 +295,11 @@ compaction because a write may be stalled for it.
    `last_sequence`) and of the logs before it. If it is beyond that, a power loss took the end of an
    earlier log: replay stops, and that log and every later one are renamed `.dropped`, whatever
    `paranoid_checks` says. What the reader reports decides the rest: nothing for a log that merely
-   ends short, as a crash leaves it; otherwise `paranoid_checks` (the default) fails the open with
-   `Corruption`, and without it replay stops at the first defect, applies nothing after it, and the
-   logs from there on are **renamed to `.dropped`, never deleted**. A log that cannot be *read* fails
-   the open with `IOError` whatever `paranoid_checks` says.
+   ends short, or ends in zeros from a record boundary to the end of the file, as a crash leaves it
+   (the `LOG` names the file and the number of zero bytes); otherwise `paranoid_checks` (the default)
+   fails the open with `Corruption`, and without it replay stops at the first defect, applies nothing
+   after it, and the logs from there on are **renamed to `.dropped`, never deleted**. A log that
+   cannot be *read* fails the open with `IOError` whatever `paranoid_checks` says.
 6. Move `last_sequence` to the larger of the MANIFEST's and the replay's. (The MANIFEST's is the newest
    write that its tables hold, so it is also what the first log was held to.)
 7. Create a **new** log and sync the directory. A replayed log is never appended to: it may end in a

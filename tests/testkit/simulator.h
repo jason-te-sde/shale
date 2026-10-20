@@ -61,6 +61,11 @@ struct SimStats {
   uint64_t orphan_checks = 0;                ///< Times the directory was checked for orphan tables.
   uint64_t deepest_level = 0;                ///< The deepest level that held a table at a check.
   uint64_t damaged_opens = 0;                ///< Opens that worked with a read corrupted in them.
+  /// Opens that worked and dropped the zeros that a log or the MANIFEST ended in (D6), as the LOG
+  /// of the open says.
+  uint64_t zero_tail_opens = 0;
+  /// Of them, those where it was the MANIFEST that ended in zeros.
+  uint64_t manifest_zero_tail_opens = 0;
 
   /// Whether every counter is equal.
   bool operator==(const SimStats&) const = default;
@@ -103,8 +108,9 @@ struct SimResult {
 /// stops the database, and the reopen that follows, after the next write has been shown to fail,
 /// is a power loss in four cases of six, a process crash in one and a clean close in one, so that
 /// the files are mostly as a power loss leaves them. A power loss keeps what was synced and a
-/// prefix of the rest, and one in three keeps only what was synced. An open that fails for a
-/// fault is followed, half the time, by another crash before the open is tried again.
+/// prefix of the rest or, for one file in four, zeros in place of the rest, and one in three keeps
+/// only what was synced. An open that fails for a fault is followed, half the time, by another
+/// crash before the open is tried again.
 ///
 /// **Corruption during an open.** On one process crash in four, read corruption is armed for the
 /// open. An open that fails for it must lose nothing: the open that follows, with nothing armed,

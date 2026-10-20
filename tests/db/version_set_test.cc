@@ -18,6 +18,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -1021,6 +1023,128 @@ TEST_F(VersionSetTest, ManifestCutAnywhereAfterItsFirstRecordRecoversTheRecordsB
     }
     EXPECT_EQ(recovered->current()->state(), states[whole - 1]);
   }
+}
+
+// What a file of tests/db/regression holds, or an empty string if it cannot be read.
+std::string RegressionFile(const std::string& name) {
+  std::ifstream in(std::string(SHALE_REGRESSION_DIR) + "/" + name, std::ios::binary);
+  EXPECT_TRUE(in.is_open()) << "cannot open " << name;
+  return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+TEST_F(VersionSetTest, TheManifestThatAKillOnMacOs14LeftEndingInZerosRecovers) {
+  // CURRENT and the MANIFEST it names, as the crash test left them in CI after a SIGKILL of its
+  // writer (run 39308935354, job crash (macos-14), seed 79, round 92): 89 whole records, then 438
+  // zero bytes to the end of the file, the size of one edit's record, which the writer was
+  // appending when it was killed. The operating system kept the length of the file and not the
+  // data. Version 0.1.0 refused to open it ("unknown record type"); the zeros start at a record
+  // boundary and run to the end of the file, so they are a trace of the crash (D6).
+  const std::string manifest = RegressionFile("manifest-zero-tail/MANIFEST-016123");
+  const std::string current = RegressionFile("manifest-zero-tail/CURRENT");
+  ASSERT_EQ(manifest.size(), 12389u);
+  ASSERT_EQ(manifest.find_first_not_of('\0', 11951), std::string::npos) << "zeros from 11951 on";
+  ASSERT_EQ(current, CurrentText(16123));
+  env_.SetFileContents(CurrentFileName(kDb), current);
+  env_.SetFileContents(DescriptorFileName(kDb, 16123), manifest);
+
+  const auto recovered = NewVersionSet();
+  ASSERT_OK(recovered->Recover());
+  EXPECT_EQ(recovered->RecoveredZeroTailBytes(), 438u);
+  const VersionState& state = recovered->current()->state();
+  // The last whole edit: the flush of log 16373 into table 16378.
+  EXPECT_EQ(state.log_number, 16376u);
+  EXPECT_EQ(state.next_file_number, 16379u);
+  EXPECT_EQ(state.last_sequence, 1998122u);
+  ASSERT_FALSE(state.files[0].empty());
+  EXPECT_EQ(state.files[0].back().number, 16378u) << "the newest table, at level 0";
+  EXPECT_EQ(recovered->NextFileNumber(), 16379u);
+  EXPECT_EQ(recovered->LastSequence(), 1998122u);
+
+  // The same state as from the file cut where the zeros start, as a crash may cut it.
+  env_.SetFileContents(DescriptorFileName(kDb, 16123), manifest.substr(0, 11951));
+  const auto cut = NewVersionSet();
+  ASSERT_OK(cut->Recover());
+  EXPECT_EQ(cut->current()->state(), state);
+  EXPECT_EQ(cut->RecoveredZeroTailBytes(), 0u);
+}
+
+TEST_F(VersionSetTest, AManifestWhoseZerosAreNotItsWholeEndIsRefused) {
+  // The same MANIFEST, with a byte that is not zero after the zeros, or with zeros that begin
+  // inside its last whole record: a defect, as before, which names the file.
+  const std::string manifest = RegressionFile("manifest-zero-tail/MANIFEST-016123");
+  ASSERT_EQ(manifest.size(), 12389u);
+  env_.SetFileContents(DescriptorFileName(kDb, 16123), manifest);
+  const ManifestRecords records = ReadManifest(16123);
+  ASSERT_EQ(records.offsets.size(), 89u);
+  // Zeros from five bytes into the payload of the last whole record, whose header stays, and from
+  // its first byte, so that the payload and everything after it are zeros.
+  const size_t payload = static_cast<size_t>(records.offsets.back()) + 7;
+  ASSERT_LT(payload + 5, size_t{11951});
+  std::string zeros_inside_a_record = manifest;
+  std::fill(zeros_inside_a_record.begin() + static_cast<std::ptrdiff_t>(payload + 5),
+            zeros_inside_a_record.end(), '\0');
+  std::string zeros_for_a_payload = manifest;
+  std::fill(zeros_for_a_payload.begin() + static_cast<std::ptrdiff_t>(payload),
+            zeros_for_a_payload.end(), '\0');
+  struct Case {
+    const char* what;
+    std::string contents;
+    const char* defect;
+  };
+  for (const Case& c :
+       {Case{"a byte after the zeros", manifest + "\x01", "unknown record type"},
+        Case{"a byte past the next block boundary", manifest + std::string(40000, '\0') + "\x01",
+             "unknown record type"},
+        Case{"zeros inside a record", zeros_inside_a_record, "checksum mismatch"},
+        Case{"zeros for a whole payload", zeros_for_a_payload, "checksum mismatch"}}) {
+    SCOPED_TRACE(c.what);
+    env_.SetFileContents(CurrentFileName(kDb), CurrentText(16123));
+    env_.SetFileContents(DescriptorFileName(kDb, 16123), c.contents);
+    const auto recovered = NewVersionSet();
+    const Status s = recovered->Recover();
+    EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+    EXPECT_NE(s.ToString().find(c.defect), std::string::npos) << s.ToString();
+    EXPECT_TRUE(Names(s, DescriptorFileName(kDb, 16123)));
+  }
+}
+
+TEST_F(VersionSetTest, AReadErrorWhileReadingPastAManifestsZerosIsAnIOError) {
+  // The MANIFEST from CI, cut where its zeros start and padded with zeros to 40000 bytes, so that
+  // they run past the first block: the reader reads on, block by block, to know that they are zeros
+  // to the end of the file. A read that fails on the way says nothing about a file that may be
+  // whole, and a retry would open it, so recovery fails with the IOError, which names the file, and
+  // never with a Corruption, which would send an operator to a backup. Every read that Recover()
+  // makes is failed in turn: CURRENT's, and then the MANIFEST's first and second blocks.
+  const std::string manifest = RegressionFile("manifest-zero-tail/MANIFEST-016123");
+  ASSERT_EQ(manifest.size(), 12389u);
+  const std::string padded = manifest.substr(0, 11951) + std::string(40000 - 11951, '\0');
+  env_.SetFileContents(CurrentFileName(kDb), CurrentText(16123));
+  env_.SetFileContents(DescriptorFileName(kDb, 16123), padded);
+  int failures = 0;
+  int of_the_manifest = 0;
+  for (int n = 0; n < 10; n++) {
+    SCOPED_TRACE("read " + std::to_string(n) + " fails");
+    env_.FailOpAfter(Op::kRead, n);
+    const uint64_t before = env_.injected_errors();
+    const auto recovered = NewVersionSet();
+    const Status s = recovered->Recover();
+    const bool fired = env_.injected_errors() > before;
+    env_.ClearFaults();
+    if (!fired) {
+      ASSERT_OK(s);
+      EXPECT_EQ(recovered->RecoveredZeroTailBytes(), 40000u - 11951u);
+      break;
+    }
+    failures++;
+    EXPECT_TRUE(s.IsIOError()) << s.ToString();
+    if (Names(s, DescriptorFileName(kDb, 16123))) {
+      of_the_manifest++;
+    } else {
+      EXPECT_TRUE(Names(s, CurrentFileName(kDb)));
+    }
+  }
+  EXPECT_GE(failures - of_the_manifest, 1) << "CURRENT is read first";
+  EXPECT_EQ(of_the_manifest, 2) << "the MANIFEST is read in two blocks";
 }
 
 TEST_F(VersionSetTest, StateOfManyBlocksIsRecoveredFromRecordsThatSpanThem) {

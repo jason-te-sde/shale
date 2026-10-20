@@ -94,10 +94,11 @@ lock, so it refuses an open database too.
 was touched.
 
 **`Corruption: WAL corruption in .../NNNNNN.log: ...`.** A write-ahead log has a defect that is not
-the signature of a crash. A crash leaves a log that **ends** short; this is something else: a checksum
-that does not match, a length that leaves its block, a record type that does not exist, a tail of
-zero bytes, or a sequence number that goes backwards. The default (`paranoid_checks = true`) refuses
-to guess. Your choices:
+the signature of a crash. A crash leaves a log that **ends** short, or ends in zeros from a record
+boundary to the end of the file; this is something else: a checksum that does not match, a length that
+leaves its block, a record type that does not exist (zeros with any other byte after them among them),
+or a sequence number that goes backwards. The default (`paranoid_checks = true`) refuses to guess. Your
+choices:
 
 1. **Restore from a backup** and replay what you can from your own record of the writes. This is the
    choice that loses nothing the backup had.
@@ -135,10 +136,20 @@ what the files hold, so it is not treated as damage: **nothing is dropped and no
 the next open reads again. Check the disk and the permissions and retry; it is the same on every setting
 of `paranoid_checks`.
 
-**A filesystem that left zeros at the end of a log after a power loss** (a tail of `0x00`) is reported
-as a defect, so the default refuses the open. If you know that was a power loss and not damage, open
-with `paranoid_checks = false`; the writes before the zeros are recovered. A memtable switch does not
-sync the old log, so after a power loss such a tail can be in either of the last two logs.
+**A `LOG` line that says a log or the MANIFEST `dropped N zero byte(s) at its end`.** This is not a
+failure: `Open` succeeded, and you need do nothing. The file ended in N bytes of `0x00` from a record
+boundary to the end of the file, which is what a filesystem leaves after a crash when it kept the new
+length of a file and not the data written into it (XFS and ext4 can after a power loss; macOS 14 did
+once after a process was killed). Every byte after the last whole record was read and was zero, so no
+record was lost among them, and nothing in them had been acknowledged as synced, since a synced byte is
+never zeroed (D1): in a log they were writes made without a sync, gone as they are after any power loss,
+and in the MANIFEST an edit whose flush or compaction had not finished, whose inputs are still there.
+That open starts a new log and a new MANIFEST, as every open does, and the file with the zeros is
+deleted once nothing needs it. What deserves a look is the line *without* a crash before it, after a
+clean close, or appearing often: that is a disk or a filesystem that zeroes data it said was written,
+which D1 does not survive. A file whose zeros are followed by any byte that is not zero, or start inside
+a record, is still a defect and fails the open, as above. A memtable switch does not sync the old log,
+so after a power loss such a tail can be in either of the last two logs.
 
 **A `.dropped` file that you did not ask for, and a `LOG` line that says a log "lost the end of an
 earlier log".** This is not a failure: `Open` succeeded. After a power loss with unsynced writes (made
@@ -374,6 +385,10 @@ is from, and open nothing else:
   (`add L1 #12 size=... smallest=... largest=...`). The first record is the snapshot of the whole
   table set; each later one is one flush or compaction.
 
+A log or a MANIFEST that ends in zeros from a record boundary to the end of the file, as a crash can leave
+it, is dumped up to the zeros, and the dump says on standard error `FILE: ends in N zero byte(s), ...: not
+records, and not damage`, and exits with status 0, as an open drops the zeros and says so in the `LOG`.
+
 ## Reading the LOG
 
 `LOG` in the database directory is for people; the engine never reads it. Each line begins with the time
@@ -391,6 +406,7 @@ that matter:
 | `wrote the recovered writes to table N, B byte(s)` | recovery turned them into a level 0 table. |
 | `WAL FILE: dropped N byte(s), <defect>; nothing after this is replayed` and `WAL FILE kept as FILE.dropped, not replayed: ...` | a lenient open (`paranoid_checks = false`) stopped at a defect and set logs aside. |
 | `WAL FILE: its first write is sequence number N, and the writes from M were lost with the end of an earlier log; nothing from here on is replayed`, then `WAL FILE kept as FILE.dropped, not replayed: ...` | an open found the gap that a power loss leaves when it takes the unsynced end of one log and keeps writes of the next. Nothing that was acknowledged as synced is in the dropped logs. Any open does this, strict or lenient. |
+| `WAL FILE: dropped N zero byte(s) at its end, from a record boundary to the end of the file, which a crash leaves (D6)`, and the same with `MANIFEST FILE` | an open found that file ending in N zero bytes, every one of them read, from a record boundary to the end, and took them for the end of the file, as it does a record cut short. No record was among them and none was acknowledged as synced. Any open does this, strict or lenient. See [A database that will not open](#a-database-that-will-not-open) for when it is worth a look. |
 | `flushed a memtable to table N, B byte(s)` | a flush finished. |
 | `compacted A table(s) of level L and B of level L+1 into C table(s) of level L+1: ...` | a compaction finished, with bytes read and written and the entries it dropped. |
 | `moved table N from level L to level L+1` | a trivial move. |

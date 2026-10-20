@@ -49,16 +49,18 @@ struct Options {
   bool error_if_exists = false;
 
   /// Whether the database treats damage as an error where it can. At open, it decides what is made
-  /// of a write-ahead log with a defect other than the two that a crash leaves, which Open
-  /// tolerates whatever this says: an end cut short, and a log that begins after a gap in the
-  /// sequence numbers (a power loss took the unsynced end of the log before it). At a gap, the
-  /// log and every later one are set aside and nothing in them is applied. For any other defect,
-  /// with this set Open fails with Corruption; without it, Open recovers the writes that come
-  /// before the first defect and applies nothing after it, in that log or in any later one. Those
-  /// logs are not deleted: each is renamed to its own name with ".dropped" added, which the
-  /// database never reads or deletes again, and the info log says which and why. They are kept
-  /// until DestroyDB() or until somebody removes them by hand. A log that cannot be read is not a
-  /// damaged one: a read error fails Open with its IOError whatever this says.
+  /// of a write-ahead log with a defect other than the three that a crash leaves, which Open
+  /// tolerates whatever this says: an end cut short, zeros from a record boundary to the end of the
+  /// file (the info log names the file and the number of zero bytes), and a log that begins after
+  /// a gap in the sequence numbers (a power loss took the unsynced end of the log before it). At a
+  /// gap, the log and every later one are set aside and nothing in them is applied. For any other
+  /// defect, zeros followed by any byte that is not zero and zeros inside a record that the file
+  /// holds in full among them, with this set Open fails with Corruption; without it, Open recovers
+  /// the writes that come before the first defect and applies nothing after it, in that log or in
+  /// any later one. Those logs are not deleted: each is renamed to its own name with ".dropped"
+  /// added, which the database never reads or deletes again, and the info log says which and why.
+  /// They are kept until DestroyDB() or until somebody removes them by hand. A log that cannot be
+  /// read is not a damaged one: a read error fails Open with its IOError whatever this says.
   bool paranoid_checks = true;
 
   /// The size in bytes that a memtable may reach before it is written out as a table.

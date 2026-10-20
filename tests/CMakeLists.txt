@@ -79,6 +79,9 @@ shale_add_test(compaction_filter SOURCES core/compaction_filter_test.cc LIBS sha
 shale_add_test(builder SOURCES db/builder_test.cc LIBS shale_db shale_testkit)
 shale_add_test(compaction_job SOURCES db/compaction_job_test.cc LIBS shale_db shale_testkit)
 shale_add_test(version_set SOURCES db/version_set_test.cc LIBS shale_db shale_testkit)
+# Files that a failure outside the tests left, kept byte for byte, are read from the source tree.
+target_compile_definitions(version_set_test PRIVATE
+  SHALE_REGRESSION_DIR="${CMAKE_CURRENT_SOURCE_DIR}/db/regression")
 shale_add_test(options SOURCES db/options_test.cc LIBS shale_db)
 shale_add_test(snapshot_list SOURCES db/snapshot_list_test.cc LIBS shale_db)
 shale_add_test(info_log SOURCES db/info_log_test.cc LIBS shale_db shale_testkit)

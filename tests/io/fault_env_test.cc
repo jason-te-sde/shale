@@ -97,8 +97,12 @@ TEST_F(FaultEnvTest, DropUnsyncedKeepsOnlySyncedBytes) {
   EXPECT_EQ(env_.FileContents("/d/f"), "abc");
 }
 
-TEST_F(FaultEnvTest, PowerLossKeepsAPrefixOfUnsynced) {
-  std::set<size_t> lengths;
+TEST_F(FaultEnvTest, PowerLossKeepsAPrefixOfUnsyncedOrZerosOfTheirLength) {
+  // What survives of the bytes after the synced ones is a prefix of them, or, where the length of
+  // the file reached the disk and its data did not, as many zero bytes as were written. The synced
+  // bytes are never touched.
+  const std::string zeros = std::string("abc") + std::string(3, '\0');
+  std::set<std::string> outcomes;
   for (uint64_t seed = 0; seed < 200; seed++) {
     SCOPED_TRACE("seed " + std::to_string(seed));
     FaultInjectionEnv env(seed);
@@ -108,14 +112,31 @@ TEST_F(FaultEnvTest, PowerLossKeepsAPrefixOfUnsynced) {
     env.SimulatePowerLoss();
     const std::string contents = env.FileContents("/d/f");
     ASSERT_GE(contents.size(), 3u) << "synced bytes must survive";
-    ASSERT_EQ(std::string_view("abcdef").substr(0, contents.size()), contents)
-        << "what survives must be a prefix of what was written";
-    lengths.insert(contents.size());
+    ASSERT_TRUE(std::string_view("abcdef").substr(0, contents.size()) == contents ||
+                contents == zeros)
+        << "what survives must be a prefix of what was written, or the synced bytes and zeros";
+    outcomes.insert(contents);
   }
-  EXPECT_EQ(lengths.count(3), 1u) << "no unsynced byte surviving must be possible";
-  EXPECT_EQ(lengths.count(6), 1u) << "every unsynced byte surviving must be possible";
-  EXPECT_TRUE(lengths.count(4) == 1 || lengths.count(5) == 1)
+  EXPECT_EQ(outcomes.count("abc"), 1u) << "no unsynced byte surviving must be possible";
+  EXPECT_EQ(outcomes.count("abcdef"), 1u) << "every unsynced byte surviving must be possible";
+  EXPECT_TRUE(outcomes.count("abcd") == 1 || outcomes.count("abcde") == 1)
       << "a part of the unsynced bytes surviving must be possible";
+  EXPECT_EQ(outcomes.count(zeros), 1u)
+      << "the unsynced bytes coming back as zeros must be possible";
+}
+
+TEST_F(FaultEnvTest, AFileWithNothingUnsyncedIsNeverZeroFilled) {
+  // Only bytes appended since the last sync can come back as zeros: a file that was synced after
+  // its last append keeps exactly what it has, whatever the seed.
+  for (uint64_t seed = 0; seed < 200; seed++) {
+    SCOPED_TRACE("seed " + std::to_string(seed));
+    FaultInjectionEnv env(seed);
+    ASSERT_OK(env.CreateDir("/d"));
+    ASSERT_OK(Put(&env, "/d/f", "abcdef", ""));
+    ASSERT_OK(env.SyncDir("/d"));
+    env.SimulatePowerLoss();
+    ASSERT_EQ(env.FileContents("/d/f"), "abcdef");
+  }
 }
 
 TEST_F(FaultEnvTest, ProcessCrashKeepsEverything) {
@@ -144,8 +165,8 @@ TEST_F(FaultEnvTest, ProcessCrashDropsUnflushedBytes) {
 
 TEST_F(FaultEnvTest, PowerLossDropsUnflushedBytes) {
   // A byte that never left the handle is not among those a power loss may keep, whatever the seed.
-  // The flushed ones are, in a prefix, because none of them was synced.
-  std::set<size_t> lengths;
+  // The flushed ones are, in a prefix or as zeros of their length, because none of them was synced.
+  std::set<std::string> outcomes;
   for (uint64_t seed = 0; seed < 100; seed++) {
     SCOPED_TRACE("seed " + std::to_string(seed));
     FaultInjectionEnv env(seed);
@@ -158,11 +179,12 @@ TEST_F(FaultEnvTest, PowerLossDropsUnflushedBytes) {
     ASSERT_OK(env.SyncDir("/d"));
     env.SimulatePowerLoss();
     const std::string contents = env.FileContents("/d/f");
-    ASSERT_LE(contents.size(), 3u);
-    ASSERT_EQ(std::string_view("abc").substr(0, contents.size()), contents);
-    lengths.insert(contents.size());
+    ASSERT_TRUE(std::string_view("abc").substr(0, contents.size()) == contents ||
+                contents == std::string(3, '\0'))
+        << "what survives must be a prefix of what was flushed, or zeros of its length";
+    outcomes.insert(contents);
   }
-  EXPECT_EQ(lengths, (std::set<size_t>{0, 1, 2, 3}));
+  EXPECT_EQ(outcomes, (std::set<std::string>{"", "a", "ab", "abc", std::string(3, '\0')}));
 }
 
 TEST_F(FaultEnvTest, AppendedBytesStayInTheHandleUntilTheyAreFlushed) {
@@ -725,6 +747,30 @@ TEST_F(FaultEnvTest, ASyncThatSucceedsAfterAFailedOneMakesNothingDurable) {
   ASSERT_EQ(env_.FileContents("/d/f"), "abc") << "the bytes are there for readers";
   env_.SimulatePowerLossDropUnsynced();
   EXPECT_EQ(env_.FileContents("/d/f"), "");
+}
+
+TEST_F(FaultEnvTest, BytesThatASyncAfterAFailedOneClaimsCanComeBackAsZeros) {
+  // The Sync() that reports success after a failed one made nothing durable, so the bytes it
+  // claims are unsynced, and a power loss can leave them as zeros as well as drop them.
+  std::set<std::string> outcomes;
+  for (uint64_t seed = 0; seed < 100; seed++) {
+    SCOPED_TRACE("seed " + std::to_string(seed));
+    FaultInjectionEnv env(seed);
+    ASSERT_OK(env.CreateDir("/d"));
+    std::unique_ptr<WritableFile> writer;
+    ASSERT_OK(env.NewWritableFile("/d/f", &writer));
+    ASSERT_OK(writer->Append("abc"));
+    ASSERT_OK(writer->Sync());
+    ASSERT_OK(writer->Append("def"));
+    env.FailOpAfter(Op::kSync, 0);
+    EXPECT_FALSE(writer->Sync().ok());
+    EXPECT_OK(writer->Sync());
+    ASSERT_OK(writer->Close());
+    ASSERT_OK(env.SyncDir("/d"));
+    env.SimulatePowerLoss();
+    outcomes.insert(env.FileContents("/d/f"));
+  }
+  EXPECT_EQ(outcomes.count(std::string("abc") + std::string(3, '\0')), 1u);
 }
 
 TEST_F(FaultEnvTest, AFailedSyncKeepsWhatWasSyncedBeforeAndNothingAfter) {

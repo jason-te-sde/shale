@@ -155,13 +155,16 @@ class VersionSet {
   /// Returns Corruption("CURRENT file does not end with newline"), Corruption("CURRENT names an
   /// invalid file") for one that is not a MANIFEST name as SetCurrentFile() writes it, the I/O
   /// error of reading CURRENT or the MANIFEST, and Corruption for any defect the log reader
-  /// reports, whether or not a valid record follows it (only the end of the file, cut short, is
-  /// the end of the log), for a record that does not decode, for an edit that ApplyEdit() refuses,
-  /// for a MANIFEST with no record at all, for a last sequence number that no write could have,
-  /// and for a MANIFEST numbered at kMaxFileNumber or above or with a counter above it. A defect
-  /// is reported in preference to the failure of a record
-  /// after it, which the gap may have caused. Every Corruption but the two about CURRENT names the
-  /// MANIFEST in its message. On failure nothing is installed.
+  /// reports, whether or not a valid record follows it (only the end of the file, cut short or in
+  /// zeros from a record boundary on, is the end of the log, and RecoveredZeroTailBytes() then
+  /// counts the zeros), for a record that does not decode, for an edit that ApplyEdit() refuses,
+  /// for a MANIFEST with no record at all, for a last sequence number that no write could have, and
+  /// for a MANIFEST numbered at kMaxFileNumber or above or with a counter above it. A read error is
+  /// returned in preference to what the reader reported before it, which it could not finish
+  /// judging, such as zeros it was reading on to the end of; a defect is reported in preference to
+  /// the failure of a record after it, which the gap may have caused. Every Corruption but the two
+  /// about CURRENT names the MANIFEST in its message, and every IOError names the file. On failure
+  /// nothing is installed.
   ///
   /// Aborts if this version set was already loaded.
   Status Recover();
@@ -280,6 +283,11 @@ class VersionSet {
   /// WriteNewManifest(). The database deletes MANIFESTs with a lower number.
   uint64_t ManifestFileNumber() const { return manifest_file_number_; }
 
+  /// Returns how many zero bytes the MANIFEST that Recover() read ended in, from a record boundary
+  /// to the end of the file, which it dropped as the trace of a crash (D6); zero if the MANIFEST
+  /// did not end so, and before Recover() has succeeded.
+  uint64_t RecoveredZeroTailBytes() const { return recovered_zero_tail_bytes_; }
+
   /// Returns the numbers of the files of every Version that is still alive anywhere: the current
   /// one, and every earlier one that a reader or an iterator still holds. These are the files that
   /// must not be deleted. Versions are tracked by weak pointer, so one that is dropped leaves the
@@ -317,6 +325,7 @@ class VersionSet {
   uint64_t next_file_number_;
   SequenceNumber last_sequence_ = 0;
   uint64_t manifest_file_number_ = 0;
+  uint64_t recovered_zero_tail_bytes_ = 0;
   bool loaded_ = false;  // CreateNew() or Recover() has succeeded
 
   // The MANIFEST being appended to, or null. The writer is declared after the file it writes to,

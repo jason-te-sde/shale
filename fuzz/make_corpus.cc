@@ -135,6 +135,14 @@ void SeedLogReader(const std::string& corpus_dir) {
                                     Fragment(log::kFullType, c));
   out.Write("orphans", Fragment(log::kMiddleType, a) + Fragment(log::kLastType, b) +
                            Fragment(log::kFullType, c));
+
+  // Zeros from a record boundary to the end of the file, over a block boundary, which the reader
+  // takes for the end of the log; and the same zeros with a record after them in a later block,
+  // which it must not. The reader reads ahead over zeros, block by block, to tell the two apart.
+  const std::string records = LogFile({"first", std::string(100, 'x')});
+  const std::string zeros(2 * 32768 - records.size(), '\0');
+  out.Write("zero_tail", records + zeros + std::string(100, '\0'));
+  out.Write("zeros_then_record", records + zeros + Fragment(log::kFullType, "after the zeros"));
 }
 
 // A block of internal keys, as a data block holds, and one of short plain keys.

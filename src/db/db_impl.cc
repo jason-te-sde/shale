@@ -75,6 +75,12 @@ size_t TableCacheCapacity(const Options& options) {
 // one after a hole: a name that nothing reads.
 constexpr std::string_view kDroppedSuffix = ".dropped";
 
+// What the LOG says after the number of zero bytes that a log or the MANIFEST ended in, from a
+// record boundary to the end of the file, which an open dropped as the trace of a crash (D6).
+constexpr char kZeroTailNote[] =
+    "zero byte(s) at its end, from a record boundary to the end of the file, which a crash leaves "
+    "(D6)";
+
 // Whether `name`, a bare file name, is that of a log that an open set aside: the name of a
 // log, as LogFileName() makes it, and the suffix, and nothing else.
 bool IsDroppedLog(const std::string& name) {
@@ -331,6 +337,10 @@ Status DBImpl::OpenLocked() {
     return Status::InvalidArgument(dbname_ + " exists (error_if_exists is true)");
   } else {
     s = versions_.Recover();
+    if (s.ok() && versions_.RecoveredZeroTailBytes() > 0) {
+      Log("MANIFEST " + DescriptorFileName(dbname_, versions_.ManifestFileNumber()) + ": dropped " +
+          std::to_string(versions_.RecoveredZeroTailBytes()) + " " + kZeroTailNote);
+    }
   }
   if (!s.ok()) {
     return s;
@@ -531,7 +541,14 @@ Status DBImpl::ReplayLog(uint64_t number, SequenceNumber tables_sequence,
     dropped = report.bytes();
   }
   if (defect.ok()) {
-    return Status::OK();  // the whole log, or all of it up to a record a crash cut short
+    // The whole log, or all of it up to a record that a crash cut short or to zeros that run from a
+    // record boundary to the end of the file (D6). The zeros are said, since they are the one trace
+    // of a crash that leaves bytes behind.
+    if (reader.ZeroTailBytes() > 0) {
+      Log("WAL " + fname + ": dropped " + std::to_string(reader.ZeroTailBytes()) + " " +
+          kZeroTailNote);
+    }
+    return Status::OK();
   }
 
   if (options_.paranoid_checks) {

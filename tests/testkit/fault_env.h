@@ -33,6 +33,10 @@ class FaultState;
 /// - What was handed over is what the operating system holds, and survives the death of the
 ///   process. A file also has a count of leading bytes that Sync() made durable. A power loss keeps
 ///   those and a prefix of the rest, and what it keeps is durable from then on.
+/// - Or, for a file that was appended to since its last sync, a power loss keeps the synced bytes
+///   followed by as many zero bytes as were handed over after them, one time in four: the length
+///   of the file reached the disk and its data did not. XFS and ext4 leave this after a power loss,
+///   and a process killed on macOS 14 has been seen to leave it. The synced bytes are never zeroed.
 /// - A Sync() that fails marks its file. From then on every Sync() of it reports success and makes
 ///   nothing durable, whatever it is asked: the Env's documentation says a Sync() that succeeds
 ///   after a failed one proves nothing, and a caller that trusts it loses its bytes here, where a
@@ -72,8 +76,10 @@ class FaultState;
 /// What it does not model, so that a test does not trust it for these:
 /// - Directories themselves: CreateDir() and RemoveDir() are durable at once and no crash rolls
 ///   them back. Only the entries for files are subject to SyncDir().
-/// - Torn, zero-filled or garbage tails: what a power loss leaves of a file is a clean prefix of
-///   what was written, never a prefix followed by junk, and never a hole.
+/// - Garbage tails, and zeros that do not start where the synced bytes end: what a power loss
+///   leaves of a file is a clean prefix of what was written, or the synced bytes followed by zeros
+///   to the end, never a prefix followed by junk, zeros after a part of the unsynced bytes, or a
+///   hole.
 /// - Partial effects of a failure: a failed call does nothing, not half of what it was asked.
 /// - A limit on a handle's buffer, which a real writer flushes when it is full: here a crash loses
 ///   every byte that was not flushed, which is never fewer than a real writer would lose.
@@ -131,8 +137,9 @@ class FaultInjectionEnv final : public Env {
   /// Simulates a power loss. Each directory keeps a prefix of the changes made to it since it was
   /// last synced, of a length drawn uniformly from none to all of them, and undoes the rest. Each
   /// file keeps the bytes that were synced plus a prefix of the ones that were handed over and not
-  /// synced, of a length drawn the same way. Bytes that were still in a handle are gone. What
-  /// survives is durable from then on. Invalidates every handle and lock opened before the call.
+  /// synced, of a length drawn the same way, or, one time in four, as many zero bytes as there
+  /// were of those. Bytes that were still in a handle are gone. What survives is durable from then
+  /// on. Invalidates every handle and lock opened before the call.
   void SimulatePowerLoss();
 
   /// Like SimulatePowerLoss(), but nothing that was not made durable survives: every directory

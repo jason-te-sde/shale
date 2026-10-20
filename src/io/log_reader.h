@@ -19,28 +19,36 @@ namespace shale::log {
 /// leaves behind and which is fine, or is damaged in the middle, which it must not open. The
 /// dividing line is exact:
 ///
-/// - **Silent.** The file ends, and nothing is reported, when it stops inside a header, or inside
-///   a record whose length says it would have fitted in its block, or after a FIRST or MIDDLE
+/// - **Silent.** The file ends, and nothing is reported, when it stops inside a header, or inside a
+///   record whose length says it would have fitted in its block, or after a FIRST or MIDDLE
 ///   fragment that no LAST follows. These are the shapes in which a writer that died leaves its
-///   file. The file ends mid-record whatever the fragment boundaries: reading stops there, and
-///   the records before it were all returned. A fragment that is cut off is the only silent end.
-///   A header whose length runs past the end of the file is one only if the bytes that are there
-///   are not a whole fragment: where some length, up to what is left of the file, gives the
-///   fragment the checksum that the header holds, the fragment was whole and its length is
-///   damaged, and that is reported. A crash leaves a prefix of a fragment, which has the checksum
-///   of the whole one only by a collision of 32 bits, about one in 2^32 for each byte left in a
-///   file that a crash cut. With `checksum` off there is nothing to find a fragment by, and the
-///   case stays silent.
+///   file. The file ends mid-record whatever the fragment boundaries: reading stops there, and the
+///   records before it were all returned. The log also ends, silently, where a header would start
+///   and every byte from there to the end of the file is zero, a header's worth or more: what a
+///   filesystem leaves when it kept the length of a file and not its data. That holds wherever a
+///   header would start, after a defect too, where reading starts again at a block. ZeroTailBytes()
+///   then says how many zeros were dropped; the reader reads to the end of the file to know it.
+///   Zeros followed by any byte that is not zero, and zeros that begin inside a record that the
+///   file holds in full, are not this, and are reported as below; a record that the file ends
+///   inside is cut short, whatever its last bytes are. Apart from these zeros, a fragment that is
+///   cut off is the only silent end. A header whose length runs past the end of the file is one
+///   only if the bytes that are there are not a whole fragment: where some length, up to what is
+///   left of the file, gives the fragment the checksum that the header holds, the fragment was
+///   whole and its length is damaged, and that is reported. A crash leaves a prefix of a fragment,
+///   which has the checksum of the whole one only by a collision of 32 bits, about one in 2^32 for
+///   each byte left in a file that a crash cut. With `checksum` off there is nothing to find a
+///   fragment by, and the case stays silent.
 /// - **Reported.** Everything else is reported to the Reporter, once for each defect, with the
 ///   number of bytes it makes the reader drop and a Corruption status: a read error (the status
 ///   the file returned); "checksum mismatch"; "bad record length", for a length that would take
 ///   the record out of its block, or past the end of the file when the bytes that are there are a
-///   whole fragment; "unknown record type", for a type that is not one of the four
-///   (zero included); "missing start of fragmented record", for a MIDDLE or LAST with no FIRST
-///   before it; and "partial record without end", for a FIRST that something other than a MIDDLE
-///   or LAST follows. A defect in the header or the contents drops the rest of its block, since
-///   after one the lengths in it cannot be trusted, and reading goes on at the next block. A
-///   fragmented record that a defect interrupts is lost whole, never joined to another one.
+///   whole fragment; "unknown record type", for a type that is not one of the four (zero
+///   included, unless the zeros run to the end of the file as above); "missing start of fragmented
+///   record", for a MIDDLE or LAST with no FIRST before it; and "partial record without end", for a
+///   FIRST that something other than a MIDDLE or LAST follows. A defect in the header or the
+///   contents drops the rest of its block, since after one the lengths in it cannot be trusted, and
+///   reading goes on at the next block. A fragmented record that a defect interrupts is lost whole,
+///   never joined to another one.
 ///
 /// **A report is never benign by position.** After a defect the reader drops the rest of its
 /// block, and that can include intact records that were acknowledged. A report is therefore not
@@ -50,7 +58,9 @@ namespace shale::log {
 /// nothing was lost where the checksums are off, nor where a length is damaged together with the
 /// bytes of the fragment that the checksum would be found in: a damaged length in the last block
 /// that points beyond the end of the file but inside the block is then taken for a torn tail.
-/// Damage to the length of a fragment that is whole is found, and reported.
+/// Damage to the length of a fragment that is whole is found, and reported. Zeros that end the log
+/// are not taken for its end by where they are either: every byte after them has been read and is
+/// zero, so they cannot hide a record, whole or damaged.
 ///
 /// A read error reaches the Reporter as the status the file returned, an IOError, and then the
 /// stream ends, so without a Reporter it looks exactly like the end of the file. A caller that
@@ -70,8 +80,9 @@ class Reader {
     ///        so that the figures of a log add up to the bytes lost: for a header or checksum
     ///        defect, the rest of the block from that header on; for a fragment with no start, its
     ///        header and payload; for an abandoned record, the headers and payloads of the
-    ///        fragments read so far. The zero padding at the end of a block is not counted. For a
-    ///        failed read the number is the size of the block that could not be read.
+    ///        fragments read so far. The zero padding at the end of a block is not counted, nor
+    ///        are the zeros that end a log, which ZeroTailBytes() counts. For a failed read the
+    ///        number is the size of the block that could not be read.
     /// @param status what was wrong; always an error, a Corruption unless a read failed.
     virtual void Corruption(size_t bytes, const Status& status) = 0;
   };
@@ -100,6 +111,11 @@ class Reader {
   /// returned, and zero before it has returned any.
   uint64_t LastRecordOffset() const;
 
+  /// Returns how many zero bytes the log ended in, from a record boundary to the end of the file,
+  /// which ReadRecord() took for the end of the log once it returned false; zero if the log did
+  /// not end so.
+  uint64_t ZeroTailBytes() const;
+
  private:
   // What ReadPhysicalRecord() found.
   enum class Physical : uint8_t {
@@ -109,6 +125,17 @@ class Reader {
   };
 
   Physical ReadPhysicalRecord(RecordType* type, std::string_view* payload);
+
+  // Reads the next block into buffer_, and sets eof_ if it is the last. On failure buffer_ is
+  // empty, eof_ is set and the status is the file's.
+  Status ReadBlock();
+
+  // Whether the file is zeros from here to its end, buffer_ being all zeros. Reads on to find out.
+  // If so, buffer_ is emptied, the log has ended, and `*bytes` is the number of zero bytes after
+  // buffer_. If not, buffer_ is the block that holds a byte that is not zero, from its start, and
+  // the whole blocks of zeros before it, and a read that failed, wait in zero_blocks_to_report_ and
+  // read_error_ to be reported as reading block by block would have.
+  bool ZerosRunToTheEnd(uint64_t* bytes);
 
   // Whether the bytes of buffer_ after the header that starts at `header` are a whole fragment, of
   // some length up to what is left, that the checksum in the header vouches for: `length`, which
@@ -130,6 +157,9 @@ class Reader {
   bool eof_ = false;                   // the last read returned less than a block, or failed
   uint64_t end_of_buffer_offset_ = 0;  // the file offset just past the end of buffer_
   uint64_t last_record_offset_ = 0;
+  uint64_t zero_tail_bytes_ = 0;      // the zeros that the log ended in, once it has
+  size_t zero_blocks_to_report_ = 0;  // whole blocks of zeros, read ahead, still to be reported
+  Status read_error_;                 // a read that failed while reading ahead, to be reported
 };
 
 }  // namespace shale::log

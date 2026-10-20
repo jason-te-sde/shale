@@ -27,6 +27,7 @@
 #include "testkit/model_db.h"
 #include "util/check.h"
 #include "util/dbformat.h"
+#include "util/filename.h"
 #include "util/hash.h"
 #include "util/random.h"
 
@@ -41,6 +42,12 @@ constexpr const char* kDbName = "/db";
 
 // What the Env puts in every error that it fails a call with on purpose.
 constexpr const char* kInjectedMarker = "injected";
+
+// What the LOG of an open says when it drops the zeros that a log or the MANIFEST ended in (D6),
+// after the name of the file and the number of bytes; and how a line about the MANIFEST starts,
+// after the time.
+constexpr const char* kZeroTailText = " zero byte(s) at its end, from a record boundary";
+constexpr const char* kManifestLine = " MANIFEST ";
 
 // The limits of what a run holds open at once.
 constexpr size_t kMaxSnapshots = 8;
@@ -414,6 +421,7 @@ class Simulator {
         SHALE_CHECK(impl_ != nullptr, "DB::Open returned something that is not a DBImpl");
         db_ = options_.wrap_db ? options_.wrap_db(std::move(real)) : std::move(real);
         counters_pending_ = true;
+        CountZeroTails();
         // An open with no fault armed sweeps every table that no version names.
         if (!faults_armed_) {
           remove_dirty_ = false;
@@ -450,8 +458,31 @@ class Simulator {
     return false;
   }
 
+  // Counts the open that just worked if its LOG says that it dropped zeros at the end of a file. An
+  // open renames the LOG of the one before, so the LOG holds this open's lines.
+  void CountZeroTails() {
+    const std::string log = env_->FileContents(InfoLogFileName(kDbName));
+    bool any = false;
+    bool manifest = false;
+    for (size_t start = 0; start < log.size();) {
+      const size_t end = std::min(log.find('\n', start), log.size());
+      const std::string_view line(log.data() + start, end - start);
+      if (line.find(kZeroTailText) != std::string_view::npos) {
+        any = true;
+        manifest = manifest || line.find(kManifestLine) != std::string_view::npos;
+      }
+      start = end + 1;
+    }
+    if (any) {
+      stats_.zero_tail_opens++;
+    }
+    if (manifest) {
+      stats_.manifest_zero_tail_opens++;
+    }
+  }
+
   // Simulates a power loss: one time in three the worst case, where nothing that was not made
-  // durable survives, and else one where a prefix of it does.
+  // durable survives, and else one where a prefix of it, or zeros in its place, survive.
   void LosePower() {
     stats_.power_losses++;
     if (rng_.OneIn(3)) {
@@ -1398,6 +1429,8 @@ class Simulator {
                                    stats_.orphan_checks,
                                    stats_.deepest_level,
                                    stats_.damaged_opens,
+                                   stats_.zero_tail_opens,
+                                   stats_.manifest_zero_tail_opens,
                                    total_.shadowed_dropped,
                                    total_.user_bytes_written,
                                    total_.wal_bytes_written,
