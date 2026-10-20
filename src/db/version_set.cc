@@ -105,17 +105,22 @@ std::unique_ptr<Iterator> NewLevelIterator(const std::vector<FileMetaData>* file
       });
 }
 
-// Keeps the first thing the log reader reports. A report is a defect in the MANIFEST, and none is
-// benign: the reader drops the rest of a block after one, and what it drops may be edits that were
-// acknowledged.
+// Keeps the first thing the log reader reports, unless a read failed, whose error is kept instead.
+// A report is a defect in the MANIFEST, and none is benign: the reader drops the rest of a block
+// after one, and what it drops may be edits that were acknowledged. A failed read is not a defect:
+// it says nothing about what the file holds, and the reader reports what it read before it without
+// knowing what came after, zeros among them that it was reading on to the end of the file to judge
+// (D6). Taking those for the error would call a file damaged that a retry may find whole, as
+// ReplayLog() would for a log.
 class FirstReport final : public log::Reader::Reporter {
  public:
   void Corruption(size_t /*bytes*/, const Status& status) override {
-    if (status_.ok()) {
+    if (status_.ok() || (status.IsIOError() && !status_.IsIOError())) {
       status_ = status;
     }
   }
 
+  // The first read error reported, if there was one, and else the first defect.
   const Status& status() const { return status_; }
 
  private:
