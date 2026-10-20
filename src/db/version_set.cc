@@ -374,8 +374,9 @@ Status VersionSet::Recover() {
     }
     records++;
   }
-  // The end of the log is silent only when the file stops short, as a crash leaves it. A report is
-  // a defect, and the records after it were dropped with the rest of its block, so a recovery that
+  // The end of the log is silent only where a crash leaves it: the file stops short, or it is zeros
+  // from a record boundary to its end, which the reader has checked byte by byte. A report is a
+  // defect, and the records after it were dropped with the rest of its block, so a recovery that
   // carried on from here would have lost edits without saying so.
   if (!report.status().ok()) {
     return WithFileName(report.status(), manifest);
@@ -405,6 +406,7 @@ Status VersionSet::Recover() {
   next_file_number_ = next;
   last_sequence_ = state.last_sequence;
   manifest_file_number_ = number;
+  recovered_zero_tail_bytes_ = reader.ZeroTailBytes();
   loaded_ = true;
   Install(std::move(state));
   return Status::OK();
