@@ -90,8 +90,9 @@ make the whole simulator worthless, so each wrapper must make a run fail with th
 
 **The simulator is held to be fierce.** At the end of the default run it checks that it provoked enough:
 the number of power losses, process crashes, flushes, compactions, tombstones dropped, snapshots and
-iterators held across a compaction, injected errors and corrupted reads all have floors, and the run fails
-under them, as it does if no table ever reached level 2. A simulator that quietly stopped crashing the
+iterators held across a compaction, injected errors, corrupted reads and opens that dropped a zero-filled
+tail all have floors, and the run fails under them, as it does if no table ever reached level 2 or no
+open ever dropped the zeros at the end of a MANIFEST. A simulator that quietly stopped crashing the
 database would otherwise pass.
 
 **It is deterministic.** One seed is one run, on every toolchain that CI builds with:
@@ -101,8 +102,11 @@ digests of three seeds, so a toolchain that diverges fails.
 **Its crash model.** A crash is made between two operations, never inside one, and a flush or a compaction
 is one operation to the driver. What a crash does to the middle of one is reached the other way: an armed
 failure of an `Env` call fires inside the task, and the reopen that follows (after the next write has
-been shown to fail) is a power loss in four cases of six. The filesystem it crashes is described at the
-top of `tests/testkit/fault_env.h`, including what it does not model.
+been shown to fail) is a power loss in four cases of six. A power loss keeps what each file had synced and,
+of the rest, a prefix, or for one file in four zeros as long as the rest: the length reached the disk and
+the data did not, which is what XFS and ext4 can leave, and what a kill left on macOS 14 in CI. The
+filesystem it crashes is described at the top of `tests/testkit/fault_env.h`, including what it does not
+model.
 
 ## Reproducing a seed
 
@@ -123,7 +127,7 @@ The variables:
 | `SHALE_SIM_SEEDS` | How many seeds the main test runs, from 0 (default 50). |
 | `SHALE_SIM_STEPS` | Steps per seed (default 2000). |
 | `SHALE_SIM_KEYS` | Different keys per seed (default 200). |
-| `SHALE_SIM_VERBOSE` | Print each seed before it runs, which names the seed of a run that aborts, and its trace digest after. |
+| `SHALE_SIM_VERBOSE` | Print each seed before it runs, which names the seed of a run that aborts, and its trace digest after, with how many of its opens dropped a zero-filled tail (and how many of those were of the MANIFEST). |
 
 Use the same `STEPS` and `KEYS` as the run that failed; a seed is a function of all three. To look inside
 a run, run it under a debugger or add `Trace` calls: nothing in the run depends on time, threads or the
@@ -229,7 +233,9 @@ naming the key (`tests/tools/crashtest_damage_test.sh` runs it): the check is sh
 
 CI kills the writer 200 times on Linux and macOS (about a minute), and a further six rounds with
 `--sync`. A process kill leaves the whole page cache behind, so **this test says nothing about power
-loss**; that is the simulator's job. What it shows is that a kill at any point of a write, a flush or
+loss**; that is the simulator's job. It did once find what the simulator's filesystem could not then
+leave: on macOS 14 a kill left the MANIFEST ending in zeros, which is how the zero-filled tail of D6
+came to be tolerated and modelled. What it shows is that a kill at any point of a write, a flush or
 a compaction leaves a database that opens and holds everything it said it did, on a real filesystem.
 
 ## Tests of the repository itself
@@ -313,16 +319,19 @@ The author's machine is a Mac (arm64) with Apple Clang, Homebrew Clang and GCC 1
 
 ### What nothing covers
 
-- **A real power loss.** The simulator models "bytes that were not synced are lost". It does not model a
-  device that acknowledges a flush it has not done, so a drive that lies breaks D1 and D2 and nothing
-  here can tell. A process kill leaves the page cache, so the crash test is not a power cut either.
+- **A real power loss.** The simulator models "bytes that were not synced are lost, or come back as
+  zeros". It does not model a device that acknowledges a flush it has not done, or one that zeroes bytes
+  that were synced, so a drive that lies breaks D1 and D2 and nothing here can tell. A process kill leaves
+  the page cache, so the crash test is not a power cut either.
 - **How a controller or a filesystem reorders writes**, beyond what the simulator's model of ordered
   directory changes and prefix-only file loss says. Anything the POSIX interface does not promise is
   outside what the tests can reach.
 - **What the simulator's filesystem leaves out** (the list is at the top of `tests/testkit/fault_env.h`):
-  a power loss leaves a clean prefix of a file, never zero-filled or garbage tails; `CreateDir` and
-  `RemoveDir` are durable at once; a failed call has no partial effect; stored bytes never change by
-  themselves (a read can come back with a flipped bit, but the bytes at rest do not rot).
+  a power loss leaves a clean prefix of the unsynced part of a file, or zeros in its place from where the
+  synced bytes end, and never a garbage tail or zeros that start inside the unsynced part; a process
+  crash never leaves zeros; `CreateDir` and `RemoveDir` are durable at once; a failed call has no partial
+  effect; stored bytes never change by themselves (a read can come back with a flipped bit, but the
+  bytes at rest do not rot).
 - **Lenient recovery under faults.** No simulator run, fuzz target or crash test opens a database with
   `paranoid_checks = false`; only `tests/db/db_recovery_test.cc` does. The simulator opens with the
   default, under which an open that reads a corrupted byte of a log fails with `Corruption` instead of

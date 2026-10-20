@@ -21,17 +21,21 @@ prose.
 | **D3** | A `WriteBatch` is, after any crash, entirely visible or entirely invisible. |
 | **D4** | A read returns the right value or an error (`Corruption`, `IOError`). It never returns a wrong value, including after a bit flips on the disk (`ReadOptions::verify_checksums` is `true` by default). |
 | **D5** | After a background I/O error, every write returns that error until the database is opened again. Reads keep being served. The effect of the write that failed is undefined (it may or may not be there after the next open), but the batch is still atomic. |
-| **D6** | Two traces of a crash are tolerated in the write-ahead logs whatever `paranoid_checks` says. The first is a record or a header **cut off by the end of a file**, which is ignored. The second is a **gap in the sequence numbers at the start of a log**: its first write is not the one after the newest write of the tables and of the logs replayed before it. That is what a power loss leaves when it takes the unsynced end of one log and keeps unsynced writes of the next. At a gap, replay stops; that log and every later one are renamed `<name>.dropped`, never read again and deleted by nothing but `DestroyDB()`, and the `LOG` says why. Neither trace drops a write that was acknowledged as synced (D1, rule 2). Every other defect the log reader reports is an error at `Open` when `paranoid_checks` is `true` (the default): `Corruption`, or `IOError` for a read error. With `paranoid_checks = false`, replay stops at the first defect, and what is dropped is kept, renamed. A memtable switch does not sync the old log, so after a power loss the last two logs can both end in unsynced bytes. A zero-filled or garbage tail in either is a defect, not a cut-off record. See [ADR 0003](0003-wal-format-and-recovery.md). |
+| **D6** | Three traces of a crash are tolerated whatever `paranoid_checks` says, two of them in the MANIFEST as well as in the write-ahead logs. The first is a record or a header **cut off by the end of a file**, which is ignored. The second, in the logs, is a **gap in the sequence numbers at the start of a log**: its first write is not the one after the newest write of the tables and of the logs replayed before it. That is what a power loss leaves when it takes the unsynced end of one log and keeps unsynced writes of the next. At a gap, replay stops; that log and every later one are renamed `<name>.dropped`, never read again and deleted by nothing but `DestroyDB()`, and the `LOG` says why. The third is **zeros from a record boundary to the end of the file**, which a filesystem leaves when it kept the length of a file and not its data: the reader checks that every byte to the end is zero, so no record can be among them, and the zeros are dropped and the `LOG` names the file and the number of bytes. None of the three drops a write that was acknowledged as synced (D1, rule 2; under D1 a synced byte is never zeroed). Every other defect the log reader reports is an error at `Open` when `paranoid_checks` is `true` (the default), and in the MANIFEST always: `Corruption`, or `IOError` for a read error. With `paranoid_checks = false`, replay of the logs stops at the first defect, and what is dropped is kept, renamed. A memtable switch does not sync the old log, so after a power loss the last two logs can both end in unsynced bytes. A garbage tail in either (bytes that are not all zeros), zeros followed by any byte that is not zero, and zeros that begin inside a record are defects, not a cut-off record. See [ADR 0003](0003-wal-format-and-recovery.md). |
 | **D7** | One directory is open by one `DB` at a time: a `LOCK` file held with `flock` refuses a second open, in the same process or another. |
 <!-- /table:contract -->
 
-D6 was revised twice during development. The first statement said that a defect with valid records after
-it was corruption and a defect at the end was a torn tail. That is false, because the reader drops the
-rest of a block at a defect and can take acknowledged records with it, so the contract was restated in
-terms of what the reader can distinguish. The second revision added the gap: when a memtable switch
-stopped syncing the old log (rule 2), a power loss could leave the end of one log missing and the next
-log's first writes present, and a default open that refused that would leave a database unopenable
-after an ordinary power loss with unsynced writes.
+D6 was revised twice during development and once after the first release. The first statement said
+that a defect with valid records after it was corruption and a defect at the end was a torn tail. That
+is false, because the reader drops the rest of a block at a defect and can take acknowledged records with
+it, so the contract was restated in terms of what the reader can distinguish. The second revision added
+the gap: when a memtable switch stopped syncing the old log (rule 2), a power loss could leave the end of
+one log missing and the next log's first writes present, and a default open that refused that would
+leave a database unopenable after an ordinary power loss with unsynced writes. The third, in 0.1.1, added
+the zeros: the crash test in CI killed a writer on macOS 14 and left its MANIFEST ending in 438 zero
+bytes, the size of the edit it was appending, and 0.1.0 would not open the database at all. Zeros are
+not taken for the end by their position, which the first revision forbade; they are the end because
+every byte from the boundary to the end of the file is read and found to be zero.
 
 ### The order that makes it true
 
@@ -91,7 +95,7 @@ On Linux the engine uses `fdatasync` for files and `fsync` for directories. On m
 | D1, D2, D3 | The simulator's **I4**: after every simulated crash the reopened database must equal the model after some prefix of the writes, at least as long as the last sync, and a batch is never half there; and **I2**'s durable floor: the reopened database's last sequence number is not below that of the last synced write (`tests/testkit/invariants.h`, `tests/sim/sim_test.cc`). The flaws `skip_wal_sync`, `skip_dir_sync` and `skip_manifest_sync` each break one rule above, and each is caught. `tests/db/db_recovery_test.cc` (`PowerLossKeepsSyncedWrites`, `ProcessCrashKeepsUnsyncedWrites`, `APowerLossThatTakesTheEndOfTheOldLogLeavesAPrefix`), `tests/db/db_flush_test.cc` (`ASyncedWriteMakesTheWritesInTheOldLogDurable`, `ASyncedWriteAfterASwitchSyncsTheOldLogAndTheDirectoryFirst`). The real process kill: `shale_crashtest`. |
 | D4 | The simulator's **I1**, which holds every read that returns OK to the model, including while it is flipping bits in what the Env reads, and **I5**, which allows a read to fail only where an injected fault explains it. `tests/io/table_test.cc`, `tests/io/block_test.cc`; the fuzz targets for the block and table readers. |
 | D5 | The simulator's **I6**: a write succeeds after a failed one, and the run fails. `tests/db/db_basic_test.cc` (`WalSyncFailureFailsTheWriteAndEveryOneAfterIt`), `tests/db/db_flush_test.cc`, `tests/db/db_write_test.cc` (`WalSyncFailureStopsWrites`, `WalSyncFailureRecoversAfterReopen`). |
-| D6 | `tests/db/db_recovery_test.cc` and `tests/io/log_test.cc`, listed in [ADR 0003](0003-wal-format-and-recovery.md), among them `ALaterLogIsSetAsideWhenAnEarlierLogLostItsEnd` and `AFirstLogThatLostEverythingIsCaughtByTheManifestsSequenceNumber` for the gap; the simulator holds an open that read corrupted bytes to I4 in full, and reaches the gap at recovery: a deliberate break that removes the check fails I4 at seed 6 (commit [`824b318`][824b318]). |
+| D6 | `tests/db/db_recovery_test.cc` and `tests/io/log_test.cc`, listed in [ADR 0003](0003-wal-format-and-recovery.md), among them `ALaterLogIsSetAsideWhenAnEarlierLogLostItsEnd` and `AFirstLogThatLostEverythingIsCaughtByTheManifestsSequenceNumber` for the gap, and `AZeroFilledTailOfALogIsDroppedByAParanoidOpen`, `AZeroFilledTailOfTheManifestIsDroppedByAParanoidOpen` and `ZerosFollowedByAnyOtherByteAreStillADefect` for the zeros; `tests/db/version_set_test.cc` (`TheManifestThatAKillOnMacOs14LeftEndingInZerosRecovers`, on the MANIFEST that CI's crash test left). The simulator holds an open that read corrupted bytes to I4 in full, and reaches the gap at recovery: a deliberate break that removes the check fails I4 at seed 6 (commit [`824b318`][824b318]). Its power loss leaves zeros in place of the unsynced tail of one file in four, which made 190 of 200 seeds fail before the reader tolerated them, and the default run is held to a floor of opens that drop such zeros. |
 | D7 | `tests/db/db_basic_test.cc` (`OpenSamePathTwiceFails`); `tests/io/env_posix_test.cc` for the lock. |
 <!-- /table:checks -->
 
@@ -102,8 +106,8 @@ names it. Two files grow after they are written, and each grows in one way only:
 MANIFEST only have a record appended, each record checksummed. The log is covered by rule 1 (a record is
 in the log before the write is acknowledged) and by [ADR 0003](0003-wal-format-and-recovery.md) (a
 replayed log is never appended to), and the MANIFEST by rule 5 (an edit is synced before the version it
-makes is installed), so a crash that cuts the last record of either leaves a file that ends short, which
-the reader takes for its end
+makes is installed), so a crash that cuts the last record of either leaves a file that ends short, or
+in zeros from a record boundary, which the reader takes for its end
 (`ManifestCutAnywhereAfterItsFirstRecordRecoversTheRecordsBeforeTheCut` in
 `tests/db/version_set_test.cc`) and that no later write is appended to, because every open starts a new
 log and a new MANIFEST. A third file, `CURRENT`, is never changed in place: it is replaced whole by an
@@ -124,10 +128,15 @@ holds the engine to D1 to D6 after every crash, not only at the end of a run.
   keeps unsynced writes of the next, an open sets the later logs aside as `.dropped` files (D6). They hold
   no write that was acknowledged as synced, and one or more of them can appear after each such power
   loss; the engine never deletes them except in `DestroyDB()` ([operations](../operations.md)).
-- **Two logs can end in unsynced bytes.** Because a switch does not sync the old log, a zero-filled or
-  garbage tail, which the reader reports as a defect and a default open refuses, can be in either of the
-  last two logs and not only the newest. The simulator's filesystem leaves clean prefixes only, and does
-  not model such tails ([testing](../testing.md#what-the-tests-do-not-cover)).
+- **Two logs can end in unsynced bytes.** Because a switch does not sync the old log, a zero-filled
+  tail, which an open drops, or a garbage tail, which the reader reports as a defect and a default open
+  refuses, can be in either of the last two logs and not only the newest. The simulator's filesystem
+  leaves zeros in place of a file's unsynced bytes one time in four and never garbage
+  ([testing](../testing.md#what-the-tests-do-not-cover)).
+- **Zeros are trusted to be unsynced.** An open drops zeros at the end of a log or the MANIFEST because
+  under D1 a synced byte is never zeroed. A device or filesystem that zeroes synced bytes breaks D1, and
+  the writes in them are then dropped without a failure; the `LOG` line that names the zeros is the only
+  trace.
 - **D1 is as good as the device.** A drive that acknowledges a flush it has not done breaks D1 and D2
   and nothing in the engine can tell. The simulator models "unsynced bytes are lost" and does not model
   a device that lies.

@@ -150,7 +150,7 @@ The checksum is the masked CRC-32C of the type byte followed by the payload. The
 
 | Type | Value | Meaning |
 | --- | --- | --- |
-| zero | 0 | Never written as a record. The zero padding at the end of a block is skipped, but a tail of zeros where a record should begin reads as this, and is reported as a defect. |
+| zero | 0 | Never written as a record. The zero padding at the end of a block is skipped. Zeros where a record should begin read as this: if every byte from there to the end of the file is zero, they are the end of the log, as a crash leaves it; otherwise they are reported as a defect. |
 | `FULL` | 1 | A whole logical record. |
 | `FIRST` | 2 | The first fragment of a record that spans blocks. |
 | `MIDDLE` | 3 | A fragment that is neither first nor last. |
@@ -188,12 +188,22 @@ it is exact except for one rare false report, which is loud
   the end of the file counts as this only if the bytes that are there are *not* a whole fragment: where
   some length, up to what is left, gives the checksum the header holds, the fragment was whole and its
   length is damaged, and that is reported (commit [`89915a1`][89915a1]).
+- **Silent too: zeros from a record boundary to the end of the file.** Where a header would begin,
+  every byte from there to the end of the file is zero, at least a header's worth. That is what a
+  filesystem leaves when it kept the length of a file and not its data. The reader reads to the end of
+  the file to be sure of it, returns every record before the zeros, and says how many zero bytes it
+  dropped; recovery writes that number to the `LOG`.
 - **Reported**, once per defect, with the bytes it drops: a read error; `checksum mismatch`; `bad
-  record length`; `unknown record type` (zero included); `missing start of fragmented record`; and
-  `partial record without end`. A defect drops the rest of its block.
+  record length`; `unknown record type` (zero included, unless the zeros run to the end of the file as
+  above); `missing start of fragmented record`; and `partial record without end`. A defect drops the
+  rest of its block. Zeros followed by any byte that is not zero are reported this way, one report for
+  each block they reach into, and so are zeros that begin inside a record: its header, or a part of it,
+  is not zero, and it is a damaged record.
 
 A report is never "the log ends here", wherever in the file it falls, because dropping the rest of a
-block can drop intact records that were acknowledged. What `Open` does with a report is in
+block can drop intact records that were acknowledged. Zeros that end the log are different only
+because every byte after them has been read and is zero: no record can be among them. What `Open`
+does with a report is in
 [operations](operations.md#a-database-that-will-not-open) and
 [ADR 0003](design/0003-wal-format-and-recovery.md).
 
@@ -353,8 +363,9 @@ The MANIFEST is a file in the [log format](#the-write-ahead-log): one record for
 edit**, replayed in order to rebuild the table set after a restart. Its **first record is a snapshot**
 of the whole state, an edit that adds every live file, and every later record is the edit that one
 flush or compaction made. A new MANIFEST is started every time the database opens, because the one
-that was read may end in a torn record, which cannot be appended to, and so that the file does not
-grow for ever.
+that was read may end in a torn record, or in zeros, which cannot be appended to, and so that the file
+does not grow for ever. A MANIFEST is read as a log is, and a torn record or zeros from a record
+boundary to the end of the file are its end; any other defect fails the open.
 
 An edit is a sequence of fields, each a tag and then the field's contents, and nothing else; an edit
 with no field set is the empty string. The tag is a varint32.
