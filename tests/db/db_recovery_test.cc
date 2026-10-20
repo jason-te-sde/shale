@@ -68,6 +68,12 @@ class DBRecoveryTest : public DBTestBase {
     }
   }
 
+  // The MANIFEST that CURRENT names, with its directory.
+  std::string CurrentManifestPath() {
+    const std::string current = env_->FileContents(CurrentFileName(kDb));
+    return std::string(kDb) + "/" + current.substr(0, current.find('\n'));
+  }
+
   // Changes one bit of the byte at `offset` of `fname`.
   void FlipByte(const std::string& fname, uint64_t offset) {
     std::string contents = env_->FileContents(fname);
@@ -348,20 +354,86 @@ TEST_F(DBRecoveryTest, ACurrentWithAFlippedBitFailsOpenAndLosesNothing) {
   ExpectPresent(0, 20);
 }
 
-TEST_F(DBRecoveryTest, ZeroFilledTailFailsParanoidOpen) {
+// A crash can leave a log or a MANIFEST longer than what reached the disk, its end zeros (D6). From
+// a record boundary to the end of the file that is a trace of the crash, dropped whatever
+// paranoid_checks says, and the LOG names the file and the number of bytes. Zeros with anything
+// after them are a defect, as before.
+
+TEST_F(DBRecoveryTest, AZeroFilledTailOfALogIsDroppedByAParanoidOpen) {
+  for (const bool paranoid : {true, false}) {
+    SCOPED_TRACE(paranoid ? "paranoid" : "lenient");
+    StartOver();
+    Reopen();
+    PutRange(0, 5);
+    Close();
+    const std::string log = NewestLogFile(env_.get(), kDb);
+    env_->SetFileContents(log, env_->FileContents(log) + std::string(4096, '\0'));
+
+    Options options = CurrentOptions();
+    options.paranoid_checks = paranoid;
+    ASSERT_OK(TryReopen(options));  // a failed open leaves no database to read
+    ExpectPresent(0, 5);
+    EXPECT_EQ(dbfull()->TEST_LastSequence(), 5u);
+    const std::string info = env_->FileContents(InfoLogFileName(kDb));
+    EXPECT_TRUE(Contains(info, "WAL " + log + ": dropped 4096 zero byte(s)")) << info;
+    for (const std::string& name : DbFiles()) {
+      EXPECT_FALSE(Contains(name, ".dropped")) << "nothing is set aside: " << name;
+    }
+  }
+}
+
+TEST_F(DBRecoveryTest, ZerosFollowedByAnotherByteInALogFailAParanoidOpen) {
   PutRange(0, 5);
   Close();
   const std::string log = NewestLogFile(env_.get(), kDb);
-  env_->SetFileContents(log, env_->FileContents(log) + std::string(4096, '\0'));
+  env_->SetFileContents(log, env_->FileContents(log) + std::string(4096, '\0') + "\x01");
 
   const Status s = TryReopen(CurrentOptions());
   EXPECT_TRUE(s.IsCorruption()) << s.ToString();
   EXPECT_TRUE(Contains(s, "WAL corruption in")) << s.ToString();
+  EXPECT_TRUE(Contains(s, "unknown record type")) << s.ToString();
 
   Options lenient = CurrentOptions();
   lenient.paranoid_checks = false;
   Reopen(lenient);
   ExpectPresent(0, 5);
+}
+
+TEST_F(DBRecoveryTest, AZeroFilledTailOfTheManifestIsDroppedByAParanoidOpen) {
+  // As the crash test on macOS 14 left it: the MANIFEST ends in as many zeros as one edit's record.
+  for (const bool paranoid : {true, false}) {
+    SCOPED_TRACE(paranoid ? "paranoid" : "lenient");
+    StartOver();
+    Reopen();
+    PutRange(0, 5);
+    ASSERT_OK(db_->Flush());
+    PutRange(5, 10);
+    Close();
+    const std::string manifest = CurrentManifestPath();
+    env_->SetFileContents(manifest, env_->FileContents(manifest) + std::string(438, '\0'));
+
+    Options options = CurrentOptions();
+    options.paranoid_checks = paranoid;
+    ASSERT_OK(TryReopen(options));  // a failed open leaves no database to read
+    ExpectPresent(0, 10);
+    const std::string info = env_->FileContents(InfoLogFileName(kDb));
+    EXPECT_TRUE(Contains(info, "MANIFEST " + manifest + ": dropped 438 zero byte(s)")) << info;
+  }
+}
+
+TEST_F(DBRecoveryTest, ZerosFollowedByAnotherByteInTheManifestFailOpen) {
+  PutRange(0, 5);
+  Close();
+  const std::string manifest = CurrentManifestPath();
+  env_->SetFileContents(manifest, env_->FileContents(manifest) + std::string(438, '\0') + "\x01");
+  for (const bool paranoid : {true, false}) {
+    Options options = CurrentOptions();
+    options.paranoid_checks = paranoid;
+    const Status s = TryReopen(options);
+    EXPECT_TRUE(s.IsCorruption()) << s.ToString();
+    EXPECT_TRUE(Contains(s, "unknown record type")) << s.ToString();
+    EXPECT_TRUE(Contains(s, manifest)) << s.ToString();
+  }
 }
 
 TEST_F(DBRecoveryTest, AReadErrorAnywhereInOpenIsAnIOErrorAndLosesNothing) {

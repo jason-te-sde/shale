@@ -280,6 +280,11 @@ class VersionSet {
   /// WriteNewManifest(). The database deletes MANIFESTs with a lower number.
   uint64_t ManifestFileNumber() const { return manifest_file_number_; }
 
+  /// Returns how many zero bytes the MANIFEST that Recover() read ended in, from a record boundary
+  /// to the end of the file, which it dropped as the trace of a crash (D6); zero if the MANIFEST
+  /// did not end so, and before Recover() has succeeded.
+  uint64_t RecoveredZeroTailBytes() const { return recovered_zero_tail_bytes_; }
+
   /// Returns the numbers of the files of every Version that is still alive anywhere: the current
   /// one, and every earlier one that a reader or an iterator still holds. These are the files that
   /// must not be deleted. Versions are tracked by weak pointer, so one that is dropped leaves the
@@ -317,6 +322,7 @@ class VersionSet {
   uint64_t next_file_number_;
   SequenceNumber last_sequence_ = 0;
   uint64_t manifest_file_number_ = 0;
+  uint64_t recovered_zero_tail_bytes_ = 0;
   bool loaded_ = false;  // CreateNew() or Recover() has succeeded
 
   // The MANIFEST being appended to, or null. The writer is declared after the file it writes to,
