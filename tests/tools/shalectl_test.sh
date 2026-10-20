@@ -353,6 +353,22 @@ if ! grep -qF -e "standard output" "$tmp/err"; then
   fail "scan into a closed pipe: standard error does not say what failed" "$(cat "$tmp/err")"
 fi
 
+# A log and a MANIFEST that end in zeros from a record boundary to the end of the file, as a crash
+# can leave them (D6): the dumps show every record, say how many zero bytes the file ended in, and
+# exit 0, since that is the trace of a crash and not damage.
+db5="$tmp/db5"
+check "put for a zero-filled tail" 0 '' --db="$db5" --create put a 1
+log5="$(files_of "$db5" .log)"
+head -c 438 /dev/zero >>"$log5"
+check "dump-wal of a log that ends in zeros" 0 '*' dump-wal "$log5"
+out_has "dump-wal of a log that ends in zeros shows its record" "  put a 1"
+err_has "dump-wal of a log that ends in zeros" "438 zero byte(s)"
+manifest5="$db5/$(head -n 1 "$db5/CURRENT")"
+head -c 438 /dev/zero >>"$manifest5"
+check "dump-manifest of a MANIFEST that ends in zeros" 0 '*' dump-manifest "$manifest5"
+out_has "dump-manifest of a MANIFEST that ends in zeros shows its edits" "VersionEdit {"
+err_has "dump-manifest of a MANIFEST that ends in zeros" "438 zero byte(s)"
+
 # A damaged log and a damaged MANIFEST: the dumps say so and exit with status 3.
 db4="$tmp/db4"
 check "put for a damaged log" 0 '' --db="$db4" --create put a 1
