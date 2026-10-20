@@ -73,6 +73,10 @@ std::string ParentOf(const std::string& path) {
 constexpr uint64_t kCrashStream = 0x6372617368ULL;
 constexpr uint64_t kFaultStream = 0x6661756c74ULL;
 
+// One power loss in this many leaves the unsynced bytes of a file as zeros instead of a prefix of
+// them, drawn for each file that has unsynced bytes.
+constexpr uint32_t kZeroFillOneIn = 4;
+
 }  // namespace
 
 // What the disk holds for one file: the bytes that reached it, and how many leading ones are
@@ -524,19 +528,26 @@ class FaultState {
       inode->file = file;
       files_[name] = std::move(inode);
     }
-    // What each file keeps. The names are visited in order, and one draw is made per file that has
-    // unsynced bytes, so a seed always loses the same bytes of the same files. A file that is under
-    // two names in the durable view (a rename across directories that was kept on one side only)
-    // is visited twice; the second visit finds nothing unsynced, because the first made what
+    // What each file keeps. The names are visited in order, and the draws are made per file that
+    // has unsynced bytes, so a seed always loses the same bytes of the same files. A file that is
+    // under two names in the durable view (a rename across directories that was kept on one side
+    // only) is visited twice; the second visit finds nothing unsynced, because the first made what
     // survived durable. Bytes still in a handle never reached the file, so they are not here.
     for (const auto& entry : durable_) {
       File& file = *entry.second;
       const uint64_t unsynced = file.data.size() - file.synced_size;
-      uint64_t kept = 0;
-      if (kind == Crash::kPowerLoss && unsynced > 0) {
-        kept = crash_random_.Next() % (unsynced + 1);
+      if (kind == Crash::kPowerLoss && unsynced > 0 && crash_random_.OneIn(kZeroFillOneIn)) {
+        // The length of the file reached the disk and its data did not: the bytes appended since
+        // the last sync read back as zeros, as many as were written.
+        std::fill(file.data.begin() + static_cast<std::ptrdiff_t>(file.synced_size),
+                  file.data.end(), '\0');
+      } else {
+        uint64_t kept = 0;
+        if (kind == Crash::kPowerLoss && unsynced > 0) {
+          kept = crash_random_.Next() % (unsynced + 1);
+        }
+        file.data.resize(static_cast<size_t>(file.synced_size + kept));
       }
-      file.data.resize(static_cast<size_t>(file.synced_size + kept));
       // What the disk kept is on the disk now.
       file.synced_size = file.data.size();
     }
