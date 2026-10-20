@@ -4,3 +4,4 @@
 191   # the same in a MANIFEST: the open named files that were not there
 0     # a power loss left the newest log ending in zeros, which the open refused (D6)
 48    # the same, and at step 199 the MANIFEST, the shape that a kill left on macOS 14 in CI
+1462  # a compaction's edit left as zeros at the end of the MANIFEST at step 40 (kManifestZeroTailSeed)

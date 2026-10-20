@@ -119,8 +119,10 @@ void Add(SimStats* total, const SimStats& part) {
 //
 //   opens that dropped a zero-filled tail      142       71
 //
-// Of those opens, 3 dropped the zeros of a MANIFEST, at seeds 7, 13 and 48; 4000 seeds made 84,
-// about one in 50 seeds, too few for a floor that scales, so the run is held only to having one.
+// Of those opens, 3 dropped the zeros of a MANIFEST, at seeds 7, 13 and 48; 4000 seeds made 84, in
+// 84 seeds, about one in 50. That is too few for a floor over the seeds of a run: which seeds have
+// one moves with every change to what a run does, and then 20 seeds have none two times in three,
+// 50 seeds one time in three. One seed is held to it instead (kManifestZeroTailSeed, below).
 //
 // A simulator that stops provoking something, because an operation was reweighted or a
 // precondition began to skip it, falls under its floor and fails here, where a run that merely
@@ -177,16 +179,13 @@ void ExpectFierce(const SimStats& total, uint64_t seeds, int steps, int keys) {
     return;
   }
   // The simulator also has to have done what no floor names: stopped writes on a failure, met
-  // faults in reads and in opens, checked for orphans, reopened, gone below the first levels, and
-  // dropped the zeros at the end of a MANIFEST.
+  // faults in reads and in opens, checked for orphans, reopened, and gone below the first levels.
   EXPECT_GT(total.reopens, 0u);
   EXPECT_GT(total.write_failures, 0u) << "no failure ever stopped the database's writes";
   EXPECT_GT(total.read_failures, 0u) << "no read ever failed for a fault";
   EXPECT_GT(total.open_failures, 0u) << "no open ever failed for a fault";
   EXPECT_GT(total.orphan_checks, 0u) << "the directory was never checked for orphan tables";
   EXPECT_GE(total.deepest_level, 2u) << "no table ever reached level 2";
-  EXPECT_GT(total.manifest_zero_tail_opens, 0u)
-      << "no open ever dropped the zeros that a MANIFEST ended in";
   const auto floor_of = [seeds](uint64_t per_default_run) {
     return per_default_run * seeds / kDefaultSeeds;
   };
@@ -255,6 +254,33 @@ TEST(SimulationTest, RegressionSeeds) {
     const SimResult result = RunSeed(options);
     EXPECT_TRUE(result.ok) << "regression seed " << seed << ": " << result.failure;
   }
+}
+
+// The seed that holds the simulator to the zeros at the end of a MANIFEST, the shape that a kill
+// left on macOS 14 in CI. At step 40 an armed failure of a sync stops a compaction after its edit
+// was handed to the MANIFEST, and the power loss of the reopen leaves the edit as 66 zero bytes,
+// which the open drops. Of the 84 seeds in 0 to 3999 that drop such zeros, it is the one whose open
+// comes first, so that the fewest changes to what a run does reach it. A seed is a function of its
+// run: this fails only when the run of this seed changes, whatever seeds a run of the simulator is
+// given, and then it names the seed. A change that does that changes what runs do, and usually the
+// golden digests of determinism_test with it. Choose another seed then, from a run of
+// `SHALE_SIM_VERBOSE=1 SHALE_SIM_SEEDS=2000` and a seed whose line says "(MANIFEST 1)", and put it
+// here and in regression_seeds.txt.
+constexpr uint64_t kManifestZeroTailSeed = 1462;
+
+TEST(SimulationTest, OneRegressionSeedDropsTheZerosThatAManifestEndedIn) {
+  const std::vector<uint64_t> regression = RegressionSeeds();
+  EXPECT_NE(std::find(regression.begin(), regression.end(), kManifestZeroTailSeed),
+            regression.end())
+      << "seed " << kManifestZeroTailSeed << " is not in regression_seeds.txt";
+  SimOptions options;
+  options.seed = kManifestZeroTailSeed;
+  const SimResult result = RunSeed(options);
+  ASSERT_TRUE(result.ok) << "seed " << kManifestZeroTailSeed << ": " << result.failure;
+  EXPECT_GT(result.stats.manifest_zero_tail_opens, 0u)
+      << "seed " << kManifestZeroTailSeed
+      << " no longer has an open that drops the zeros at the end of a MANIFEST; choose another, as "
+         "the comment on kManifestZeroTailSeed says";
 }
 
 TEST(SimulationTest, CrashFreeRunsToo) {
