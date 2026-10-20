@@ -1,5 +1,6 @@
 #include "io/log_reader.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -13,6 +14,14 @@
 #include "util/crc32c.h"
 
 namespace shale::log {
+
+namespace {
+
+bool AllZeros(std::string_view bytes) {
+  return std::all_of(bytes.begin(), bytes.end(), [](char c) { return c == '\0'; });
+}
+
+}  // namespace
 
 Reader::Reporter::~Reporter() = default;
 
@@ -102,8 +111,9 @@ bool Reader::ReadRecord(std::string_view* record, std::string* scratch) {
         break;
 
       case Physical::kEof:
-        // A FIRST or a MIDDLE without its LAST is where a writer that died leaves the file: not
-        // a defect, and the half-read record is dropped without a word.
+        // A FIRST or a MIDDLE without its LAST is where a writer that died leaves the file, and so
+        // is one that zeros to the end of the file follow: not a defect, and the half-read record
+        // is dropped without a word.
         scratch->clear();
         return false;
     }
@@ -112,6 +122,19 @@ bool Reader::ReadRecord(std::string_view* record, std::string* scratch) {
 
 Reader::Physical Reader::ReadPhysicalRecord(RecordType* type, std::string_view* payload) {
   for (;;) {
+    // What a look past zeros read, and found not to be their end, is reported first, one block at
+    // a time, as reading the blocks one by one would have reported it. See ZerosRunToTheEnd().
+    if (zero_blocks_to_report_ > 0) {
+      zero_blocks_to_report_--;
+      Report(kBlockSize, Status::Corruption("unknown record type"));
+      return Physical::kBad;
+    }
+    if (!read_error_.ok()) {
+      Report(kBlockSize, read_error_);
+      read_error_ = Status::OK();
+      return Physical::kEof;
+    }
+
     if (buffer_.size() < kHeaderSize) {
       if (eof_) {
         // What is left cannot hold a header: the file ended inside one, or inside the padding
@@ -121,20 +144,10 @@ Reader::Physical Reader::ReadPhysicalRecord(RecordType* type, std::string_view* 
       }
       // The last read filled a block, so what is left of it is its trailer, which is padding
       // (or nothing), and the next block starts at the next read.
-      buffer_ = std::string_view();
-      std::string_view block;
-      const Status s = file_->Read(kBlockSize, &block, backing_store_.data());
+      const Status s = ReadBlock();
       if (!s.ok()) {
-        eof_ = true;
-        block_length_ = 0;
         Report(kBlockSize, s);
         return Physical::kEof;
-      }
-      end_of_buffer_offset_ += block.size();
-      buffer_ = block;
-      block_length_ = block.size();
-      if (block.size() < kBlockSize) {
-        eof_ = true;
       }
       continue;
     }
@@ -144,6 +157,32 @@ Reader::Physical Reader::ReadPhysicalRecord(RecordType* type, std::string_view* 
                           (static_cast<size_t>(static_cast<uint8_t>(header[5])) << 8);
     const uint8_t raw_type = static_cast<uint8_t>(header[6]);
     const size_t position_in_block = block_length_ - buffer_.size();
+
+    // Zeros where a header starts, and in every byte from there to the end of the file, are what a
+    // filesystem leaves where it kept the length of a file and not its data (D6). They end the log
+    // without a report, as a record cut short by the end of the file does.
+    //
+    // Everywhere else a zero type is a defect, and a defect is never taken for the end of the log
+    // by where it falls: the reader drops the rest of a block at one, and the records it drops can
+    // be ones that were acknowledged, whether or not anything valid follows. What makes these
+    // zeros different is that every byte from here to the end of the file is read and found to be
+    // zero, so no record, whole or damaged, comes after them to be swallowed, and the only bytes
+    // dropped are the zeros. Under D1's premise a synced byte is never zeroed, so none of them was
+    // acknowledged as synced. A zero header followed by any byte that is not zero is reported
+    // below, exactly as before, and so are zeros that start inside a record, whose header is not
+    // zero.
+    if (raw_type == kZeroType && AllZeros(buffer_)) {
+      const size_t in_this_block = buffer_.size();
+      uint64_t after = 0;
+      if (ZerosRunToTheEnd(&after)) {
+        zero_tail_bytes_ = in_this_block + after;
+        return Physical::kEof;
+      }
+      // Something that is not zero follows. This header is a zero type, reported with the rest of
+      // its block, as any is.
+      Report(in_this_block, Status::Corruption("unknown record type"));
+      return Physical::kBad;
+    }
 
     // The header's own fields are judged before the file's end and before the checksum, so that a
     // header that cannot be right is reported whatever follows it.
@@ -207,6 +246,54 @@ bool Reader::HoldsAWholeFragmentShorterThan(const char* header, size_t length) c
     }
     crc = crc32c::Extend(crc, payload + candidate, 1);
   }
+}
+
+Status Reader::ReadBlock() {
+  buffer_ = std::string_view();
+  std::string_view block;
+  const Status s = file_->Read(kBlockSize, &block, backing_store_.data());
+  if (!s.ok()) {
+    eof_ = true;
+    block_length_ = 0;
+    return s;
+  }
+  end_of_buffer_offset_ += block.size();
+  buffer_ = block;
+  block_length_ = block.size();
+  if (block.size() < kBlockSize) {
+    eof_ = true;
+  }
+  return Status::OK();
+}
+
+bool Reader::ZerosRunToTheEnd(uint64_t* bytes) {
+  // Every block after this one is read, and every byte of it checked, until the end of the file or
+  // a byte that is not zero. The blocks of zeros on the way are not kept, only counted: they are
+  // either the end of the log or one report each.
+  uint64_t zeros = 0;
+  size_t blocks = 0;
+  while (!eof_) {
+    const Status s = ReadBlock();
+    if (!s.ok()) {
+      // What the rest of the file holds is unknown, so the zeros are not taken for its end: they
+      // are reported, and then the failed read, as reading on block by block would have.
+      zero_blocks_to_report_ = blocks;
+      read_error_ = s;
+      return false;
+    }
+    if (!AllZeros(buffer_)) {
+      // The blocks of zeros before this one were each a whole block, since a block that is not
+      // whole ends the file, and are reported. This one is read from its start, as it would be
+      // after them.
+      zero_blocks_to_report_ = blocks;
+      return false;
+    }
+    zeros += buffer_.size();
+    blocks++;
+  }
+  buffer_ = std::string_view();
+  *bytes = zeros;
+  return true;
 }
 
 Reader::Physical Reader::DropRestOfBlock(std::string_view reason) {

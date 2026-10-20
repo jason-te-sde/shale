@@ -1125,9 +1125,12 @@ TEST_F(LogTest, ZerosFollowedByAnyOtherByteAreStillADefect) {
   }
 }
 
-TEST_F(LogTest, ZerosWithOneOtherByteAnywhereAreNeverTakenForTheEnd) {
-  // Wherever the one byte that is not zero falls, in the first header, at the end of a block, in a
-  // later block or at the very end, the zeros are reported and the zero tail is empty.
+TEST_F(LogTest, ZerosWithOneOtherByteAnywhereAreReportedUpToIt) {
+  // Wherever the one byte that is not zero falls, in the first header after the records, at the end
+  // of a block, in a later block or at the very end, every block from the first zero to the one
+  // that holds it is reported, once each, and the records before them are all returned. Only the
+  // zeros after it that start a block and run to the end of the file are taken for the end of the
+  // log: from that block on, nothing that is not zero is left to be swallowed.
   const std::string valid = WriteContents({"foo", "bar"});
   Random rnd(301);
   for (int i = 0; i < 300; i++) {
@@ -1137,17 +1140,23 @@ TEST_F(LogTest, ZerosWithOneOtherByteAnywhereAreNeverTakenForTheEnd) {
                  " bytes into them");
     std::string contents = valid + std::string(zeros, '\0');
     contents[valid.size() + at] = static_cast<char>(1 + rnd.Uniform(255));
+    const size_t size = contents.size();
+    const size_t block = (valid.size() + at) / kBlockSize;  // the block that holds the byte
+    const size_t after = std::min(size, (block + 1) * kBlockSize);
     ReportCollector reports;
     uint64_t zero_tail = 99;
-    const Records records = ReadContents(contents, &reports, true, &zero_tail);
-    EXPECT_EQ(zero_tail, 0u);
-    ASSERT_GE(records.size(), 2u);
-    EXPECT_EQ(records[0], "foo");
-    EXPECT_EQ(records[1], "bar");
-    if (zeros >= kHeaderSize) {
-      // Fewer bytes than a header are a header that the end of the file cut off, which is silent.
-      EXPECT_FALSE(reports.messages.empty());
+    EXPECT_EQ(ReadContents(contents, &reports, true, &zero_tail), (Records{"foo", "bar"}));
+    if (zeros < kHeaderSize) {
+      // Too few bytes for a header: one that the end of the file cut off, which is silent.
+      EXPECT_EQ(reports.messages, Records{});
+      EXPECT_EQ(zero_tail, 0u);
+      continue;
     }
+    EXPECT_EQ(reports.messages.size(), block + 1) << "one report for each block up to the byte";
+    EXPECT_EQ(reports.dropped, after - valid.size());
+    // What follows that block is zeros to the end, or nothing; fewer than a header's worth of them
+    // are a header cut off.
+    EXPECT_EQ(zero_tail, size - after >= kHeaderSize ? size - after : 0u);
   }
 }
 

@@ -41,7 +41,8 @@ uint64_t LeastHeaderBytes(size_t size) {
   return fragments * log::kHeaderSize;
 }
 
-void ReadAll(const std::string& file_name, Env* env, size_t input_size, bool checksum) {
+void ReadAll(const std::string& file_name, Env* env, std::string_view input, bool checksum) {
+  const size_t input_size = input.size();
   std::unique_ptr<SequentialFile> file;
   SHALE_FUZZ_CHECK(env->NewSequentialFile(file_name, &file).ok());
   CountingReporter reporter;
@@ -72,12 +73,23 @@ void ReadAll(const std::string& file_name, Env* env, size_t input_size, bool che
 
     fuzz::Touch(record);
   }
-  // What a log gives up is a record, which the reader returns, or a defect, which it reports with
-  // the bytes it made it drop, "so that the figures of a log add up to the bytes lost": the two do
-  // not share a byte, and the headers of the records returned are in the file too. A reader that
-  // returns the bytes of a fragment in two records, or in one and in a report, or that joins a
-  // record that a defect interrupted to the next one, counts some byte twice and fails this.
-  SHALE_FUZZ_CHECK(returned_bytes + header_bytes + reporter.dropped <= input_size);
+  // The zeros that the log ended in, if it did, are the last bytes of the file, every one of them
+  // zero, at least a header's worth, and after the last record returned: a reader that took zeros
+  // for the end of the log with a byte that is not zero after them, or with a record in them,
+  // fails here.
+  const uint64_t zero_tail = reader.ZeroTailBytes();
+  SHALE_FUZZ_CHECK(zero_tail <= input_size);
+  SHALE_FUZZ_CHECK(zero_tail == 0 || zero_tail >= log::kHeaderSize);
+  const size_t zeros_start = input_size - static_cast<size_t>(zero_tail);
+  SHALE_FUZZ_CHECK(zeros_start >= previous_end);
+  SHALE_FUZZ_CHECK(input.find_first_not_of('\0', zeros_start) == std::string_view::npos);
+  // What a log gives up is a record, which the reader returns, a defect, which it reports with the
+  // bytes it made it drop, "so that the figures of a log add up to the bytes lost", or the zeros it
+  // ended in: the three do not share a byte, and the headers of the records returned are in the
+  // file too. A reader that returns the bytes of a fragment in two records, or in one and in a
+  // report, or that joins a record that a defect interrupted to the next one, or that counts zeros
+  // it reported as the end of the log as well, counts some byte twice and fails this.
+  SHALE_FUZZ_CHECK(returned_bytes + header_bytes + reporter.dropped + zero_tail <= input_size);
   // A log that has ended stays ended.
   SHALE_FUZZ_CHECK(!reader.ReadRecord(&record, &scratch));
 }
@@ -89,7 +101,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
   const std::string name = "/wal.log";
   const std::string_view bytes(reinterpret_cast<const char*>(data), size);
   const std::unique_ptr<shale::Env> env = shale::fuzz::EnvWithFile(name, bytes);
-  shale::ReadAll(name, env.get(), size, /*checksum=*/true);
-  shale::ReadAll(name, env.get(), size, /*checksum=*/false);
+  shale::ReadAll(name, env.get(), bytes, /*checksum=*/true);
+  shale::ReadAll(name, env.get(), bytes, /*checksum=*/false);
   return 0;
 }
