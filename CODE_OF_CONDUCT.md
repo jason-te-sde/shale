@@ -10,7 +10,9 @@ personal attacks, discrimination, and publishing other people's private informat
 
 ## Reporting
 
-If you see or experience behaviour that breaks the Code of Conduct, report it privately to the maintainer
-at te.r@northeastern.edu, with `shale conduct` in the subject. All reports are read and handled
-confidentially, and in good faith. The consequences are the ones the Covenant describes in its
-enforcement guidelines, from a private warning to a permanent ban, in proportion to what happened.
+If you see or experience behaviour that breaks the Code of Conduct, report it to the maintainer,
+[@jason-te-sde](https://github.com/jason-te-sde). For a report that should not be public, open an issue
+that says only that you have a conduct report, with no details, and the maintainer will arrange a
+private way to talk. All reports are read and handled confidentially, and in good faith. The
+consequences are the ones the Covenant describes in its enforcement guidelines, from a private warning
+to a permanent ban, in proportion to what happened.
