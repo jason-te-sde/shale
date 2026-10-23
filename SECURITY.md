@@ -11,12 +11,15 @@ line.
 
 ## Reporting a vulnerability
 
-**Please do not open a public issue for a security problem.**
+**Please do not put the details of a security problem in a public issue.**
 
-Report it privately, by email to the maintainer at te.r@northeastern.edu, with `shale security` in the
-subject. The repository does not use GitHub's private vulnerability reporting.
+Open an issue that says only that you have a security report for shale, with no details and no input.
+The maintainer, [@jason-te-sde](https://github.com/jason-te-sde), will then open a draft GitHub security
+advisory and add you to it, and the report and its fix are discussed there, in private. The repository
+does not have GitHub's private vulnerability reporting switched on, so its Security tab has no button
+for a report.
 
-Please include:
+In the advisory, please include:
 
 - what you found and what it lets an attacker do;
 - the version or commit, the compiler and the operating system;
