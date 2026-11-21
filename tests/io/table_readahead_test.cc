@@ -355,8 +355,8 @@ TEST_F(TableReadaheadTest, FileCutShortWhileReadingAheadIsTruncatedBlockRead) {
   const Drained rest = Drain(it.get(), /*from_first=*/false);
   seen.insert(seen.end(), rest.entries.begin(), rest.entries.end());
   EXPECT_EQ(seen, Prefix(*entries_, seen.size()));
-  EXPECT_LT(seen.size(), (*first_entry_)[40] + 1);
-  EXPECT_GE(seen.size(), (*first_entry_)[39]);
+  // Block 39 lies wholly before the cut, so its entries are read and the scan ends at block 40.
+  EXPECT_EQ(seen, EntriesOfBlocks(0, 40));
   EXPECT_EQ(rest.status.ToString(), "Corruption: truncated block read");
 }
 
@@ -413,6 +413,12 @@ TEST_F(TableReadaheadTest, BlocksLargerThanTheCapAreReadAlone) {
   EXPECT_OK(drained.status);
   EXPECT_EQ(drained.entries, entries);
   EXPECT_EQ(counting_->random_reads(), handles.size());
+  // And each of them alone: a fill of a block this size would read the bytes after it too.
+  uint64_t stored_bytes = 0;
+  for (const BlockHandle& handle : handles) {
+    stored_bytes += handle.size + kBlockTrailerSize;
+  }
+  EXPECT_EQ(counting_->random_read_bytes(), stored_bytes);
 }
 
 TEST_F(TableReadaheadTest, UnverifiedScanThatReadsAheadLeavesNothingInTheCache) {
@@ -442,6 +448,10 @@ TEST_F(TableReadaheadTest, UnverifiedScanThatReadsAheadLeavesNothingInTheCache) 
   const Drained strict = Drain(it.get());
   EXPECT_EQ(strict.entries, EntriesOfBlocks(0, 4));
   EXPECT_EQ(strict.status.ToString(), "Corruption: block checksum mismatch");
+  // The cache is live: the scans above left it empty because of what they were, and this one,
+  // which verifies and fills, charged it for the blocks it checked. (The scans that leave it empty
+  // come first, since this one would leave blocks in it for them to find.)
+  EXPECT_GT(cache.TotalCharge(), 0u);
 }
 
 TEST_F(TableReadaheadTest, ScanThatReadsAheadCachesExactlyTheBlocksItVisited) {
@@ -453,6 +463,10 @@ TEST_F(TableReadaheadTest, ScanThatReadsAheadCachesExactlyTheBlocksItVisited) {
     it->Next();
   }
   ASSERT_TRUE(it->Valid());
+
+  // The precondition: block 12 was inside a fill, and the iterator never entered it.
+  EXPECT_GE(counting_->max_read_end(), (*handles_)[12].offset + Stored(12));
+  EXPECT_EQ(table->data_block_reads(), 10u);
 
   uint64_t reads = table->data_block_reads();
   TableGetResult result;

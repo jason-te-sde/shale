@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -1048,6 +1049,12 @@ TEST_F(DBIterTest, ConcurrentIteratorsSeeAPrefixOfTheWrites) {
 
 TEST_F(DBIterTest, ScanOfACompactedDatabaseReadsAhead) {
   CountingEnv counting(env_.get());
+  // Declared after the CountingEnv, so it is destroyed before it: the database is closed on every
+  // path out of the test, and a failed assertion cannot leave it using an Env that is gone.
+  struct CloseOnExit {
+    std::function<void()> close;
+    ~CloseOnExit() { close(); }
+  } close_on_exit{[this] { Close(); }};
   Options options = CurrentOptions();
   options.env = &counting;
   Reopen(options);
@@ -1082,7 +1089,6 @@ TEST_F(DBIterTest, ScanOfACompactedDatabaseReadsAhead) {
   // A read for each 4 KiB block would be table_bytes / 4096 reads. Reading ahead makes at most a
   // quarter of that.
   EXPECT_LE(counting.random_reads() * 4, table_bytes / 4096);
-  Close();  // before the CountingEnv goes out of scope
 }
 
 }  // namespace

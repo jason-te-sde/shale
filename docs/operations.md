@@ -70,6 +70,8 @@ How an error behaves depends on where it happened:
 - **At `Open`**: the open fails and `*db` is null. Nothing that was in the directory has been lost. A
   new log, table or MANIFEST that the failed open made may be left, and the next open sweeps them.
 - **On a read**: that read fails. The database is otherwise unchanged and keeps serving.
+  A scan reads ahead of the block it is in, so a read error anywhere in the bytes read ahead ends the
+  scan at the block whose read started the fill, which can be earlier than the damaged block itself.
 - **On the write path** (log append or sync, switching to a new log, a flush, a compaction, the MANIFEST):
   the first such error becomes the **background error**. Every later write returns it, until the
   database is opened again. Reads continue. See [Writes all fail](#writes-all-fail-a-sticky-background-error).
@@ -312,9 +314,8 @@ to measure, and [benchmarks](benchmarks.md) shows how `shale_bench` does it.
 
 **Memory** is about `write_buffer_size` for the memtable, as much again while one is being written
 out, plus `block_cache_capacity`, plus the filter and the index of every open table, plus, for each
-table an iterator is reading in order, a readahead buffer of up to 256 KiB and one block.
-A read error anywhere in the bytes read ahead ends a scan at the block whose read started the fill,
-which can be earlier than the damaged block itself.
+table iterator that has read in order, a readahead buffer of up to 256 KiB and one block, kept for as
+long as the iterator lives.
 `GetProperty("shale.approximate-memory-usage")` reports the memtables and the block cache only.
 
 **`WriteOptions::sync`** is the one setting that trades safety for speed. With `true` (the default) a
