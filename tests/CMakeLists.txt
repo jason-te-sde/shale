@@ -33,6 +33,7 @@ shale_add_library(shale_testkit
     testkit/fault_env.cc
     testkit/invariants.cc
     testkit/model_db.cc
+    testkit/raw_table.cc
     testkit/test_util.cc
   LIBS shale_core shale_io shale_util GTest::gtest)
 target_include_directories(shale_testkit PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -78,6 +79,7 @@ shale_add_test(compaction_filter SOURCES core/compaction_filter_test.cc LIBS sha
 # The database layer's tests run against the fault-injecting Env, which the test kit provides.
 shale_add_test(builder SOURCES db/builder_test.cc LIBS shale_db shale_testkit)
 shale_add_test(compaction_job SOURCES db/compaction_job_test.cc LIBS shale_db shale_testkit)
+shale_add_test(table_cache SOURCES db/table_cache_test.cc LIBS shale_db shale_testkit)
 shale_add_test(version_set SOURCES db/version_set_test.cc LIBS shale_db shale_testkit)
 # Files that a failure outside the tests left, kept byte for byte, are read from the source tree.
 target_compile_definitions(version_set_test PRIVATE

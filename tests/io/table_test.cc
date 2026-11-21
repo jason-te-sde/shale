@@ -34,6 +34,7 @@
 #include "shale/iterator.h"
 #include "shale/status.h"
 #include "testkit/fault_env.h"
+#include "testkit/raw_table.h"
 #include "testkit/test_util.h"
 #include "util/coding.h"
 #include "util/crc32c.h"
@@ -687,6 +688,74 @@ TEST_F(TableTest, FlippedDataByteIsCorruptionNotWrongValue) {
   EXPECT_EQ(it->value(), ValueOf(5000));
 }
 
+TEST_F(TableTest, ChecksumFailureEndsTheIterationWithItsStatus) {
+  BuildTable("/good.sst", NumberedEntries(10000));
+  std::string bytes = ReadFile("/good.sst");
+  bytes[3] = static_cast<char>(bytes[3] ^ 0x01);  // inside the first data block
+  WriteFile("/bad.sst", bytes);
+  std::shared_ptr<Table> table;
+  ASSERT_OK(OpenTable("/bad.sst", nullptr, &table));
+  std::unique_ptr<Iterator> it = table->NewIterator({});
+  const Drained drained = Drain(it.get());
+  EXPECT_TRUE(drained.entries.empty());
+  EXPECT_EQ(drained.status.ToString(), "Corruption: block checksum mismatch");
+  // The end is final: a seek to a block that is sound does not bring the iterator back.
+  it->Seek(IKey("k005000", kMaxSequenceNumber));
+  EXPECT_FALSE(it->Valid());
+  EXPECT_EQ(it->status().ToString(), "Corruption: block checksum mismatch");
+}
+
+TEST_F(TableTest, FileCutShortAfterOpenEndsTheIterationWithTruncatedBlockRead) {
+  const Entries entries = NumberedEntries(10000);
+  BuildTable("/t.sst", entries);
+  std::shared_ptr<Table> table;
+  ASSERT_OK(OpenTable("/t.sst", nullptr, &table));
+  const std::vector<BlockHandle> handles = DataBlockHandles(env_.get(), "/t.sst");
+  ASSERT_GT(handles.size(), size_t{4});
+
+  // The file loses its end while the table is open. Writing it again empties the file the open
+  // handle reads, and the prefix is appended to that same file.
+  const std::string bytes = ReadFile("/t.sst");
+  std::unique_ptr<WritableFile> file;
+  ASSERT_OK(env_->NewWritableFile("/t.sst", &file));
+  ASSERT_OK(file->Append(std::string_view(bytes).substr(0, handles[3].offset + 10)));
+  ASSERT_OK(file->Close());
+
+  std::unique_ptr<Iterator> it = table->NewIterator({});
+  const Drained drained = Drain(it.get());
+  EXPECT_EQ(drained.status.ToString(), "Corruption: truncated block read");
+  ASSERT_FALSE(drained.entries.empty()) << "the blocks before the cut are still read";
+  ASSERT_LT(drained.entries.size(), entries.size());
+  EXPECT_TRUE(std::equal(drained.entries.begin(), drained.entries.end(), entries.begin()));
+
+  const Lookup got = Get(*table, UserKey(9000), kMaxSequenceNumber);
+  EXPECT_EQ(got.status.ToString(), "Corruption: truncated block read");
+}
+
+TEST_F(TableTest, IteratorAbortsWhenAskedForAnEntryItDoesNotHave) {
+  BuildTable("/good.sst", NumberedEntries(10000));
+  std::shared_ptr<Table> fresh;
+  ASSERT_OK(OpenTable("/good.sst", nullptr, &fresh));
+  std::unique_ptr<Iterator> never_positioned = fresh->NewIterator({});
+
+  std::string bytes = ReadFile("/good.sst");
+  bytes[3] = static_cast<char>(bytes[3] ^ 0x01);
+  WriteFile("/bad.sst", bytes);
+  std::shared_ptr<Table> damaged;
+  ASSERT_OK(OpenTable("/bad.sst", nullptr, &damaged));
+  std::unique_ptr<Iterator> ended = damaged->NewIterator({});
+  ended->SeekToFirst();
+  ASSERT_FALSE(ended->Valid());
+  ASSERT_EQ(ended->status().ToString(), "Corruption: block checksum mismatch");
+
+  for (Iterator* it : {never_positioned.get(), ended.get()}) {
+    ASSERT_FALSE(it->Valid());
+    EXPECT_DEATH(it->Next(), "requires Valid");
+    EXPECT_DEATH(static_cast<void>(it->key()), "requires Valid");
+    EXPECT_DEATH(static_cast<void>(it->value()), "requires Valid");
+  }
+}
+
 TEST_F(TableTest, DamageInALaterBlockEndsAnIterationAfterTheEntriesBeforeIt) {
   const Entries entries = NumberedEntries(10000);
   BuildTable("/good.sst", entries);
@@ -920,55 +989,6 @@ TEST_F(TableIOErrorTest, FailedReadInAnIteratorIsAnIOError) {
 }
 
 // ---- Tables with checksums that pass and contents that are wrong ----
-
-// Builds a file out of blocks written by hand, each with a trailer that is right for what is in
-// it, so that the damage a test puts in a block is found by the reader's own decoding of the
-// block and not by a checksum.
-class RawTable {
- public:
-  BlockHandle AddBlock(std::string_view contents) {
-    const BlockHandle handle{file_.size(), contents.size()};
-    file_.append(contents);
-    std::string trailer(1, '\0');
-    const uint32_t crc =
-        crc32c::Extend(crc32c::Value(contents.data(), contents.size()), trailer.data(), 1);
-    PutFixed32(&trailer, crc32c::Mask(crc));
-    file_.append(trailer);
-    return handle;
-  }
-
-  // A block with one entry for each of `entries`, which are in the order given.
-  BlockHandle AddEntries(const Entries& entries, int restart_interval = 1) {
-    BlockBuilder builder(restart_interval);
-    for (const auto& [key, value] : entries) {
-      builder.Add(key, value);
-    }
-    return AddBlock(builder.Finish());
-  }
-
-  // The index block for data blocks given as (last key, handle).
-  BlockHandle AddIndex(const std::vector<std::pair<std::string, BlockHandle>>& blocks) {
-    Entries entries;
-    for (const auto& [key, handle] : blocks) {
-      std::string encoded;
-      handle.EncodeTo(&encoded);
-      entries.emplace_back(key, encoded);
-    }
-    return AddEntries(entries);
-  }
-
-  // The file, ended with a footer that names `filter` and `index`.
-  std::string Finish(const BlockHandle& filter, const BlockHandle& index) {
-    Footer footer;
-    footer.filter = filter;
-    footer.index = index;
-    footer.EncodeTo(&file_);
-    return file_;
-  }
-
- private:
-  std::string file_;
-};
 
 class HostileTableTest : public TableTest {
  protected:
@@ -1231,6 +1251,33 @@ TEST_F(HostileTableTest, DataBlockThatIsNotABlock) {
   }
 }
 
+TEST_F(HostileTableTest, DamagedBlockStructureEndsTheIterationWithItsStatus) {
+  const auto scan = [this](const std::string& bytes) {
+    std::shared_ptr<Table> table;
+    EXPECT_OK(Open(bytes, &table));
+    Drained drained;
+    if (table != nullptr) {
+      std::unique_ptr<Iterator> it = table->NewIterator({});
+      drained = Drain(it.get());
+    }
+    return drained.status.ToString();
+  };
+
+  // Contents that are not a block at all.
+  for (const std::string& contents :
+       {std::string(), std::string("xyz"), std::string(64, '\xff'), std::string("\x01\0\0\0", 4)}) {
+    RawTable raw;
+    const BlockHandle data = raw.AddBlock(contents);
+    const BlockHandle filter = raw.AddBlock("");
+    const BlockHandle index = raw.AddIndex({{IKey("a", 1), data}});
+    EXPECT_EQ(scan(raw.Finish(filter, index)), "Corruption: bad block contents")
+        << "a data block of " << contents.size() << " bytes";
+  }
+
+  // A block whose structure is sound and whose key is too short to end in a tag.
+  EXPECT_EQ(scan(OneBlockTable({{"ab", "v"}}, IKey("z", 1))), "Corruption: bad entry in block");
+}
+
 // A table of the blocks given, each with the key the index names it by. The blocks are intact and
 // their checksums are right; what is wrong with them is the order of their keys, which only the
 // reader's own checks can see.
@@ -1324,6 +1371,79 @@ TEST_F(OrderTableTest, SeekThatLandsBeforeItsTargetEndsTheIteration) {
   it->Seek(IKey("d", kMaxSequenceNumber));
   EXPECT_FALSE(it->Valid());
   EXPECT_TRUE(it->status().IsCorruption()) << it->status().ToString();
+}
+
+TEST_F(OrderTableTest, EveryCheckEndsTheIterationWithItsOwnStatus) {
+  const std::string kOrder = "Corruption: keys in the table are not in increasing order";
+  const std::string kBound =
+      "Corruption: data block holds a key after the last key its index entry names";
+  const std::string kSeek = "Corruption: seek in the table landed before its target";
+
+  // An entry with the value "v" and its user key, so that a case lists what it holds in short.
+  const auto e = [](std::string_view user_key) {
+    return Entries::value_type{IKey(user_key, 1), "v" + std::string(user_key)};
+  };
+  struct Case {
+    const char* name;
+    std::vector<std::pair<std::string, Entries>> blocks;
+    // Where the read starts: empty for the first entry, else a seek to this user key at the
+    // largest sequence number.
+    std::string seek_to;
+    Entries returned;
+    std::string status;
+  };
+  const std::vector<Case> cases = {
+      {"out of order in a block", {{IKey("b", 1), {e("b"), e("a")}}}, "", {e("b")}, kOrder},
+      {"repeated key", {{IKey("a", 1), {e("a"), e("a")}}}, "", {e("a")}, kOrder},
+      {"next block starts before the last key",
+       {{IKey("c", 1), {e("a"), e("c")}}, {IKey("d", 1), {e("b"), e("d")}}},
+       "",
+       {e("a"), e("c")},
+       kOrder},
+      {"same key across a boundary",
+       {{IKey("c", 1), {e("a"), e("c")}}, {IKey("d", 1), {e("c"), e("d")}}},
+       "",
+       {e("a"), e("c")},
+       kOrder},
+      {"an empty block between does not reset it",
+       {{IKey("c", 1), {e("a"), e("c")}}, {IKey("cc", 1), {}}, {IKey("z", 1), {e("b"), e("z")}}},
+       "",
+       {e("a"), e("c")},
+       kOrder},
+      {"key past its index key", {{IKey("m", 1), {e("a"), e("z")}}}, "", {e("a")}, kBound},
+      {"seek, then a step past the bound",
+       {{IKey("c", 1), {e("a"), e("c")}}, {IKey("m", 1), {e("e"), e("z")}}},
+       "d",
+       {e("e")},
+       kBound},
+      {"seek landing past the bound", {{IKey("m", 1), {e("a"), e("z")}}}, "b", {}, kBound},
+      {"seek landing before its target",
+       {{IKey("e", 1), {e("a"), e("c")}}, {IKey("m", 1), {e("b"), e("m")}}},
+       "d",
+       {},
+       kSeek},
+  };
+
+  for (const Case& c : cases) {
+    std::shared_ptr<Table> table;
+    ASSERT_OK(Open(TableOf(c.blocks), &table)) << c.name;
+    std::unique_ptr<Iterator> it = table->NewIterator({});
+    Drained got;
+    if (c.seek_to.empty()) {
+      got = Drain(it.get());
+    } else {
+      it->Seek(IKey(c.seek_to, kMaxSequenceNumber));
+      got = Drain(it.get(), 1000000, /*from_first=*/false);
+    }
+    EXPECT_EQ(got.entries, c.returned) << c.name;
+    EXPECT_EQ(it->status().ToString(), c.status) << c.name;
+    it->SeekToFirst();  // sticky: nothing brings it back
+    EXPECT_FALSE(it->Valid()) << c.name;
+    EXPECT_EQ(it->status().ToString(), c.status) << c.name;
+    it->Seek(IKey("a", kMaxSequenceNumber));
+    EXPECT_FALSE(it->Valid()) << c.name;
+    EXPECT_EQ(it->status().ToString(), c.status) << c.name;
+  }
 }
 
 TEST_F(OrderTableTest, WellOrderedBlocksAreNotRefused) {
