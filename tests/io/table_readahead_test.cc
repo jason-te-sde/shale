@@ -44,9 +44,19 @@ class ScriptedFile final : public RandomAccessFile {
   }
   // From now on the file ends at `size`.
   void CutAt(uint64_t size) { size_ = std::min<uint64_t>(size, bytes_.size()); }
+  // From now on a read of more than `bytes` fails with an IOError.
+  void FailReadsLongerThan(size_t bytes) { max_read_ = bytes; }
+  // From now on a read that overlaps [`begin`, `end`) fails with an IOError.
+  void FailReadsOverlapping(uint64_t begin, uint64_t end) {
+    fail_begin_ = begin;
+    fail_end_ = end;
+  }
   int flips() const { return flips_; }
 
   Status Read(uint64_t offset, size_t n, std::string_view* result, char* scratch) const override {
+    if (n > max_read_ || (offset < fail_end_ && offset + n > fail_begin_)) {
+      return Status::IOError("injected read error");
+    }
     const uint64_t from = std::min<uint64_t>(offset, size_);
     const size_t len = static_cast<size_t>(std::min<uint64_t>(n, size_ - from));
     std::memcpy(scratch, bytes_.data() + from, len);
@@ -63,6 +73,9 @@ class ScriptedFile final : public RandomAccessFile {
   const std::string bytes_;
   uint64_t size_ = bytes_.size();
   uint64_t flip_at_ = 0;
+  size_t max_read_ = ~size_t{0};
+  uint64_t fail_begin_ = 0;
+  uint64_t fail_end_ = 0;
   mutable bool flip_pending_ = false;
   mutable int flips_ = 0;
 };
@@ -321,6 +334,31 @@ TEST_F(TableReadaheadTest, ChecksumFailureInABlockReadAheadIsReadAgainAlone) {
   EXPECT_EQ(drained.entries, *entries_);
   EXPECT_EQ(file->flips(), 1);
   EXPECT_EQ(table->data_block_reads(), handles_->size() + 1);
+}
+
+TEST_F(TableReadaheadTest, FillThatFailsFallsBackToReadingTheBlockAlone) {
+  // A read error in the bytes ahead of a block must not fail a block that a read of its own serves.
+  {
+    ScriptedFile* file = nullptr;
+    const std::shared_ptr<Table> table = OpenScripted(*bytes_, &file);
+    file->FailReadsLongerThan(static_cast<size_t>(MaxStored()));
+    std::unique_ptr<Iterator> it = table->NewIterator({});
+    const Drained drained = Drain(it.get());
+    EXPECT_OK(drained.status);
+    EXPECT_EQ(drained.entries, *entries_);
+    // Every block was read, and each fill that failed counted a second read of its block.
+    EXPECT_GT(table->data_block_reads(), handles_->size());
+  }
+  // A lone read that fails too decides: the scan ends with its error.
+  {
+    ScriptedFile* file = nullptr;
+    const std::shared_ptr<Table> table = OpenScripted(*bytes_, &file);
+    file->FailReadsOverlapping((*handles_)[10].offset, (*handles_)[10].offset + Stored(10));
+    std::unique_ptr<Iterator> it = table->NewIterator({});
+    const Drained drained = Drain(it.get());
+    EXPECT_TRUE(drained.status.IsIOError()) << drained.status.ToString();
+    EXPECT_EQ(drained.entries, EntriesOfBlocks(0, 10));
+  }
 }
 
 TEST_F(TableReadaheadTest, FileCutShortWhileReadingAheadIsTruncatedBlockRead) {
