@@ -33,6 +33,8 @@ BlockHandle RawTable::AddBlock(std::string_view contents) {
   return handle;
 }
 
+void RawTable::AddPadding(size_t bytes) { file_.append(bytes, '\x5a'); }
+
 BlockHandle RawTable::AddEntries(const Entries& entries, int restart_interval) {
   BlockBuilder builder(restart_interval);
   for (const auto& [key, value] : entries) {

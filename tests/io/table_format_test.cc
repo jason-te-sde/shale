@@ -289,5 +289,47 @@ TEST_F(ReadBlockTest, BlocksLargerThanOneReadChunkAreReadWhole) {
             "Corruption: truncated block read");
 }
 
+TEST(CheckBlockTrailerTest, SaysWhatReadBlockSays) {
+  const std::string contents = "the contents of a block";
+  const std::string good = WithTrailer(contents, 0);
+  EXPECT_OK(CheckBlockTrailer(good, true));
+  EXPECT_OK(CheckBlockTrailer(good, false));
+  EXPECT_OK(CheckBlockTrailer(WithTrailer("", 0), true));
+
+  std::string damaged = good;
+  damaged[3] = static_cast<char>(damaged[3] ^ 0x10);
+  EXPECT_EQ(CheckBlockTrailer(damaged, true).ToString(), "Corruption: block checksum mismatch");
+  EXPECT_OK(CheckBlockTrailer(damaged, false));
+
+  EXPECT_EQ(CheckBlockTrailer(WithTrailer(contents, 1), true).ToString(),
+            "Corruption: unknown block type");
+  EXPECT_EQ(CheckBlockTrailer(WithTrailer(contents, 1), false).ToString(),
+            "Corruption: unknown block type");
+
+  EXPECT_EQ(
+      CheckBlockTrailer(std::string_view(good).substr(0, kBlockTrailerSize - 1), true).ToString(),
+      "Corruption: truncated block read");
+}
+
+TEST(CopyBlockTest, CopiesTheContentsAndChecksTheCopy) {
+  const std::string contents = "the contents of a block";
+  std::string stored = WithTrailer(contents, 0);
+  BlockContents copy;
+  ASSERT_OK(CopyBlock(stored, true, &copy));
+  EXPECT_EQ(copy.view(), contents);
+  EXPECT_NE(copy.view().data(), stored.data()) << "the block has a buffer of its own";
+
+  stored[2] = static_cast<char>(stored[2] ^ 0x01);
+  EXPECT_EQ(copy.view(), contents) << "a change to the source does not reach the copy";
+  EXPECT_EQ(CopyBlock(stored, true, &copy).ToString(), "Corruption: block checksum mismatch");
+  EXPECT_TRUE(copy.empty());
+  ASSERT_OK(CopyBlock(stored, false, &copy));
+  EXPECT_EQ(copy.view(), std::string_view(stored).substr(0, contents.size()));
+
+  EXPECT_EQ(CopyBlock(WithTrailer(contents, 1), true, &copy).ToString(),
+            "Corruption: unknown block type");
+  EXPECT_EQ(CopyBlock("abc", true, &copy).ToString(), "Corruption: truncated block read");
+}
+
 }  // namespace
 }  // namespace shale

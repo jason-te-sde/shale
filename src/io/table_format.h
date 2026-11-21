@@ -136,6 +136,19 @@ class BlockContents {
 Status ReadBlock(const RandomAccessFile* file, const BlockHandle& handle, bool verify_checksum,
                  BlockContents* contents);
 
+/// Checks the trailer of a block, which is its contents followed by the 5 bytes of trailer, as
+/// ReadBlock() does once it has read them. Returns Corruption("truncated block read") if `stored`
+/// is shorter than a trailer, Corruption("block checksum mismatch"), only when `verify_checksum`
+/// is set, if the checksum is not that of the contents and the type byte, and
+/// Corruption("unknown block type") if the type byte is not 0, whether or not the checksum is
+/// checked.
+Status CheckBlockTrailer(std::string_view stored, bool verify_checksum);
+
+/// Copies a block that is already in memory, contents and trailer, into a buffer of its own and
+/// checks the copy's trailer as CheckBlockTrailer() does. On success `*contents` is the block's
+/// contents without the trailer; on failure it is empty.
+Status CopyBlock(std::string_view stored, bool verify_checksum, BlockContents* contents);
+
 }  // namespace shale
 
 #endif  // SHALE_IO_TABLE_FORMAT_H_

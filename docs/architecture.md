@@ -186,8 +186,13 @@ are in [ADR 0006](design/0006-concurrency-model.md).
    the iteration reaches it. Each level 0 file and each level's current file is read through its
    table's one iterator (`src/io/table_iterator.cc`). That iterator walks the index and the data
    blocks, ends with Corruption at a key out of order, past its index key, or at a seek that lands
-   before its target, and names the file. `MergingIterator` (`src/io/merging_iterator.cc`) merges
-   them into one stream of internal keys.
+   before its target, and names the file. A table iterator that has stepped through two data blocks
+   in a row after a seek reads ahead (`src/io/readahead.cc`): one read of the block and the 8 KiB
+   after it, then twice as many each time, up to 256 KiB. Each block it takes out of that buffer is
+   copied and checked on its own, and a block that fails the check is read again by itself, so a
+   byte that came back wrong once is not taken for a damaged block. A seek, and `Get()`, read one
+   block. `MergingIterator` (`src/io/merging_iterator.cc`) merges them into one stream of internal
+   keys.
 3. `NewDBIterator` (`src/db/db_iter.cc`) folds that stream into the user's view as of the sequence
    number: of the entries of a user key, the newest one at or below it, and nothing for a key whose
    newest such entry is a deletion.

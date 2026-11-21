@@ -31,6 +31,7 @@ shale_add_library(shale_io
     io/mem_env.cc
     io/memtable.cc
     io/merging_iterator.cc
+    io/readahead.cc
     io/scheduler.cc
     io/table.cc
     io/table_builder.cc

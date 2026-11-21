@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "io/block.h"
+#include "io/readahead.h"
 #include "io/table.h"
 #include "shale/iterator.h"
 #include "shale/status.h"
@@ -25,6 +26,10 @@ namespace shale {
 //   - a seek that lands before its target ends it with Corruption, because a scan that begins
 //     before the key it was asked to begin at returns what it was not asked for.
 //
+// Once it has moved through two blocks in a row after a seek it reads the blocks that follow in
+// large reads (Readahead), and every block that comes out of those reads is checked on its own, as
+// a block read alone is. A seek starts the sequence again.
+//
 // Like the block iterators it is sticky: once it has failed it stays invalid. The error is named
 // with the table's file once, when it is recorded.
 class Table::Iter final : public Iterator {
@@ -41,6 +46,7 @@ class Table::Iter final : public Iterator {
     if (!status_.ok()) {
       return;
     }
+    readahead_.Reset();
     index_.SeekToFirst();
     if (Enter(Entry::kFresh)) {
       data_.SeekToFirst();
@@ -52,6 +58,7 @@ class Table::Iter final : public Iterator {
     if (!status_.ok()) {
       return;
     }
+    readahead_.Reset();
     index_.Seek(target);
     if (Enter(Entry::kFresh)) {
       data_.Seek(target);
@@ -107,6 +114,7 @@ class Table::Iter final : public Iterator {
         return;
       }
       index_.Next();
+      readahead_.NoteStep();
       if (!Enter(mode == Mode::kStepping ? Entry::kContinue : Entry::kFresh)) {
         return;
       }
@@ -125,7 +133,7 @@ class Table::Iter final : public Iterator {
       return false;
     }
     std::shared_ptr<const Block> block;
-    Status s = table_->ReadDataBlock(options_, index_.value(), &block);
+    Status s = table_->ReadDataBlock(options_, index_.value(), &readahead_, &block);
     if (!s.ok()) {
       Fail(std::move(s));
       return false;
@@ -151,6 +159,7 @@ class Table::Iter final : public Iterator {
   const TableReadOptions options_;
   BlockIterator index_;
   BlockIterator data_;
+  Readahead readahead_;  // reads this iterator's blocks ahead once it moves through them in order
   bool block_open_ = false;  // `data_` is over the block the index is at
   Status status_;
 };

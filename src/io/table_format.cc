@@ -96,6 +96,43 @@ BlockContents BlockContents::CopyOf(std::string_view bytes) {
   return BlockContents(std::move(data), bytes.size());
 }
 
+Status CheckBlockTrailer(std::string_view stored, bool verify_checksum) {
+  if (stored.size() < kBlockTrailerSize) {
+    return Status::Corruption("truncated block read");
+  }
+  const size_t size = stored.size() - kBlockTrailerSize;
+  const char type = stored[size];
+  if (verify_checksum) {
+    const char* const bytes = stored.data();
+    const uint32_t expected = crc32c::Unmask(DecodeFixed32(bytes + size + 1));
+    // The checksum covers the contents and the type byte, which are contiguous.
+    if (crc32c::Value(bytes, size + 1) != expected) {
+      return Status::Corruption("block checksum mismatch");
+    }
+  }
+  if (type != kBlockTypeRaw) {
+    return Status::Corruption("unknown block type");
+  }
+  return Status::OK();
+}
+
+Status CopyBlock(std::string_view stored, bool verify_checksum, BlockContents* contents) {
+  *contents = BlockContents();
+  if (stored.size() < kBlockTrailerSize) {
+    return Status::Corruption("truncated block read");
+  }
+  // The copy is what is checked, and what is kept: the bytes that were looked at are the bytes
+  // that are used, whatever happens to `stored` after.
+  auto copy = std::make_unique_for_overwrite<char[]>(stored.size());
+  std::memcpy(copy.get(), stored.data(), stored.size());
+  Status s = CheckBlockTrailer(std::string_view(copy.get(), stored.size()), verify_checksum);
+  if (!s.ok()) {
+    return s;
+  }
+  *contents = BlockContents(std::move(copy), stored.size() - kBlockTrailerSize);
+  return Status::OK();
+}
+
 Status ReadBlock(const RandomAccessFile* file, const BlockHandle& handle, bool verify_checksum,
                  BlockContents* contents) {
   *contents = BlockContents();
@@ -150,18 +187,11 @@ Status ReadBlock(const RandomAccessFile* file, const BlockHandle& handle, bool v
     }
   }
 
+  Status s = CheckBlockTrailer(std::string_view(stored.get(), total), verify_checksum);
+  if (!s.ok()) {
+    return s;
+  }
   const size_t size = static_cast<size_t>(handle.size);
-  const char type = stored[size];
-  if (verify_checksum) {
-    const uint32_t expected = crc32c::Unmask(DecodeFixed32(stored.get() + size + 1));
-    // The checksum covers the contents and the type byte, which are contiguous.
-    if (crc32c::Value(stored.get(), size + 1) != expected) {
-      return Status::Corruption("block checksum mismatch");
-    }
-  }
-  if (type != kBlockTypeRaw) {
-    return Status::Corruption("unknown block type");
-  }
   // The trailer stays in the buffer, out of the view.
   *contents = BlockContents(std::move(stored), size);
   return Status::OK();
