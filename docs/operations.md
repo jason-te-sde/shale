@@ -313,6 +313,8 @@ to measure, and [benchmarks](benchmarks.md) shows how `shale_bench` does it.
 **Memory** is about `write_buffer_size` for the memtable, as much again while one is being written
 out, plus `block_cache_capacity`, plus the filter and the index of every open table, plus, for each
 table an iterator is reading in order, a readahead buffer of up to 256 KiB and one block.
+A read error anywhere in the bytes read ahead ends a scan at the block whose read started the fill,
+which can be earlier than the damaged block itself.
 `GetProperty("shale.approximate-memory-usage")` reports the memtables and the block cache only.
 
 **`WriteOptions::sync`** is the one setting that trades safety for speed. With `true` (the default) a

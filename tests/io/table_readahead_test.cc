@@ -44,9 +44,14 @@ class ScriptedFile final : public RandomAccessFile {
   }
   // From now on the file ends at `size`.
   void CutAt(uint64_t size) { size_ = std::min<uint64_t>(size, bytes_.size()); }
+  // From now on a read of more than `bytes` fails with an IOError.
+  void FailReadsLongerThan(size_t bytes) { max_read_ = bytes; }
   int flips() const { return flips_; }
 
   Status Read(uint64_t offset, size_t n, std::string_view* result, char* scratch) const override {
+    if (n > max_read_) {
+      return Status::IOError("injected read error");
+    }
     const uint64_t from = std::min<uint64_t>(offset, size_);
     const size_t len = static_cast<size_t>(std::min<uint64_t>(n, size_ - from));
     std::memcpy(scratch, bytes_.data() + from, len);
@@ -63,6 +68,7 @@ class ScriptedFile final : public RandomAccessFile {
   const std::string bytes_;
   uint64_t size_ = bytes_.size();
   uint64_t flip_at_ = 0;
+  size_t max_read_ = ~size_t{0};
   mutable bool flip_pending_ = false;
   mutable int flips_ = 0;
 };
@@ -321,6 +327,18 @@ TEST_F(TableReadaheadTest, ChecksumFailureInABlockReadAheadIsReadAgainAlone) {
   EXPECT_EQ(drained.entries, *entries_);
   EXPECT_EQ(file->flips(), 1);
   EXPECT_EQ(table->data_block_reads(), handles_->size() + 1);
+}
+
+TEST_F(TableReadaheadTest, FillThatFailsIsTheErrorOfItsBlock) {
+  // A read error is reported as it is, in the step that made the read: the fill that fails is made
+  // on entering block 2, and the scan ends there, after the entries of blocks 0 and 1.
+  ScriptedFile* file = nullptr;
+  const std::shared_ptr<Table> table = OpenScripted(*bytes_, &file);
+  file->FailReadsLongerThan(static_cast<size_t>(MaxStored()));
+  std::unique_ptr<Iterator> it = table->NewIterator({});
+  const Drained drained = Drain(it.get());
+  EXPECT_TRUE(drained.status.IsIOError()) << drained.status.ToString();
+  EXPECT_EQ(drained.entries, EntriesOfBlocks(0, 2));
 }
 
 TEST_F(TableReadaheadTest, FileCutShortWhileReadingAheadIsTruncatedBlockRead) {
