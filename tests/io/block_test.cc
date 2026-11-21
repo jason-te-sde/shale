@@ -684,6 +684,155 @@ TEST_F(BlockTest, RandomBitFlipsNeverCrash) {
   }
 }
 
+std::shared_ptr<const Block> BlockOf(const Entries& entries, int restart_interval = 4) {
+  return std::make_shared<const Block>(BuildBlock(entries, restart_interval));
+}
+
+TEST_F(BlockTest, PreviousKeyIsTheEntryBeforeAfterNext) {
+  const Entries entries = SortedEntries(20, 1);
+  BlockIterator it(BlockOf(entries), CountedCompare, 0);
+  it.SeekToFirst();
+  ASSERT_TRUE(it.Valid());
+  EXPECT_FALSE(it.has_previous_key());
+  for (size_t i = 1; i < entries.size(); ++i) {
+    it.Next();
+    ASSERT_TRUE(it.Valid());
+    ASSERT_TRUE(it.has_previous_key());
+    EXPECT_EQ(it.previous_key(), entries[i - 1].first);
+    EXPECT_EQ(it.key(), entries[i].first);
+  }
+  it.Next();
+  EXPECT_FALSE(it.Valid());
+  EXPECT_OK(it.status());
+}
+
+TEST_F(BlockTest, PreviousKeyIsTheLastKeyOfTheBlockBeforeAfterContinue) {
+  const Entries first = {{"a1", "x"}, {"a2", "y"}};
+  const Entries second = {{"b1", "x"}, {"b2", "y"}};
+  BlockIterator it(BlockOf(first), CountedCompare, 0);
+  it.SeekToFirst();
+  it.Next();
+  ASSERT_TRUE(it.Valid());  // at a2, the last key of the block
+
+  it.Continue(BlockOf(second));
+  it.SeekToFirst();
+  ASSERT_TRUE(it.Valid());
+  EXPECT_EQ(it.key(), "b1");
+  ASSERT_TRUE(it.has_previous_key());
+  EXPECT_EQ(it.previous_key(), "a2");
+
+  // Having run off the end of the block, the previous key is still the last key of that block.
+  it.Next();
+  it.Next();
+  EXPECT_FALSE(it.Valid());
+  it.Continue(BlockOf(first));
+  it.SeekToFirst();
+  ASSERT_TRUE(it.Valid());
+  ASSERT_TRUE(it.has_previous_key());
+  EXPECT_EQ(it.previous_key(), "b2");
+
+  // Any later SeekToFirst() has none.
+  it.SeekToFirst();
+  EXPECT_FALSE(it.has_previous_key());
+}
+
+TEST_F(BlockTest, ContinueAcrossAnEmptyBlockKeepsTheKeyBeforeIt) {
+  BlockIterator it(BlockOf({{"a1", "x"}, {"a2", "y"}}), CountedCompare, 0);
+  it.SeekToFirst();
+  it.Next();
+  ASSERT_TRUE(it.Valid());
+
+  it.Continue(BlockOf({}));
+  it.SeekToFirst();
+  EXPECT_FALSE(it.Valid());
+  EXPECT_OK(it.status());
+
+  it.Continue(BlockOf({{"b1", "x"}}));
+  it.SeekToFirst();
+  ASSERT_TRUE(it.Valid());
+  EXPECT_EQ(it.key(), "b1");
+  ASSERT_TRUE(it.has_previous_key());
+  EXPECT_EQ(it.previous_key(), "a2");
+}
+
+TEST_F(BlockTest, SeekResetAndANewIteratorHaveNoPreviousKey) {
+  const Entries entries = SortedEntries(20, 2);
+  BlockIterator it(BlockOf(entries), CountedCompare, 0);
+  EXPECT_FALSE(it.Valid());
+  EXPECT_FALSE(it.has_previous_key());
+
+  it.SeekToFirst();
+  it.Next();
+  it.Next();
+  EXPECT_TRUE(it.has_previous_key());
+  it.Seek(entries[10].first);
+  ASSERT_TRUE(it.Valid());
+  EXPECT_FALSE(it.has_previous_key());
+  it.Next();
+  EXPECT_EQ(it.previous_key(), entries[10].first);
+
+  it.Reset(BlockOf(entries));
+  EXPECT_FALSE(it.Valid());
+  EXPECT_FALSE(it.has_previous_key());
+  it.SeekToFirst();
+  ASSERT_TRUE(it.Valid());
+  EXPECT_FALSE(it.has_previous_key());
+
+  it.Next();
+  it.Continue(BlockOf(entries));
+  it.Seek(entries[3].first);
+  ASSERT_TRUE(it.Valid());
+  EXPECT_FALSE(it.has_previous_key()) << "a seek after Continue has no previous key";
+}
+
+TEST_F(BlockTest, ResetGivesAFreshStatus) {
+  BlockIterator it(std::make_shared<const Block>(std::string("bad block contents")), CountedCompare,
+                   0);
+  it.SeekToFirst();
+  EXPECT_FALSE(it.Valid());
+  EXPECT_TRUE(it.status().IsCorruption());
+
+  it.Reset(BlockOf(SortedEntries(5, 3)));
+  EXPECT_OK(it.status());
+  it.SeekToFirst();
+  EXPECT_TRUE(it.Valid());
+  EXPECT_OK(it.status());
+}
+
+TEST_F(BlockTest, KeysAreRebuiltRightAcrossRestartPoints) {
+  for (uint64_t seed = 0; seed < 200; ++seed) {
+    Random rnd(seed);
+    const int count = 1 + static_cast<int>(rnd.Uniform(300));
+    const int interval = 1 + static_cast<int>(rnd.Uniform(16));
+    std::vector<std::string> keys;
+    for (int i = 0; i < count; ++i) {
+      // Few distinct prefixes, so that neighbours share long ones.
+      keys.push_back("p" + std::to_string(rnd.Uniform(4)) + "/" + RandomString(&rnd, 6) + "/" +
+                     KeyOf(i));
+    }
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    Entries entries;
+    for (const std::string& key : keys) {
+      entries.emplace_back(key, "v");
+    }
+
+    BlockIterator it(BlockOf(entries, interval), CountedCompare, 0);
+    it.SeekToFirst();
+    for (size_t i = 0; i < entries.size(); ++i) {
+      ASSERT_TRUE(it.Valid()) << "seed " << seed << " entry " << i;
+      ASSERT_EQ(it.key(), entries[i].first) << "seed " << seed << " entry " << i;
+      if (i > 0) {
+        ASSERT_TRUE(it.has_previous_key());
+        ASSERT_EQ(it.previous_key(), entries[i - 1].first) << "seed " << seed << " entry " << i;
+      }
+      it.Next();
+    }
+    EXPECT_FALSE(it.Valid());
+    EXPECT_OK(it.status());
+  }
+}
+
 TEST(BlockDeathTest, BuilderAbortsOnMisuse) {
   EXPECT_DEATH(BlockBuilder(0), "restart_interval");
 

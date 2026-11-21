@@ -103,12 +103,17 @@ class Table : public std::enable_shared_from_this<Table> {
   /// @param cache_id the table's identity in `cache`; see BlockCacheKey.
   /// @param cache the cache of data blocks to read through, or null for none. It is not owned and
   ///   must outlive the table and every iterator of it.
+  /// @param name the path of the file, which the table's iterators add to the errors they end
+  ///   with, as WithFileName() does, so that the error of a scan or a compaction says which file it
+  ///   is in. An IOError already names its path and is left as it is. Empty adds nothing. Open()
+  ///   and Get() do not use it: the caller names their errors.
   /// @param table receives the table.
   static Status Open(std::unique_ptr<RandomAccessFile> file, uint64_t file_size, uint64_t cache_id,
-                     BlockCache* cache, std::shared_ptr<Table>* table);
+                     BlockCache* cache, std::string name, std::shared_ptr<Table>* table);
 
   /// Returns an iterator over every entry of the table, internal key and value, in order. It holds
-  /// the table alive. A data block that cannot be read ends the iteration with its error.
+  /// the table alive. A data block that cannot be read ends the iteration with its error, and so
+  /// does a failed check of the table's structure; the error names the file.
   /// @param options how to read.
   std::unique_ptr<Iterator> NewIterator(const TableReadOptions& options) const;
 
@@ -145,19 +150,20 @@ class Table : public std::enable_shared_from_this<Table> {
  public:
   /// Not for callers: use Open(). It takes a type that only Table can name.
   Table(PrivateTag, std::unique_ptr<RandomAccessFile> file, uint64_t cache_id, BlockCache* cache,
-        uint64_t data_end, std::shared_ptr<const Block> index_block, BlockContents filter);
+        uint64_t data_end, std::shared_ptr<const Block> index_block, BlockContents filter,
+        std::string name);
 
  private:
+  // The iterator of NewIterator(): the index and the data block it names, with every check made as
+  // the iterator moves. Defined in table_iterator.cc.
+  class Iter;
+
   // Reads the block the index value `index_value` names, from the cache if it is there.
   Status ReadDataBlock(const TableReadOptions& options, std::string_view index_value,
                        std::shared_ptr<const Block>* block) const;
 
-  // An iterator over the block that an entry of the index with the key and value in `keyed_value`
-  // names, which checks the block's keys against the key, or one that reports why there is none.
-  std::unique_ptr<Iterator> NewDataBlockIterator(const TableReadOptions& options,
-                                                 std::string_view keyed_value) const;
-
   const std::unique_ptr<RandomAccessFile> file_;
+  const std::string name_;  // the path that iterators add to their errors; may be empty
   const uint64_t cache_id_;
   BlockCache* const cache_;
   // Where the data blocks end and the filter block begins. An index entry's handle must lie before.

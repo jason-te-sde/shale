@@ -183,8 +183,11 @@ are in [ADR 0006](design/0006-concurrency-model.md).
 1. The same pinned view as above: the sequence number, the memtables and the Version.
 2. Build one child iterator per source: the memtable, the immutable memtable, every level 0 file (newest
    first), and one concatenating iterator for each deeper level that has files, which opens a file as
-   the iteration reaches it. `MergingIterator` (`src/io/merging_iterator.cc`) merges them into one
-   stream of internal keys.
+   the iteration reaches it. Each level 0 file and each level's current file is read through its
+   table's one iterator (`src/io/table_iterator.cc`). That iterator walks the index and the data
+   blocks, ends with Corruption at a key out of order, past its index key, or at a seek that lands
+   before its target, and names the file. `MergingIterator` (`src/io/merging_iterator.cc`) merges
+   them into one stream of internal keys.
 3. `NewDBIterator` (`src/db/db_iter.cc`) folds that stream into the user's view as of the sequence
    number: of the entries of a user key, the newest one at or below it, and nothing for a key whose
    newest such entry is a deletion.

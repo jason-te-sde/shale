@@ -19,7 +19,6 @@
 
 #include "cli_args.h"
 #include "core/version_edit.h"
-#include "db/named_status.h"
 #include "io/log_reader.h"
 #include "io/table.h"
 #include "io/write_batch_internal.h"
@@ -30,6 +29,7 @@
 #include "shale/status.h"
 #include "shale/write_batch.h"
 #include "util/dbformat.h"
+#include "util/named_status.h"
 #include "verify.h"
 
 namespace shale {
@@ -315,7 +315,7 @@ int RunDumpSst(const CliArgs& args) {
     return EngineError(s);
   }
   std::shared_ptr<Table> table;
-  s = Table::Open(std::move(file), size, /*cache_id=*/0, /*cache=*/nullptr, &table);
+  s = Table::Open(std::move(file), size, /*cache_id=*/0, /*cache=*/nullptr, path, &table);
   if (!s.ok()) {
     return EngineError(WithFileName(s, path));
   }
@@ -333,7 +333,7 @@ int RunDumpSst(const CliArgs& args) {
           " value=" + EscapeBytes(iter->value()) + "\n");
   }
   s = iter->status();
-  return s.ok() ? kExitOk : EngineError(WithFileName(s, path));
+  return s.ok() ? kExitOk : EngineError(s);  // the table named the file
 }
 
 // Tells the user of every defect the log reader finds, as it finds it. The reader goes on after a

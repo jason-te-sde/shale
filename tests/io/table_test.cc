@@ -104,8 +104,10 @@ class TableTest : public testing::Test {
     return size;
   }
 
+  // The table is opened with no name, so that its iterators' errors are the table's own words;
+  // `name` is for the tests of the naming.
   Status OpenTable(const std::string& path, BlockCache* cache, std::shared_ptr<Table>* table,
-                   uint64_t cache_id = 1) {
+                   uint64_t cache_id = 1, const std::string& name = "") {
     std::unique_ptr<RandomAccessFile> file;
     Status s = env_->NewRandomAccessFile(path, &file);
     if (!s.ok()) {
@@ -116,7 +118,7 @@ class TableTest : public testing::Test {
     if (!s.ok()) {
       return s;
     }
-    return Table::Open(std::move(file), size, cache_id, cache, table);
+    return Table::Open(std::move(file), size, cache_id, cache, name, table);
   }
 
   // Builds `entries` and opens the result; the test stops if either fails.
@@ -688,6 +690,26 @@ TEST_F(TableTest, FlippedDataByteIsCorruptionNotWrongValue) {
   EXPECT_EQ(it->value(), ValueOf(5000));
 }
 
+TEST_F(TableTest, IteratorNamesItsFileInItsErrors) {
+  BuildTable("/good.sst", NumberedEntries(10000));
+  std::string bytes = ReadFile("/good.sst");
+  bytes[3] = static_cast<char>(bytes[3] ^ 0x01);  // inside the first data block
+  WriteFile("/bad.sst", bytes);
+
+  std::shared_ptr<Table> named;
+  ASSERT_OK(OpenTable("/bad.sst", nullptr, &named, 1, "/named.sst"));
+  std::unique_ptr<Iterator> it = named->NewIterator({});
+  it->SeekToFirst();
+  EXPECT_FALSE(it->Valid());
+  EXPECT_EQ(it->status().ToString(), "Corruption: block checksum mismatch: /named.sst");
+
+  std::shared_ptr<Table> unnamed;
+  ASSERT_OK(OpenTable("/bad.sst", nullptr, &unnamed, 1, ""));
+  it = unnamed->NewIterator({});
+  it->SeekToFirst();
+  EXPECT_EQ(it->status().ToString(), "Corruption: block checksum mismatch");
+}
+
 TEST_F(TableTest, ChecksumFailureEndsTheIterationWithItsStatus) {
   BuildTable("/good.sst", NumberedEntries(10000));
   std::string bytes = ReadFile("/good.sst");
@@ -886,7 +908,7 @@ TEST_F(TableTest, FileSizeThatDisagreesWithTheFileIsCorruption) {
     std::unique_ptr<RandomAccessFile> file;
     ASSERT_OK(env_->NewRandomAccessFile("/t.sst", &file));
     std::shared_ptr<Table> table;
-    const Status s = Table::Open(std::move(file), claimed, 1, nullptr, &table);
+    const Status s = Table::Open(std::move(file), claimed, 1, nullptr, "", &table);
     EXPECT_TRUE(s.IsCorruption()) << "claimed size " << claimed << ": " << s.ToString();
   }
 }
@@ -927,13 +949,13 @@ class TableIOErrorTest : public testing::Test {
     ASSERT_OK(env_.GetFileSize("/t.sst", &size_));
   }
 
-  Status OpenTable(BlockCache* cache, std::shared_ptr<Table>* table) {
+  Status OpenTable(BlockCache* cache, std::shared_ptr<Table>* table, const std::string& name = "") {
     std::unique_ptr<RandomAccessFile> file;
     Status s = env_.NewRandomAccessFile("/t.sst", &file);
     if (!s.ok()) {
       return s;
     }
-    return Table::Open(std::move(file), size_, 1, cache, table);
+    return Table::Open(std::move(file), size_, 1, cache, name, table);
   }
 
   FaultInjectionEnv env_{1};
@@ -971,6 +993,20 @@ TEST_F(TableIOErrorTest, FailedReadInGetIsAnIOErrorAndNothingIsRemembered) {
   ASSERT_OK(table->Get({}, IKey(UserKey(250), kMaxSequenceNumber), &result));
   EXPECT_EQ(result.kind, TableGetResult::Kind::kFound);
   EXPECT_EQ(result.value, ValueOf(250));
+}
+
+TEST_F(TableIOErrorTest, IteratorIOErrorIsNotNamedAgain) {
+  std::shared_ptr<Table> table;
+  ASSERT_OK(OpenTable(nullptr, &table, "/t.sst"));
+  env_.FailOpAfter(FaultInjectionEnv::Op::kRead, 0);
+  std::unique_ptr<Iterator> it = table->NewIterator({});
+  it->SeekToFirst();
+  const Status s = it->status();
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+  const std::string text = s.ToString();
+  const size_t first = text.find("/t.sst");
+  ASSERT_NE(first, std::string::npos) << text;
+  EXPECT_EQ(text.find("/t.sst", first + 1), std::string::npos) << text;
 }
 
 TEST_F(TableIOErrorTest, FailedReadInAnIteratorIsAnIOError) {
