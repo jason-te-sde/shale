@@ -28,7 +28,7 @@ jobs:
           - os: ubuntu-24.04
             compiler: clang-17
             build_type: Release
-          - os: macos-14
+          - os: macos-15
             compiler: appleclang
             build_type: Release
     steps:
@@ -56,7 +56,7 @@ jobs:
               package=""
               ;;
           esac
-          if [ "$OS" = macos-14 ]; then
+          if [ "$OS" = macos-15 ]; then
             brew install ninja
           else
             sudo apt-get update
@@ -198,7 +198,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-14]
+        os: [ubuntu-24.04, macos-15]
     steps:
       - uses: actions/checkout@v7
 
@@ -208,7 +208,7 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: |
-          if [ "$OS" = macos-14 ]; then
+          if [ "$OS" = macos-15 ]; then
             brew install ninja
           else
             sudo apt-get update
