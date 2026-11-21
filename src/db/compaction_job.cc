@@ -14,7 +14,6 @@
 #include "core/version_edit.h"
 #include "core/version_state.h"
 #include "db/builder.h"
-#include "db/named_status.h"
 #include "db/table_cache.h"
 #include "db/version_set.h"
 #include "io/merging_iterator.h"
@@ -26,6 +25,7 @@
 #include "util/check.h"
 #include "util/dbformat.h"
 #include "util/filename.h"
+#include "util/named_status.h"
 
 namespace shale {
 

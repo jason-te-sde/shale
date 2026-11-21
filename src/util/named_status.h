@@ -1,5 +1,5 @@
-#ifndef SHALE_DB_NAMED_STATUS_H_
-#define SHALE_DB_NAMED_STATUS_H_
+#ifndef SHALE_UTIL_NAMED_STATUS_H_
+#define SHALE_UTIL_NAMED_STATUS_H_
 
 // Errors that say which file they are about. A Corruption from a table or a MANIFEST has to name
 // it: the code that found it knows the file, and the person reading the log, or a Status that has
@@ -23,4 +23,4 @@ Status WithFileName(const Status& s, const std::string& file);
 
 }  // namespace shale
 
-#endif  // SHALE_DB_NAMED_STATUS_H_
+#endif  // SHALE_UTIL_NAMED_STATUS_H_

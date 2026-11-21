@@ -307,8 +307,8 @@ check "dump-sst of a damaged table" 3 '*' dump-sst "$table"
 err_has "dump-sst of a damaged table" "Corruption"
 
 # A flaw in the data block, byte 10 of the table: the table opens, and the checksum of the block
-# fails when the scan reads it. The error comes from the table's own iterator, which does not know
-# which file it is over, so the name is added by the iterator that TableCache::NewIterator() returns.
+# fails when the scan reads it. The name comes from the table's iterator, which the table cache opened
+# with the file's path.
 db5="$tmp/db5"
 check "put in a database whose data block is damaged" 0 '' --db="$db5" --create put a 1
 check "flush it" 0 '' --db="$db5" flush

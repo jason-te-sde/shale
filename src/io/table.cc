@@ -10,9 +10,7 @@
 
 #include "io/block.h"
 #include "io/bloom.h"
-#include "io/iterator_util.h"
 #include "io/table_format.h"
-#include "io/two_level_iterator.h"
 #include "shale/env.h"
 #include "shale/iterator.h"
 #include "shale/status.h"
@@ -74,163 +72,6 @@ Status ValidateIndex(std::shared_ptr<const Block> index, uint64_t data_end) {
   return it->status();
 }
 
-// The index iterator with the key of each entry put in front of its value, which is what the
-// two-level iterator hands the function that opens a block. The block's iterator needs the key,
-// the last key the block may hold, to check the block against, and the two-level iterator passes
-// that function the value alone.
-class KeyedIndexIterator final : public Iterator {
- public:
-  explicit KeyedIndexIterator(std::unique_ptr<Iterator> index) : index_(std::move(index)) {}
-
-  bool Valid() const override { return index_->Valid(); }
-  void SeekToFirst() override { index_->SeekToFirst(); }
-  void Seek(std::string_view target) override { index_->Seek(target); }
-  void Next() override { index_->Next(); }
-  std::string_view key() const override { return index_->key(); }
-  Status status() const override { return index_->status(); }
-
-  std::string_view value() const override {
-    keyed_value_.clear();
-    PutLengthPrefixed(&keyed_value_, index_->key());
-    keyed_value_.append(index_->value());
-    return keyed_value_;
-  }
-
- private:
-  const std::unique_ptr<Iterator> index_;
-  mutable std::string keyed_value_;
-};
-
-// Splits what KeyedIndexIterator returns into the key and the value it put it in front of.
-void SplitKeyedValue(std::string_view keyed_value, std::string_view* key,
-                     std::string_view* index_value) {
-  *index_value = keyed_value;
-  SHALE_CHECK(GetLengthPrefixed(index_value, key), "a keyed index value has no key");
-}
-
-// Iterates a data block, and ends the iteration with Corruption at a key that is after the last key
-// the index says the block holds. A table that is searched by its index cannot have one: a lookup
-// for it would be sent to the next block. Like the iterators of blocks it is sticky: once it has
-// failed it stays invalid.
-class BoundedBlockIterator final : public Iterator {
- public:
-  BoundedBlockIterator(std::unique_ptr<Iterator> block, std::string last_key)
-      : block_(std::move(block)), last_key_(std::move(last_key)) {}
-
-  bool Valid() const override { return status_.ok() && block_->Valid(); }
-
-  void SeekToFirst() override {
-    if (status_.ok()) {
-      block_->SeekToFirst();
-      Check();
-    }
-  }
-
-  void Seek(std::string_view target) override {
-    if (status_.ok()) {
-      block_->Seek(target);
-      Check();
-    }
-  }
-
-  void Next() override {
-    SHALE_CHECK(Valid(), "table block iterator: Next requires Valid");
-    block_->Next();
-    Check();
-  }
-
-  std::string_view key() const override {
-    SHALE_CHECK(Valid(), "table block iterator: key requires Valid");
-    return block_->key();
-  }
-
-  std::string_view value() const override {
-    SHALE_CHECK(Valid(), "table block iterator: value requires Valid");
-    return block_->value();
-  }
-
-  Status status() const override { return status_.ok() ? block_->status() : status_; }
-
- private:
-  void Check() {
-    if (block_->Valid() && CompareInternalKey(block_->key(), last_key_) > 0) {
-      status_ =
-          Status::Corruption("data block holds a key after the last key its index entry names");
-    }
-  }
-
-  const std::unique_ptr<Iterator> block_;
-  const std::string last_key_;
-  Status status_;
-};
-
-// Iterates a table, and ends the iteration with Corruption at a key that is not after the one
-// before it, or at a seek that lands before its target. Keys that go backwards, or repeat, are no
-// sequence a TableBuilder can be given, and code that merges tables into a new one would be stopped
-// by its check for them; a scan that begins before the key it was asked to begin at returns what it
-// was not asked for. Like the others it is sticky.
-class OrderedIterator final : public Iterator {
- public:
-  explicit OrderedIterator(std::unique_ptr<Iterator> table) : table_(std::move(table)) {}
-
-  bool Valid() const override { return status_.ok() && table_->Valid(); }
-
-  void SeekToFirst() override {
-    if (status_.ok()) {
-      table_->SeekToFirst();
-      Check(/*after_seek=*/true);
-    }
-  }
-
-  void Seek(std::string_view target) override {
-    if (!status_.ok()) {
-      return;
-    }
-    table_->Seek(target);
-    if (table_->Valid() && CompareInternalKey(table_->key(), target) < 0) {
-      status_ = Status::Corruption("seek in the table landed before its target");
-      return;
-    }
-    Check(/*after_seek=*/true);
-  }
-
-  void Next() override {
-    SHALE_CHECK(Valid(), "table iterator: Next requires Valid");
-    table_->Next();
-    Check(/*after_seek=*/false);
-  }
-
-  std::string_view key() const override {
-    SHALE_CHECK(Valid(), "table iterator: key requires Valid");
-    return table_->key();
-  }
-
-  std::string_view value() const override {
-    SHALE_CHECK(Valid(), "table iterator: value requires Valid");
-    return table_->value();
-  }
-
-  Status status() const override { return status_.ok() ? table_->status() : status_; }
-
- private:
-  // After a seek there is no key before, and after a step there is the one that was returned.
-  void Check(bool after_seek) {
-    if (!table_->Valid()) {
-      return;
-    }
-    const std::string_view key = table_->key();
-    if (!after_seek && CompareInternalKey(previous_key_, key) >= 0) {
-      status_ = Status::Corruption("keys in the table are not in increasing order");
-      return;
-    }
-    previous_key_.assign(key);
-  }
-
-  const std::unique_ptr<Iterator> table_;
-  std::string previous_key_;  // the key returned last, while the iterator is valid
-  Status status_;
-};
-
 }  // namespace
 
 size_t BlockCacheKeyHash::operator()(const BlockCacheKey& key) const {
@@ -246,8 +87,9 @@ size_t BlockCacheKeyHash::operator()(const BlockCacheKey& key) const {
 
 Table::Table(PrivateTag /*tag*/, std::unique_ptr<RandomAccessFile> file, uint64_t cache_id,
              BlockCache* cache, uint64_t data_end, std::shared_ptr<const Block> index_block,
-             BlockContents filter)
+             BlockContents filter, std::string name)
     : file_(std::move(file)),
+      name_(std::move(name)),
       cache_id_(cache_id),
       cache_(cache),
       data_end_(data_end),
@@ -255,7 +97,7 @@ Table::Table(PrivateTag /*tag*/, std::unique_ptr<RandomAccessFile> file, uint64_
       filter_(std::move(filter)) {}
 
 Status Table::Open(std::unique_ptr<RandomAccessFile> file, uint64_t file_size, uint64_t cache_id,
-                   BlockCache* cache, std::shared_ptr<Table>* table) {
+                   BlockCache* cache, std::string name, std::shared_ptr<Table>* table) {
   SHALE_CHECK(file != nullptr, "Table::Open needs a file");
   SHALE_CHECK(table != nullptr, "Table::Open needs somewhere to put the table");
   table->reset();
@@ -304,8 +146,9 @@ Status Table::Open(std::unique_ptr<RandomAccessFile> file, uint64_t file_size, u
     return s;
   }
 
-  *table = std::make_shared<Table>(PrivateTag{}, std::move(file), cache_id, cache,
-                                   footer.filter.offset, std::move(index_block), std::move(filter));
+  *table =
+      std::make_shared<Table>(PrivateTag{}, std::move(file), cache_id, cache, footer.filter.offset,
+                              std::move(index_block), std::move(filter), std::move(name));
   return Status::OK();
 }
 
@@ -338,32 +181,6 @@ Status Table::ReadDataBlock(const TableReadOptions& options, std::string_view in
   }
   *block = std::move(read);
   return Status::OK();
-}
-
-std::unique_ptr<Iterator> Table::NewDataBlockIterator(const TableReadOptions& options,
-                                                      std::string_view keyed_value) const {
-  std::string_view last_key;
-  std::string_view index_value;
-  SplitKeyedValue(keyed_value, &last_key, &index_value);
-  std::shared_ptr<const Block> block;
-  Status s = ReadDataBlock(options, index_value, &block);
-  if (!s.ok()) {
-    return NewErrorIterator(std::move(s));
-  }
-  return std::make_unique<BoundedBlockIterator>(
-      NewBlockIterator(std::move(block), CompareInternalKey, kInternalKeyTagSize),
-      std::string(last_key));
-}
-
-std::unique_ptr<Iterator> Table::NewIterator(const TableReadOptions& options) const {
-  // The function holds the table, and the two-level iterator holds the function.
-  std::shared_ptr<const Table> self = shared_from_this();
-  return std::make_unique<OrderedIterator>(
-      NewTwoLevelIterator(std::make_unique<KeyedIndexIterator>(NewBlockIterator(
-                              index_block_, CompareInternalKey, kInternalKeyTagSize)),
-                          [self = std::move(self), options](std::string_view keyed_value) {
-                            return self->NewDataBlockIterator(options, keyed_value);
-                          }));
 }
 
 Status Table::Get(const TableReadOptions& options, std::string_view internal_key,

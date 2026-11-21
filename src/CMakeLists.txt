@@ -13,6 +13,7 @@ shale_add_library(shale_util
     util/dbformat.cc
     util/filename.cc
     util/hash.cc
+    util/named_status.cc
     util/status.cc
   LIBS Threads::Threads)
 
@@ -34,6 +35,7 @@ shale_add_library(shale_io
     io/table.cc
     io/table_builder.cc
     io/table_format.cc
+    io/table_iterator.cc
     io/two_level_iterator.cc
     io/write_batch.cc
   LIBS shale_util Threads::Threads)
@@ -60,7 +62,6 @@ shale_add_library(shale_db
     db/db_write.cc
     db/filename_io.cc
     db/info_log.cc
-    db/named_status.cc
     db/options.cc
     db/table_cache.cc
     db/version_set.cc

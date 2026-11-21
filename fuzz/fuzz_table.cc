@@ -297,7 +297,8 @@ void OpenAndRead(std::string_view bytes, bool untouched) {
 
   BlockCache cache(size_t{1} << 16);  // outlives the table, which reads through it
   std::shared_ptr<Table> table;
-  const Status opened = Table::Open(std::move(file), bytes.size(), /*cache_id=*/1, &cache, &table);
+  const Status opened =
+      Table::Open(std::move(file), bytes.size(), /*cache_id=*/1, &cache, "", &table);
   if (!opened.ok()) {
     SHALE_FUZZ_CHECK(opened.IsCorruption());
     SHALE_FUZZ_CHECK(table == nullptr);
