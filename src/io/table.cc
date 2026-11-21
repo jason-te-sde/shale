@@ -177,15 +177,10 @@ Status Table::ReadDataBlock(const TableReadOptions& options, std::string_view in
     if (!found && readahead->ShouldFill(handle)) {
       // The limit is where the filter block begins, so that a fill never reads past the data.
       s = readahead->Fill(*file_, handle, data_end_);
-      if (s.ok()) {
-        found = readahead->Find(handle, &stored);
-      } else {
-        // An error somewhere in the bytes ahead, a bad sector past this block, must not fail a
-        // block that a read of its own would serve. The block is read alone, and that read
-        // decides, as after a failed check below.
-        readahead->Discard();
-        data_block_reads_.fetch_add(1, std::memory_order_relaxed);
+      if (!s.ok()) {
+        return s;
       }
+      found = readahead->Find(handle, &stored);
     }
     if (found) {
       // What came out of the buffer was read for the sake of other blocks and has been checked by
