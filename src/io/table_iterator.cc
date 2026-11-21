@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <memory>
 #include <string_view>
 #include <utility>
@@ -81,10 +82,10 @@ class Table::Iter final : public Iterator {
 
  private:
   // How the iterator got to where it is: by a seek, or by a step from the entry before.
-  enum class Mode { kPositioning, kStepping };
+  enum class Mode : std::uint8_t { kPositioning, kStepping };
   // Whether the block opened is the first after a seek, or the next after the one just left, whose
   // last key is then the key before the block's first.
-  enum class Entry { kFresh, kContinue };
+  enum class Entry : std::uint8_t { kFresh, kContinue };
 
   // Moves on from whatever `data_` has been asked to do, until it is at an entry that passes the
   // checks, at the end of the table, or failed.
