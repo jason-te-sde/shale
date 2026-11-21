@@ -315,7 +315,7 @@ TEST_F(TableTest, GetPicksTheVersionTheSequenceNumberSees) {
   }
 }
 
-// The brief's check, with the absent keys inside the range of the present ones. Keys that sort
+// The bloom filter check, with the absent keys inside the range of the present ones. Keys that sort
 // after every present key never reach a data block, whether there is a filter or not, so they
 // would pass without one. These sort between present keys, where only the filter turns a lookup
 // away from the block that would otherwise be read.

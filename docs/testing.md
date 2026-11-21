@@ -282,7 +282,7 @@ database, `fuzz` the input; `coverage` and `bench-smoke` upload their reports. `
 
 | Job | What it runs |
 | --- | --- |
-| `build-test` | Ubuntu 24.04 with GCC 13, GCC 14 and Clang 18, Debug and Release, and Clang 17, Release; macOS 14 with Apple Clang, Release. Configure, build, `ctest`. |
+| `build-test` | Ubuntu 24.04 with GCC 13, GCC 14 and Clang 18, Debug and Release, and Clang 17, Release; macOS 15 with Apple Clang, Release. Configure, build, `ctest`. |
 | `sanitize` | Clang 18, AddressSanitizer with UndefinedBehaviorSanitizer; and ThreadSanitizer, each test three times, the simulator once. |
 | `flaws` | One job for each injected flaw; the simulator must fail. |
 | `crash` | `shale_crashtest`, 200 rounds and six synced rounds, on Ubuntu and macOS. |
