@@ -22,7 +22,6 @@
 #include "db/info_log.h"
 #include "db/snapshot_list.h"
 #include "db/version_set.h"
-#include "io/iterator_util.h"
 #include "io/log_reader.h"
 #include "io/log_writer.h"
 #include "io/memtable.h"
@@ -706,22 +705,9 @@ void DBImpl::ReleaseSnapshot(const Snapshot* snapshot) {
   snapshots_.Delete(FindOpenSnapshot(snapshots_, snapshot, this, "ReleaseSnapshot"));
 }
 
-namespace {
-
-// What an iterator holds on to so that the sources it reads from stay as they were: the
-// memtables, which its iterators share the ownership of already, and the version, which the
-// iterators of its tables do not hold and whose files a sweep of obsolete files would delete.
-struct IteratorPin {
-  std::shared_ptr<MemTable> mem;
-  std::shared_ptr<MemTable> imm;
-  std::shared_ptr<const Version> version;
-};
-
-}  // namespace
-
 std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& options) {
   SequenceNumber sequence = 0;
-  auto pin = std::make_shared<IteratorPin>();
+  DBIterPin pin;
   {
     // The three under one hold of the mutex, as in Get(): a flush that finishes in between would
     // leave an `imm_` that is gone with a version that does not have its table yet.
@@ -729,32 +715,37 @@ std::unique_ptr<Iterator> DBImpl::NewIterator(const ReadOptions& options) {
     sequence = options.snapshot != nullptr
                    ? FindOpenSnapshot(snapshots_, options.snapshot, this, "NewIterator")->sequence()
                    : versions_.LastSequence();
-    pin->mem = mem_;
-    pin->imm = imm_;
-    pin->version = versions_.current();
+    pin.mem = mem_;
+    pin.imm = imm_;
+    pin.version = versions_.current();
     // Counted here, with the checks that can abort behind it, so that the count is of iterators
     // that are made: from this point the one that is returned gives it back when it is destroyed.
     live_iterators_.fetch_add(1, std::memory_order_acq_rel);
   }
 
   // The newest source first, so that of equal keys, which two sources never have, it would be
-  // the one that is met first.
+  // the one that is met first. The vector is sized for the sources there are: the memtables, each
+  // file of level 0, and each other level that has files.
+  const VersionState& state = pin.version->state();
+  size_t sources = 2;
+  for (size_t level = 0; level < state.files.size(); level++) {
+    sources += level == 0 ? state.files[0].size() : (state.files[level].empty() ? 0 : 1);
+  }
   std::vector<std::unique_ptr<Iterator>> children;
-  children.push_back(pin->mem->NewIterator());
-  if (pin->imm != nullptr) {
-    children.push_back(pin->imm->NewIterator());
+  children.reserve(sources);
+  children.push_back(pin.mem->NewIterator());
+  if (pin.imm != nullptr) {
+    children.push_back(pin.imm->NewIterator());
   }
   TableReadOptions read_options;
   read_options.verify_checksums = options.verify_checksums;
   read_options.fill_cache = options.fill_cache;
-  pin->version->AddIterators(read_options, &children);
+  pin.version->AddIterators(read_options, &children);
 
-  std::unique_ptr<Iterator> iter =
-      NewDBIterator(NewMergingIterator(std::move(children), CompareInternalKey), sequence);
-  iter = NewPinningIterator(std::move(iter), std::move(pin));
-  // Outermost, so that the count goes down after the iterator and what it pins are released.
-  return NewCleanupIterator(std::move(iter),
-                            [this] { live_iterators_.fetch_sub(1, std::memory_order_acq_rel); });
+  // The count goes down after the iterator and what it pins are released.
+  return NewDBIterator(NewMergingIterator(std::move(children), CompareInternalKey), sequence,
+                       std::move(pin),
+                       [this] { live_iterators_.fetch_sub(1, std::memory_order_acq_rel); });
 }
 
 namespace {

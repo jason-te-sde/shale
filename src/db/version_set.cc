@@ -66,7 +66,7 @@ class LevelFileIterator final : public Iterator {
 
   std::string_view value() const override {
     SHALE_CHECK(Valid(), "LevelFileIterator::value requires Valid");
-    return value_;
+    return std::string_view(value_, sizeof(value_));
   }
 
   Status status() const override { return Status::OK(); }
@@ -76,15 +76,14 @@ class LevelFileIterator final : public Iterator {
     index_ = index;
     if (Valid()) {
       const FileMetaData& file = (*files_)[index_];
-      value_.clear();
-      PutFixed64(&value_, file.number);
-      PutFixed64(&value_, file.file_size);
+      EncodeFixed64(value_, file.number);
+      EncodeFixed64(value_ + 8, file.file_size);
     }
   }
 
   const std::vector<FileMetaData>* const files_;
-  size_t index_;       // files_->size() when not valid
-  std::string value_;  // the current file's number and size
+  size_t index_;         // files_->size() when not valid
+  char value_[16] = {};  // the current file's number and size, two fixed64
 };
 
 // An iterator over the entries of the files of one level below 0, in order, which opens each file

@@ -311,24 +311,34 @@ TEST(CheckBlockTrailerTest, SaysWhatReadBlockSays) {
       "Corruption: truncated block read");
 }
 
-TEST(CopyBlockTest, CopiesTheContentsAndChecksTheCopy) {
+TEST_F(ReadBlockTest, ReadBlockIntoSaysWhatReadBlockSays) {
   const std::string contents = "the contents of a block";
-  std::string stored = WithTrailer(contents, 0);
-  BlockContents copy;
-  ASSERT_OK(CopyBlock(stored, true, &copy));
-  EXPECT_EQ(copy.view(), contents);
-  EXPECT_NE(copy.view().data(), stored.data()) << "the block has a buffer of its own";
+  const std::string prefix(13, '#');
+  const BlockHandle handle{prefix.size(), contents.size()};
+  std::string bytes(contents.size() + kBlockTrailerSize, '\0');
 
-  stored[2] = static_cast<char>(stored[2] ^ 0x01);
-  EXPECT_EQ(copy.view(), contents) << "a change to the source does not reach the copy";
-  EXPECT_EQ(CopyBlock(stored, true, &copy).ToString(), "Corruption: block checksum mismatch");
-  EXPECT_TRUE(copy.empty());
-  ASSERT_OK(CopyBlock(stored, false, &copy));
-  EXPECT_EQ(copy.view(), std::string_view(stored).substr(0, contents.size()));
+  Store(prefix + WithTrailer(contents, 0));
+  ASSERT_OK(ReadBlockInto(file_.get(), handle, true, bytes.data()));
+  EXPECT_EQ(bytes, WithTrailer(contents, 0)) << "the contents and then the trailer";
 
-  EXPECT_EQ(CopyBlock(WithTrailer(contents, 1), true, &copy).ToString(),
+  std::string damaged = prefix + WithTrailer(contents, 0);
+  damaged[prefix.size() + 4] = static_cast<char>(damaged[prefix.size() + 4] ^ 0x04);
+  Store(damaged);
+  EXPECT_EQ(ReadBlockInto(file_.get(), handle, true, bytes.data()).ToString(),
+            "Corruption: block checksum mismatch");
+  ASSERT_OK(ReadBlockInto(file_.get(), handle, false, bytes.data()));
+  EXPECT_EQ(bytes, damaged.substr(prefix.size()));
+
+  Store(prefix + WithTrailer(contents, 1));
+  EXPECT_EQ(ReadBlockInto(file_.get(), handle, true, bytes.data()).ToString(),
             "Corruption: unknown block type");
-  EXPECT_EQ(CopyBlock("abc", true, &copy).ToString(), "Corruption: truncated block read");
+  EXPECT_EQ(ReadBlockInto(file_.get(), handle, false, bytes.data()).ToString(),
+            "Corruption: unknown block type");
+
+  // The file ends before the block does.
+  Store(prefix + WithTrailer(contents, 0).substr(0, contents.size() + 2));
+  EXPECT_EQ(ReadBlockInto(file_.get(), handle, true, bytes.data()).ToString(),
+            "Corruption: truncated block read");
 }
 
 }  // namespace

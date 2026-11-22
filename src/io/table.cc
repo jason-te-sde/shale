@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -169,40 +170,65 @@ Status Table::ReadDataBlock(const TableReadOptions& options, std::string_view in
   }
 
   data_block_reads_.fetch_add(1, std::memory_order_relaxed);
-  BlockContents contents;
-  bool have = false;
-  if (readahead != nullptr) {
-    std::string_view stored;
-    bool found = readahead->Find(handle, &stored);
-    if (!found && readahead->ShouldFill(handle)) {
-      // The limit is where the filter block begins, so that a fill never reads past the data.
-      s = readahead->Fill(*file_, handle, data_end_);
+  std::shared_ptr<const Block> read;
+  const size_t stored_size = static_cast<size_t>(handle.size) + kBlockTrailerSize;
+  if (stored_size <= kReadChunkSize) {
+    // The block and its trailer are one allocation with the block object, whether they come out of
+    // the readahead buffer or off the disk. A handle larger than one chunk is not trusted to name
+    // a buffer before the file has supplied any of it, and is read as ReadBlock() reads.
+    bool have = false;
+    if (readahead != nullptr) {
+      std::string_view stored;
+      bool found = readahead->Find(handle, &stored);
+      if (!found && readahead->ShouldFill(handle)) {
+        // The limit is where the filter block begins, so that a fill never reads past the data.
+        s = readahead->Fill(*file_, handle, data_end_);
+        if (!s.ok()) {
+          return s;
+        }
+        found = readahead->Find(handle, &stored);
+      }
+      if (found) {
+        // What came out of the buffer was read for the sake of other blocks and has been checked
+        // by no one. It is copied into a buffer of its own, which is the block's, and checked as a
+        // block read alone is.
+        s = Block::MakeShared(
+            static_cast<size_t>(handle.size), kBlockTrailerSize,
+            [&](char* bytes) {
+              std::memcpy(bytes, stored.data(), stored.size());
+              return CheckBlockTrailer(std::string_view(bytes, stored.size()),
+                                       options.verify_checksums);
+            },
+            &read);
+        have = s.ok();
+        if (!have) {
+          // A failure here may be the read that filled the buffer and not the block: a byte that
+          // came back wrong once is not a block that is wrong. The buffer is dropped and the block
+          // is read again, by itself, and that read decides.
+          readahead->Discard();
+          data_block_reads_.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    }
+    if (!have) {
+      s = Block::MakeShared(
+          static_cast<size_t>(handle.size), kBlockTrailerSize,
+          [&](char* bytes) {
+            return ReadBlockInto(file_.get(), handle, options.verify_checksums, bytes);
+          },
+          &read);
       if (!s.ok()) {
         return s;
       }
-      found = readahead->Find(handle, &stored);
     }
-    if (found) {
-      // What came out of the buffer was read for the sake of other blocks and has been checked by
-      // no one. It is copied into a buffer of its own and checked as a block read alone is.
-      s = CopyBlock(stored, options.verify_checksums, &contents);
-      have = s.ok();
-      if (!have) {
-        // A failure here may be the read that filled the buffer and not the block: a byte that
-        // came back wrong once is not a block that is wrong. The buffer is dropped and the block
-        // is read again, by itself, and that read decides.
-        readahead->Discard();
-        data_block_reads_.fetch_add(1, std::memory_order_relaxed);
-      }
-    }
-  }
-  if (!have) {
+  } else {
+    BlockContents contents;
     s = ReadBlock(file_.get(), handle, options.verify_checksums, &contents);
     if (!s.ok()) {
       return s;
     }
+    read = std::make_shared<const Block>(std::move(contents));
   }
-  std::shared_ptr<const Block> read = std::make_shared<const Block>(std::move(contents));
   // Only a block that has been checked goes in. The cache is shared with reads that check, and a
   // block that nothing has checked, handed to one of them, would be read as if something had.
   if (cache_ != nullptr && options.fill_cache && options.verify_checksums) {
@@ -226,23 +252,21 @@ Status Table::Get(const TableReadOptions& options, std::string_view internal_key
 
   // The first block whose last key is at or after the target is the only one that can hold the
   // first entry at or after it: every block before it ends before the target.
-  std::unique_ptr<Iterator> index_iter =
-      NewBlockIterator(index_block_, CompareInternalKey, kInternalKeyTagSize);
-  index_iter->Seek(internal_key);
-  if (!index_iter->Valid()) {
-    return index_iter->status();  // OK means the target is after every entry of the table
+  BlockIterator index_iter(index_block_, CompareInternalKey, kInternalKeyTagSize);
+  index_iter.Seek(internal_key);
+  if (!index_iter.Valid()) {
+    return index_iter.status();  // OK means the target is after every entry of the table
   }
   std::shared_ptr<const Block> block;
-  Status s = ReadDataBlock(options, index_iter->value(), nullptr, &block);
+  Status s = ReadDataBlock(options, index_iter.value(), nullptr, &block);
   if (!s.ok()) {
     return s;
   }
 
-  std::unique_ptr<Iterator> block_iter =
-      NewBlockIterator(std::move(block), CompareInternalKey, kInternalKeyTagSize);
-  block_iter->Seek(internal_key);
-  if (!block_iter->Valid()) {
-    s = block_iter->status();
+  BlockIterator block_iter(std::move(block), CompareInternalKey, kInternalKeyTagSize);
+  block_iter.Seek(internal_key);
+  if (!block_iter.Valid()) {
+    s = block_iter.status();
     if (!s.ok()) {
       return s;
     }
@@ -254,12 +278,12 @@ Status Table::Get(const TableReadOptions& options, std::string_view internal_key
   // The entry found is not after the last key the index names for the block. If it were, a lookup
   // for the key it holds would have been sent to the next block, and this one is lying about
   // what it ends with.
-  if (CompareInternalKey(block_iter->key(), index_iter->key()) > 0) {
+  if (CompareInternalKey(block_iter.key(), index_iter.key()) > 0) {
     return Status::Corruption("data block holds a key after the last key its index entry names");
   }
 
   ParsedInternalKey found;
-  if (!ParseInternalKey(block_iter->key(), &found)) {
+  if (!ParseInternalKey(block_iter.key(), &found)) {
     return Status::Corruption("bad internal key in data block");
   }
   if (BytewiseCompare(found.user_key, user_key) != 0) {
@@ -268,7 +292,7 @@ Status Table::Get(const TableReadOptions& options, std::string_view internal_key
   switch (found.type) {
     case ValueType::kValue:
       result->kind = TableGetResult::Kind::kFound;
-      result->value.assign(block_iter->value());
+      result->value.assign(block_iter.value());
       return Status::OK();
     case ValueType::kDeletion:
       result->kind = TableGetResult::Kind::kDeleted;

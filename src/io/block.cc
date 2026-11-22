@@ -46,8 +46,11 @@ const char* DecodeEntry(const char* p, const char* limit, uint32_t* shared, uint
 
 }  // namespace
 
-Block::Block(BlockContents contents) : contents_(std::move(contents)) {
-  const std::string_view data = contents_.view();
+Block::Block(BlockContents contents) : owned_(std::move(contents)) { Adopt(owned_.view()); }
+
+void Block::Adopt(std::string_view data) {
+  data_ = data.data();
+  size_ = data.size();
   if (data.size() < kFixed32Size) {
     malformed_ = true;
     return;
@@ -85,7 +88,7 @@ BlockIterator::BlockIterator(std::shared_ptr<const Block> block, KeyCompareFn cm
 
 void BlockIterator::Load(std::shared_ptr<const Block> block) {
   block_ = std::move(block);
-  data_ = block_->contents_.view().data();
+  data_ = block_->data_;
   entries_end_ = block_->restart_offset_;
   num_restarts_ = block_->num_restarts_;
   current_ = entries_end_;
@@ -149,7 +152,7 @@ void BlockIterator::Seek(std::string_view target) {
     if (!ParseNextEntry(/*has_previous=*/false)) {
       return;
     }
-  } while (cmp_(keys_[current_key_], target) < 0);
+  } while (cmp_(keys_[current_key_].view(), target) < 0);
 }
 
 void BlockIterator::Next() {
@@ -159,12 +162,12 @@ void BlockIterator::Next() {
 
 std::string_view BlockIterator::key() const {
   SHALE_CHECK(Valid(), "Block iterator: key requires Valid");
-  return keys_[current_key_];
+  return keys_[current_key_].view();
 }
 
 std::string_view BlockIterator::previous_key() const {
   SHALE_CHECK(has_previous_key(), "Block iterator: previous_key requires has_previous_key");
-  return keys_[1 - current_key_];
+  return keys_[1 - current_key_].view();
 }
 
 std::string_view BlockIterator::value() const {
@@ -233,15 +236,15 @@ bool BlockIterator::ParseNextEntry(bool has_previous) {
     Fail();
     return false;
   }
-  std::string& built = keys_[1 - current_key_];
-  built.assign(keys_[current_key_], 0, shared);
-  built.append(p, non_shared);
-  if (built.size() < min_key_size_) {
+  KeyBuffer& built = keys_[1 - current_key_];
+  built.AssignPrefix(keys_[current_key_].view(), shared);
+  built.Append(p, non_shared);
+  if (built.view().size() < min_key_size_) {
     Fail();
     return false;
   }
   current_key_ = 1 - current_key_;
-  shareable_ = built.size();
+  shareable_ = built.view().size();
   has_previous_ = has_previous;
   has_last_key_ = true;
   value_ = std::string_view(p + non_shared, value_len);
@@ -253,8 +256,8 @@ void BlockIterator::Fail() {
   status_ = Status::Corruption("bad entry in block");
   current_ = entries_end_;
   next_ = entries_end_;
-  keys_[0].clear();
-  keys_[1].clear();
+  keys_[0].Clear();
+  keys_[1].Clear();
   shareable_ = 0;
   has_previous_ = false;
   has_last_key_ = false;

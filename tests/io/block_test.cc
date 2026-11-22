@@ -833,6 +833,82 @@ TEST_F(BlockTest, KeysAreRebuiltRightAcrossRestartPoints) {
   }
 }
 
+TEST_F(BlockTest, MakeSharedBlockReadsLikeABlockOfItsBytes) {
+  Random rnd(7);
+  for (int round = 0; round < 100; round++) {
+    const int restart_interval = 1 + static_cast<int>(rnd.Uniform(20));
+    const Entries entries = SortedEntries(static_cast<int>(rnd.Uniform(200)),
+                                          uint64_t{1000} + static_cast<uint64_t>(round));
+    const std::string bytes = BuildBlock(entries, restart_interval);
+    constexpr size_t kSlack = 5;
+    int fills = 0;
+    std::shared_ptr<const Block> made;
+    ASSERT_OK(Block::MakeShared(
+        bytes.size(), kSlack,
+        [&](char* out) {
+          fills++;
+          std::copy(bytes.begin(), bytes.end(), out);
+          std::fill(out + bytes.size(), out + bytes.size() + kSlack, '\x7f');  // the trailer
+          return Status::OK();
+        },
+        &made));
+    ASSERT_NE(made, nullptr);
+    EXPECT_EQ(fills, 1);
+    EXPECT_EQ(made->size(), bytes.size());
+
+    const std::shared_ptr<const Block> plain = std::make_shared<const Block>(bytes);
+    std::unique_ptr<Iterator> a = NewBlockIterator(made, CountedCompare);
+    std::unique_ptr<Iterator> b = NewBlockIterator(plain, CountedCompare);
+    EXPECT_EQ(Scan(a.get()), entries);
+    EXPECT_EQ(Scan(a.get()), Scan(b.get()));
+    for (int probe = 0; probe < 10; probe++) {
+      const std::string target = KeyOf(static_cast<int>(rnd.Uniform(220)));
+      a->Seek(target);
+      b->Seek(target);
+      ASSERT_EQ(a->Valid(), b->Valid()) << target;
+      if (a->Valid()) {
+        EXPECT_EQ(a->key(), b->key());
+        EXPECT_EQ(a->value(), b->value());
+      }
+      EXPECT_EQ(a->status().ToString(), b->status().ToString());
+    }
+  }
+}
+
+TEST_F(BlockTest, MakeSharedBlockOfDamagedBytesIsCorruptionOnRead) {
+  // Parsing the restart array is the constructor's, and a block that cannot be parsed is a block
+  // whose iterators fail, as with any other.
+  for (const std::string& bytes : {std::string(), std::string("abc"), std::string(40, '\xff')}) {
+    std::shared_ptr<const Block> made;
+    ASSERT_OK(Block::MakeShared(
+        bytes.size(), 5,
+        [&](char* out) {
+          std::copy(bytes.begin(), bytes.end(), out);
+          return Status::OK();
+        },
+        &made));
+    ASSERT_NE(made, nullptr);
+    std::unique_ptr<Iterator> it = NewBlockIterator(made, CountedCompare);
+    it->SeekToFirst();
+    ExpectCorruption(*it, "bad block contents");
+  }
+}
+
+TEST_F(BlockTest, MakeSharedThatFailsToFillReturnsItsErrorAndNoBlock) {
+  std::shared_ptr<const Block> made = std::make_shared<const Block>(std::string());
+  int fills = 0;
+  const Status s = Block::MakeShared(
+      100, 5,
+      [&](char* /*out*/) {
+        fills++;
+        return Status::IOError("disk on fire");
+      },
+      &made);
+  EXPECT_EQ(s.ToString(), "IO error: disk on fire");
+  EXPECT_EQ(fills, 1);
+  EXPECT_EQ(made, nullptr);
+}
+
 TEST(BlockDeathTest, BuilderAbortsOnMisuse) {
   EXPECT_DEATH(BlockBuilder(0), "restart_interval");
 

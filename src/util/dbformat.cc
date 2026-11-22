@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -41,9 +42,39 @@ LookupKey::LookupKey(std::string_view user_key, SequenceNumber sequence) {
   const uint64_t internal_size = uint64_t{user_key.size()} + kInternalKeyTagSize;
   SHALE_CHECK(internal_size <= std::numeric_limits<uint32_t>::max(),
               "user key is too long to be length-prefixed");
-  PutVarint32(&rep_, static_cast<uint32_t>(internal_size));
-  internal_key_start_ = rep_.size();
-  AppendInternalKey(&rep_, {user_key, sequence, kValueTypeForSeek});
+  const size_t prefix_size = static_cast<size_t>(VarintLength(internal_size));
+  size_ = prefix_size + static_cast<size_t>(internal_size);
+  char* dst = inline_;
+  if (size_ > kInlineSize) {
+    heap_.resize(size_);
+    dst = heap_.data();
+  }
+  char* p = EncodeVarint32(dst, static_cast<uint32_t>(internal_size));
+  internal_key_start_ = prefix_size;
+  if (!user_key.empty()) {
+    std::memcpy(p, user_key.data(), user_key.size());
+  }
+  p += user_key.size();
+  EncodeFixed64(p, PackSequenceAndType(sequence, kValueTypeForSeek));
+}
+
+LookupKey::LookupKey(const LookupKey& other)
+    : heap_(other.heap_), size_(other.size_), internal_key_start_(other.internal_key_start_) {
+  if (size_ <= kInlineSize) {
+    std::memcpy(inline_, other.inline_, size_);
+  }
+}
+
+LookupKey& LookupKey::operator=(const LookupKey& other) {
+  if (this != &other) {
+    heap_ = other.heap_;
+    size_ = other.size_;
+    internal_key_start_ = other.internal_key_start_;
+    if (size_ <= kInlineSize) {
+      std::memcpy(inline_, other.inline_, size_);
+    }
+  }
+  return *this;
 }
 
 }  // namespace shale

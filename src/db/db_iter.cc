@@ -1,5 +1,6 @@
 #include "db/db_iter.h"
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -16,12 +17,33 @@ namespace {
 
 class DBIter final : public Iterator {
  public:
-  DBIter(std::unique_ptr<Iterator> internal_iter, SequenceNumber sequence)
-      : iter_(std::move(internal_iter)), sequence_(sequence) {
+  DBIter(std::unique_ptr<Iterator> internal_iter, SequenceNumber sequence, DBIterPin pin,
+         std::function<void()> on_destroy)
+      : iter_(std::move(internal_iter)),
+        sequence_(sequence),
+        pin_(std::move(pin)),
+        on_destroy_(std::move(on_destroy)) {
     SHALE_CHECK(iter_ != nullptr, "NewDBIterator needs an internal iterator");
     SHALE_CHECK(sequence_ <= kMaxSequenceNumber,
                 "NewDBIterator: the sequence number is above any a write can have");
   }
+
+  // The internal iterator first, because it may point into what the pin keeps alive, then the pin,
+  // and then the callback, which may lower a count that the pin's release must come before. The
+  // checker reads std::function's call operator as able to throw bad_function_call, which the
+  // emptiness test rules out; a callback that throws is a bug that should end the process, as an
+  // exception leaving a destructor does.
+  // NOLINTNEXTLINE(bugprone-exception-escape)
+  ~DBIter() override {
+    iter_.reset();
+    pin_ = DBIterPin();
+    if (on_destroy_) {
+      on_destroy_();
+    }
+  }
+
+  DBIter(const DBIter&) = delete;
+  DBIter& operator=(const DBIter&) = delete;
 
   bool Valid() const override { return valid_; }
 
@@ -106,8 +128,10 @@ class DBIter final : public Iterator {
     }
   }
 
-  const std::unique_ptr<Iterator> iter_;
+  std::unique_ptr<Iterator> iter_;
   const SequenceNumber sequence_;
+  DBIterPin pin_;
+  const std::function<void()> on_destroy_;
   std::string saved_key_;  // the user key whose entries are being passed over
   Status status_;          // the corruption that ended the iteration, or OK
   bool valid_ = false;
@@ -116,8 +140,10 @@ class DBIter final : public Iterator {
 }  // namespace
 
 std::unique_ptr<Iterator> NewDBIterator(std::unique_ptr<Iterator> internal_iter,
-                                        SequenceNumber sequence) {
-  return std::make_unique<DBIter>(std::move(internal_iter), sequence);
+                                        SequenceNumber sequence, DBIterPin pin,
+                                        std::function<void()> on_destroy) {
+  return std::make_unique<DBIter>(std::move(internal_iter), sequence, std::move(pin),
+                                  std::move(on_destroy));
 }
 
 }  // namespace shale

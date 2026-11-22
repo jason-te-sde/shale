@@ -17,8 +17,8 @@ namespace shale {
 
 /// A buffer of the bytes of a table that follow the block an iterator has just read, kept by that
 /// one iterator. Nothing in it has been checked: it is bytes as the file returned them, and a block
-/// found in it is copied out and checked as if it had been read alone (CopyBlock()). The buffer is
-/// not shared, so what it holds is never handed to another reader.
+/// found in it is copied out and checked as if it had been read alone. The buffer is not shared, so
+/// what it holds is never handed to another reader.
 ///
 /// An iterator starts reading ahead once it has moved to the next block twice in a row without a
 /// seek, which is what a scan does and a series of seeks does not. The first fill reads

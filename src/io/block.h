@@ -4,14 +4,73 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <new>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "io/table_format.h"
 #include "shale/iterator.h"
+#include "shale/status.h"
+#include "util/check.h"
 #include "util/dbformat.h"
+#include "util/key_buffer.h"
 
 namespace shale {
+
+namespace internal {
+
+/// An allocator for std::allocate_shared that hands it its control block with `extra` bytes after
+/// it, in the same allocation, and writes where those bytes start. allocate_shared asks for exactly
+/// one object of the type it is rebound to, which the allocation function checks. Used by
+/// Block::MakeShared() and nothing else.
+template <typename T>
+struct TrailingAllocator {
+  using value_type = T;
+
+  TrailingAllocator(size_t extra_bytes, char** where) noexcept
+      : extra(extra_bytes), extra_at(where) {}
+  template <typename U>
+  TrailingAllocator(const TrailingAllocator<U>& other) noexcept  // NOLINT: allocators convert
+      : extra(other.extra), extra_at(other.extra_at) {}
+
+  // Where the extra bytes start: after the object, at the strictest alignment a plain operator new
+  // gives, so that whatever is kept there is aligned for any type.
+  static constexpr size_t Head() {
+    constexpr size_t kAlign = alignof(std::max_align_t);
+    return (sizeof(T) + kAlign - 1) / kAlign * kAlign;
+  }
+
+  T* allocate(size_t n) {
+    static_assert(alignof(T) <= __STDCPP_DEFAULT_NEW_ALIGNMENT__,
+                  "the control block must not need an over-aligned operator new");
+    SHALE_CHECK(n == 1, "TrailingAllocator allocates one control block at a time");
+    SHALE_CHECK(extra <= SIZE_MAX - Head(), "TrailingAllocator: the allocation is too large");
+    char* const p = static_cast<char*>(::operator new(Head() + extra));
+    *extra_at = p + Head();
+    return reinterpret_cast<T*>(p);
+  }
+
+  // Sized, with exactly what allocate() asked for, where the compiler declares the sized form:
+  // AddressSanitizer checks the size. Clang before 19 does not declare it in C++20 unless asked.
+  void deallocate(T* p, size_t /*n*/) noexcept {
+#if defined(__cpp_sized_deallocation)
+    ::operator delete(p, Head() + extra);
+#else
+    ::operator delete(p);
+#endif
+  }
+
+  size_t extra;
+  char** extra_at;
+};
+
+template <typename T, typename U>
+bool operator==(const TrailingAllocator<T>& a, const TrailingAllocator<U>& b) {
+  return a.extra == b.extra;
+}
+
+}  // namespace internal
 
 /// A data block as it was read from a table, ready to be iterated. The layout is the one
 /// BlockBuilder writes.
@@ -39,13 +98,56 @@ class Block {
   Block(const Block&) = delete;
   Block& operator=(const Block&) = delete;
 
+  /// Makes a block whose `size` bytes are kept in the same allocation as the block object and its
+  /// share count, so that reading a block takes one allocation and not three. `fill` is called once
+  /// with where the bytes go, and must write `size + slack` bytes there: the block's contents and
+  /// then `slack` bytes that the block does not look at, the trailer of a block that is read from a
+  /// file with its trailer. The bytes are not set to anything first.
+  ///
+  /// If `fill` returns an error that is the result, and `*block` is null. Otherwise the block is
+  /// made as the constructor above makes one, and a structure that is damaged is found by the
+  /// iterators.
+  /// @param size the bytes of the block's contents.
+  /// @param slack the bytes after them that `fill` writes and the block keeps and ignores.
+  /// @param fill a Status(char* bytes) callable.
+  /// @param block receives the block.
+  template <typename Fill>
+  static Status MakeShared(size_t size, size_t slack, Fill&& fill,
+                           std::shared_ptr<const Block>* block) {
+    SHALE_CHECK(block != nullptr, "Block::MakeShared needs somewhere to put the block");
+    SHALE_CHECK(size <= SIZE_MAX - slack, "Block::MakeShared: the block is too large");
+    block->reset();
+    char* bytes = nullptr;
+    std::shared_ptr<Block> made = std::allocate_shared<Block>(
+        internal::TrailingAllocator<Block>(size + slack, &bytes), PrivateTag{});
+    Status s = fill(bytes);
+    if (!s.ok()) {
+      return s;
+    }
+    made->Adopt(std::string_view(bytes, size));
+    *block = std::move(made);
+    return Status::OK();
+  }
+
   /// Returns the size of the block in bytes, as it was given.
-  size_t size() const { return contents_.size(); }
+  size_t size() const { return size_; }
 
  private:
   friend class BlockIterator;
 
-  const BlockContents contents_;
+  // What MakeShared() builds a block with: the bytes arrive after the object is made.
+  struct PrivateTag {};
+
+ public:
+  explicit Block(PrivateTag /*tag*/) {}
+
+ private:
+  // Takes the bytes of `data`, which outlive the block, and finds the restart array.
+  void Adopt(std::string_view data);
+
+  BlockContents owned_;  // the bytes, when the block was made from contents; else empty
+  const char* data_ = nullptr;
+  size_t size_ = 0;
   // Where the entries end and the restart array begins. Zero, with no restart points, for a block
   // whose structure is damaged, which then has no entries to read.
   size_t restart_offset_ = 0;
@@ -62,9 +164,10 @@ class Block {
 /// leave a status that says all is well.
 ///
 /// The iterator keeps the key it is at, and the one before it, each whole: it builds a key from the
-/// shared prefix of the current one into the other of two buffers, and then switches. The key
-/// before is what a reader that checks the order of the keys compares against, without a copy of
-/// its own.
+/// shared prefix of the current one into the other of two buffers, and then switches. A buffer
+/// keeps a key of up to KeyBuffer::kInline bytes in place, so a block of short keys is walked
+/// without an allocation. The key before is what a reader that checks the order of the keys
+/// compares against, without a copy of its own.
 class BlockIterator final : public Iterator {
  public:
   /// An iterator over no block: it is invalid, and its status is OK, until Reset() or Continue().
@@ -115,7 +218,7 @@ class BlockIterator final : public Iterator {
   // The key of the current entry is keys_[current_key_], and, when has_previous_, the one before
   // it is the other. `shareable_` is how many bytes of keys_[current_key_] the next entry may take
   // as its shared prefix: all of it while stepping, none at the start of a block.
-  std::string keys_[2];
+  KeyBuffer keys_[2];
   int current_key_ = 0;
   size_t shareable_ = 0;
   bool has_previous_ = false;

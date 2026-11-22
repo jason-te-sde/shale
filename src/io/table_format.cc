@@ -32,7 +32,6 @@ constexpr char kBlockTypeRaw = 0;
 // The most a read asks the file for at once. A block of this size or less is read with one call.
 // Bigger ones are read in pieces, so that the buffer is sized by what the file holds and not by
 // what a handle says.
-constexpr size_t kReadChunkSize = size_t{1} << 20;
 
 }  // namespace
 
@@ -116,21 +115,25 @@ Status CheckBlockTrailer(std::string_view stored, bool verify_checksum) {
   return Status::OK();
 }
 
-Status CopyBlock(std::string_view stored, bool verify_checksum, BlockContents* contents) {
-  *contents = BlockContents();
-  if (stored.size() < kBlockTrailerSize) {
-    return Status::Corruption("truncated block read");
-  }
-  // The copy is what is checked, and what is kept: the bytes that were looked at are the bytes
-  // that are used, whatever happens to `stored` after.
-  auto copy = std::make_unique_for_overwrite<char[]>(stored.size());
-  std::memcpy(copy.get(), stored.data(), stored.size());
-  Status s = CheckBlockTrailer(std::string_view(copy.get(), stored.size()), verify_checksum);
+Status ReadBlockInto(const RandomAccessFile* file, const BlockHandle& handle, bool verify_checksum,
+                     char* bytes) {
+  SHALE_CHECK(handle.size <= kReadChunkSize - kBlockTrailerSize,
+              "ReadBlockInto is for blocks of one chunk or less");
+  const size_t total = static_cast<size_t>(handle.size) + kBlockTrailerSize;
+  std::string_view got;
+  Status s = file->Read(handle.offset, total, &got, bytes);
   if (!s.ok()) {
     return s;
   }
-  *contents = BlockContents(std::move(copy), stored.size() - kBlockTrailerSize);
-  return Status::OK();
+  SHALE_CHECK(got.size() <= total, "a RandomAccessFile returned more bytes than were asked for");
+  if (!got.empty() && got.data() != bytes) {
+    // As in ReadBlock(): a file that points into its own storage is not misreading anything.
+    std::memmove(bytes, got.data(), got.size());
+  }
+  if (got.size() < total) {
+    return Status::Corruption("truncated block read");
+  }
+  return CheckBlockTrailer(std::string_view(bytes, total), verify_checksum);
 }
 
 Status ReadBlock(const RandomAccessFile* file, const BlockHandle& handle, bool verify_checksum,

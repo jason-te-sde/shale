@@ -112,18 +112,23 @@ inline int CompareInternalKey(std::string_view a, std::string_view b) {
 /// that one, and after every newer one, so seeking to it lands on the entry to return.
 class LookupKey {
  public:
+  /// The most bytes the key keeps inside the object, its length prefix and tag included. A lookup
+  /// key is made for every read, and almost all are shorter than this, so they take no allocation.
+  static constexpr size_t kInlineSize = 200;
+
   /// Builds the lookup key for `user_key` as of `sequence`, which must not exceed
   /// kMaxSequenceNumber. The key's bytes are copied, so `user_key` need not outlive this object.
   LookupKey(std::string_view user_key, SequenceNumber sequence);
 
+  LookupKey(const LookupKey& other);
+  LookupKey& operator=(const LookupKey& other);
+
   /// Returns the key in the form the memtable stores it: a varint32 holding the length of the
   /// internal key, then the internal key. The view is valid for as long as this object lives.
-  std::string_view memtable_key() const { return rep_; }
+  std::string_view memtable_key() const { return {Data(), size_}; }
 
   /// Returns the internal key: the user key followed by the tag.
-  std::string_view internal_key() const {
-    return std::string_view(rep_).substr(internal_key_start_);
-  }
+  std::string_view internal_key() const { return memtable_key().substr(internal_key_start_); }
 
   /// Returns the user key.
   std::string_view user_key() const {
@@ -132,7 +137,11 @@ class LookupKey {
   }
 
  private:
-  std::string rep_;
+  const char* Data() const { return size_ <= kInlineSize ? inline_ : heap_.data(); }
+
+  char inline_[kInlineSize];  // the first size_ bytes, if they fit; only those are ever read
+  std::string heap_;          // all of them, if they do not
+  size_t size_ = 0;
   size_t internal_key_start_ = 0;
 };
 

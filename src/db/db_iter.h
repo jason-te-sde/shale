@@ -5,12 +5,26 @@
 // them, made from the internal entries of the memtables and tables, which hold every write
 // that is not yet dropped and every deletion.
 
+#include <functional>
 #include <memory>
 
 #include "shale/iterator.h"
 #include "util/dbformat.h"
 
 namespace shale {
+
+class MemTable;
+class Version;
+
+/// What an iterator holds on to so that the sources it reads from stay as they were: the
+/// memtables, which its iterators share the ownership of already, and the version, which the
+/// iterators of its tables do not hold and whose files a sweep of obsolete files would delete. Any
+/// of them may be null.
+struct DBIterPin {
+  std::shared_ptr<MemTable> mem;
+  std::shared_ptr<MemTable> imm;
+  std::shared_ptr<const Version> version;
+};
 
 /// Returns the user view of `internal_iter` as of `sequence`: of the entries for each user key, the
 /// newest one that is numbered at or below `sequence`, and nothing for a key whose newest such
@@ -31,11 +45,19 @@ namespace shale {
 ///    returns it. The iterator then is not Valid(), so a caller that only checks Valid() takes the
 ///    failure for the end of the data, which is what status() is there to tell apart.
 ///
+/// The iterator holds `pin` for as long as it lives, and runs `on_destroy`, if there is one, when
+/// it is destroyed. Its destructor destroys `internal_iter` first, since that may point into what
+/// the pin keeps alive, then releases the pin, and runs `on_destroy` last, so that a count that
+/// `on_destroy` lowers is lowered after everything the iterator held is released.
+///
 /// Aborts if `sequence` is above kMaxSequenceNumber, or `internal_iter` is null.
 /// @param internal_iter the internal entries; owned.
 /// @param sequence the sequence number to read as of: the newest write that is seen.
+/// @param pin what to keep alive.
+/// @param on_destroy what to run once the iterator and its pin are gone; may be empty.
 std::unique_ptr<Iterator> NewDBIterator(std::unique_ptr<Iterator> internal_iter,
-                                        SequenceNumber sequence);
+                                        SequenceNumber sequence, DBIterPin pin = {},
+                                        std::function<void()> on_destroy = {});
 
 }  // namespace shale
 
