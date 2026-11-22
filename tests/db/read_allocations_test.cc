@@ -39,12 +39,12 @@ constexpr uint64_t kGetReadAndCache = 8;
 constexpr uint64_t kSeekCached = 13;
 constexpr uint64_t kSeekRead = 17;
 #else
-constexpr uint64_t kGetCached = 1000;
-constexpr uint64_t kGetRead = 1000;
-constexpr uint64_t kBlockRead = 1000;
-constexpr uint64_t kGetReadAndCache = 1000;
-constexpr uint64_t kSeekCached = 1000;
-constexpr uint64_t kSeekRead = 1000;
+constexpr uint64_t kGetCached = 0;
+constexpr uint64_t kGetRead = 0;
+constexpr uint64_t kBlockRead = 0;
+constexpr uint64_t kGetReadAndCache = 0;
+constexpr uint64_t kSeekCached = 0;
+constexpr uint64_t kSeekRead = 0;
 #endif
 
 constexpr int kKeys = 2000;

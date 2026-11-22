@@ -101,9 +101,16 @@ shale_add_library(shale_dbtest
 
 # The one test that counts the allocations of a read. It replaces operator new, and the replacement
 # is compiled into this binary alone, not into shale_testkit, which every other test links.
-shale_add_test(read_allocations
-  SOURCES db/read_allocations_test.cc testkit/alloc_counter.cc
-  LIBS shale_db shale_testkit)
+# ThreadSanitizer's runtime defines operator new itself, and links it whole, so a second definition
+# is a link error; and what the test counts is the engine's own calls, which that runtime does not
+# change, so the other builds, the address sanitizer's among them, hold the same bounds.
+if(NOT SHALE_SANITIZE STREQUAL "thread")
+  shale_add_test(read_allocations
+    SOURCES db/read_allocations_test.cc testkit/alloc_counter.cc
+    LIBS shale_db shale_testkit)
+else()
+  message(STATUS "read_allocations_test is not built under ThreadSanitizer, which defines operator new")
+endif()
 
 shale_add_test(db_basic SOURCES db/db_basic_test.cc LIBS shale_dbtest)
 shale_add_test(db_recovery SOURCES db/db_recovery_test.cc LIBS shale_dbtest)
