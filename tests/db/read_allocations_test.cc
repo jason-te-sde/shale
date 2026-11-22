@@ -19,8 +19,20 @@
 //   kSeekCached              27                13                          8
 //   kSeekRead                31                17                         10
 //
+// The 16-byte keys of the second run make 24-byte internal keys, which no small-string buffer
+// holds. With libc++, in the same three columns (v0.1.1, 2f95cb6, this change):
+//
+//                        v0.1.1   one table iterator and readahead   this change
+//   kGetCached16              6                 8                          1
+//   kGetRead16                8                10                          2
+//   kBlockRead16              2                 2                          1
+//   kGetReadAndCache16       11                13                          5
+//   kSeekCached16            39                21                          9
+//   kSeekRead16              43                25                         11
+//
 // The bounds of libstdc++ are the counts of GCC 13, GCC 14 and Clang 17 and 18, in Debug and
-// Release, which agree. v0.1.1 was not measured with libstdc++.
+// Release, and the sanitizer build, which agree. Neither v0.1.1 nor 2f95cb6 was measured with
+// libstdc++.
 
 #include <gtest/gtest.h>
 
@@ -67,7 +79,7 @@ constexpr Bounds kShortKeys = {1, 2, 1, 5, 9, 11};
 #if defined(_LIBCPP_VERSION)
 constexpr Bounds kLongKeys = {1, 2, 1, 5, 9, 11};
 #else
-constexpr Bounds kLongKeys = {0, 0, 0, 0, 0, 0};
+constexpr Bounds kLongKeys = {1, 2, 1, 5, 9, 11};
 #endif
 
 constexpr int kKeys = 2000;
@@ -240,8 +252,8 @@ TEST_P(ReadAllocationsTest, NextWithinABlockAllocatesNothing) {
 }
 
 INSTANTIATE_TEST_SUITE_P(KeySizes, ReadAllocationsTest, ::testing::Values(size_t{7}, size_t{16}),
-                         [](const ::testing::TestParamInfo<size_t>& info) {
-                           return "Keys" + std::to_string(info.param);
+                         [](const ::testing::TestParamInfo<size_t>& param) {
+                           return "Keys" + std::to_string(param.param);
                          });
 
 }  // namespace
