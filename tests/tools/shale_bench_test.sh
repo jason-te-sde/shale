@@ -355,6 +355,64 @@ if [ "$(digest "$tmp/plain.json")" != "$(digest "$tmp/compacted.json")" ]; then
     "$(diff <(digest "$tmp/plain.json") <(digest "$tmp/compacted.json"))"
 fi
 
+# --- --cache_size makes a diagnostic run, which cannot be taken for a main-table one. --------------
+
+# The default run says that its cache is the default one, and prints no diagnostic line.
+check "a default run" 0 "${small[@]}" --repeat=1 --db="$tmp/c0" --benchmarks=fillseq,readrandom \
+  --json="$tmp/c0.json"
+cases=$((cases + 1))
+if grep -qF -e "# DIAGNOSTIC" "$tmp/out"; then
+  fail "a default run printed a DIAGNOSTIC line" "$(cat "$tmp/out")"
+fi
+json_has "a default run's JSON: the default cache, and not a diagnostic" "$tmp/c0.json" '
+assert d["config"]["cache_size"] == 8388608 and d["config"]["diagnostic"] is False, d["config"]
+'
+check "the default cache size, given" 0 "${small[@]}" --repeat=1 --db="$tmp/c0" \
+  --benchmarks=fillseq --cache_size=8388608
+cases=$((cases + 1))
+if grep -qF -e "# DIAGNOSTIC" "$tmp/out"; then
+  fail "the default cache size, given, printed a DIAGNOSTIC line" "$(cat "$tmp/out")"
+fi
+
+check "a diagnostic run with a large cache" 0 "${small[@]}" --repeat=1 --db="$tmp/d1" \
+  --benchmarks=fillrandom,readrandom,seekrandom --cache_size=1073741824 --json="$tmp/diag.json"
+out_has "a diagnostic run says so" "# DIAGNOSTIC: block cache of 1073741824 bytes"
+out_has "a diagnostic run says what it is not" \
+  "not the default 8388608: not a figure for the main table"
+json_has "a diagnostic run's JSON" "$tmp/diag.json" '
+assert d["config"]["cache_size"] == 1073741824 and d["config"]["diagnostic"] is True, d["config"]
+'
+
+check "--cache_size empty" 2 --db="$tmp/x" --cache_size=
+err_has "--cache_size empty" "--cache_size is a whole number from 0 to 68719476736"
+check "--cache_size is not a number" 2 --db="$tmp/x" --cache_size=lots
+err_has "--cache_size is not a number" "--cache_size is a whole number"
+check "--cache_size too large" 2 --db="$tmp/x" --cache_size=68719476737
+err_has "--cache_size too large" "--cache_size is a whole number from 0 to 68719476736"
+check "--cache_size without a value" 2 --db="$tmp/x" --cache_size
+err_has "--cache_size without a value" "--cache_size needs a value"
+check "--help mentions --cache_size" 0 --help
+out_has "--help mentions --cache_size" "--cache_size"
+if [ "$leveldb" = leveldb ]; then
+  check "LevelDB with --cache_size" 2 --db="$tmp/x" --engine=leveldb --cache_size=1073741824
+  err_has "LevelDB with --cache_size" "applies to the shale engine only"
+  check "the same flags in the other order" 2 --db="$tmp/x" --cache_size=1073741824 \
+    --engine=leveldb
+  err_has "the same flags in the other order" "applies to the shale engine only"
+  check "LevelDB's JSON names its fixed cache" 0 "${small[@]}" --repeat=1 --db="$tmp/ldb3" \
+    --engine=leveldb --benchmarks=fillseq --json="$tmp/ldb3.json"
+  json_has "LevelDB's JSON names its fixed cache" "$tmp/ldb3.json" '
+assert d["config"]["cache_size"] == 8388608 and d["config"]["diagnostic"] is False, d["config"]
+'
+else
+  check "the same arguments in a build with no LevelDB" 2 --db="$tmp/x" --engine=leveldb \
+    --cache_size=1073741824
+fi
+cases=$((cases + 1))
+if [ -e "$tmp/x" ]; then
+  fail "a usage error about --cache_size touched the database path" "$(ls -la "$tmp/x")"
+fi
+
 # --- Every flag that is wrong is a usage error, and says which. ------------------------------------
 
 check "no flags" 2
