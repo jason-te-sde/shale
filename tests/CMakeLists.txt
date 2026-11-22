@@ -47,6 +47,7 @@ shale_add_test(coding SOURCES util/coding_test.cc LIBS shale_util)
 shale_add_test(crc32c SOURCES util/crc32c_test.cc LIBS shale_util)
 shale_add_test(hash SOURCES util/hash_test.cc LIBS shale_util)
 shale_add_test(dbformat SOURCES util/dbformat_test.cc LIBS shale_util)
+shale_add_test(key_buffer SOURCES util/key_buffer_test.cc LIBS shale_util)
 shale_add_test(filename SOURCES util/filename_test.cc LIBS shale_util)
 
 shale_add_test(env_contract SOURCES io/env_contract_test.cc LIBS shale_testkit)

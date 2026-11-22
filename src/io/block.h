@@ -14,6 +14,7 @@
 #include "shale/status.h"
 #include "util/check.h"
 #include "util/dbformat.h"
+#include "util/key_buffer.h"
 
 namespace shale {
 
@@ -156,9 +157,10 @@ class Block {
 /// leave a status that says all is well.
 ///
 /// The iterator keeps the key it is at, and the one before it, each whole: it builds a key from the
-/// shared prefix of the current one into the other of two buffers, and then switches. The key
-/// before is what a reader that checks the order of the keys compares against, without a copy of
-/// its own.
+/// shared prefix of the current one into the other of two buffers, and then switches. A buffer
+/// keeps a key of up to KeyBuffer::kInline bytes in place, so a block of short keys is walked
+/// without an allocation. The key before is what a reader that checks the order of the keys
+/// compares against, without a copy of its own.
 class BlockIterator final : public Iterator {
  public:
   /// An iterator over no block: it is invalid, and its status is OK, until Reset() or Continue().
@@ -209,7 +211,7 @@ class BlockIterator final : public Iterator {
   // The key of the current entry is keys_[current_key_], and, when has_previous_, the one before
   // it is the other. `shareable_` is how many bytes of keys_[current_key_] the next entry may take
   // as its shared prefix: all of it while stepping, none at the start of a block.
-  std::string keys_[2];
+  KeyBuffer keys_[2];
   int current_key_ = 0;
   size_t shareable_ = 0;
   bool has_previous_ = false;

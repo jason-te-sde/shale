@@ -178,6 +178,33 @@ TEST(DbFormatTest, LookupKeySurvivesCopyAndMove) {
   }
 }
 
+TEST(DbFormatTest, LookupKeyLongerThanItsInlineSpace) {
+  // Around the edges of the space the key keeps in place, and far beyond it: the three forms are
+  // the same whichever side of the edge the key falls on.
+  for (const size_t length :
+       {size_t{0}, size_t{1}, size_t{118}, size_t{182}, size_t{183}, size_t{190}, size_t{191},
+        size_t{192}, size_t{199}, size_t{200}, size_t{201}, size_t{1000}, size_t{70000}}) {
+    const std::string user_key(length, 'u');
+    LookupKey k(user_key, 12345);
+    std::string internal;
+    AppendInternalKey(&internal, {user_key, 12345, kValueTypeForSeek});
+    EXPECT_EQ(k.internal_key(), internal) << length;
+    EXPECT_EQ(k.user_key(), user_key) << length;
+    std::string_view memtable_key = k.memtable_key();
+    uint32_t size = 0;
+    ASSERT_TRUE(GetVarint32(&memtable_key, &size)) << length;
+    EXPECT_EQ(size, internal.size()) << length;
+    EXPECT_EQ(memtable_key, internal) << length;
+
+    LookupKey copy = k;
+    LookupKey moved = std::move(k);
+    for (const LookupKey* c : {&copy, &moved}) {
+      EXPECT_EQ(c->internal_key(), internal) << length;
+      EXPECT_EQ(c->user_key(), user_key) << length;
+    }
+  }
+}
+
 TEST(DbFormatTest, LookupKeySortsBeforeEveryEntryItCouldFind) {
   // A lookup at sequence 7 must land at or before every entry for the key with sequence <= 7, and
   // after every entry with a newer sequence.
