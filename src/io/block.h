@@ -51,8 +51,15 @@ struct TrailingAllocator {
     return reinterpret_cast<T*>(p);
   }
 
-  // Sized, with exactly what allocate() asked for: AddressSanitizer checks the size.
-  void deallocate(T* p, size_t /*n*/) noexcept { ::operator delete(p, Head() + extra); }
+  // Sized, with exactly what allocate() asked for, where the compiler declares the sized form:
+  // AddressSanitizer checks the size. Clang before 19 does not declare it in C++20 unless asked.
+  void deallocate(T* p, size_t /*n*/) noexcept {
+#if defined(__cpp_sized_deallocation)
+    ::operator delete(p, Head() + extra);
+#else
+    ::operator delete(p);
+#endif
+  }
 
   size_t extra;
   char** extra_at;
