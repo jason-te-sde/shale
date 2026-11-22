@@ -144,10 +144,18 @@ Status ReadBlock(const RandomAccessFile* file, const BlockHandle& handle, bool v
 /// checked.
 Status CheckBlockTrailer(std::string_view stored, bool verify_checksum);
 
-/// Copies a block that is already in memory, contents and trailer, into a buffer of its own and
-/// checks the copy's trailer as CheckBlockTrailer() does. On success `*contents` is the block's
-/// contents without the trailer; on failure it is empty.
-Status CopyBlock(std::string_view stored, bool verify_checksum, BlockContents* contents);
+/// The most bytes that ReadBlock() reads in one request, and so the most it allocates before the
+/// file has supplied any: a block of this many bytes with its trailer, or fewer, is one allocation
+/// and one read, and a larger one grows its buffer as the file supplies it.
+inline constexpr size_t kReadChunkSize = size_t{1} << 20;
+
+/// Reads the block at `handle`, with its trailer, from `file` into `bytes`, which must have room
+/// for `handle.size + kBlockTrailerSize` bytes, and checks the trailer as ReadBlock() does. The
+/// handle must be one for which that is at most kReadChunkSize: for a larger one the caller
+/// would allocate what a damaged handle says before the file has said anything, and uses
+/// ReadBlock(). Errors are those of ReadBlock(). On an error what is in `bytes` is not defined.
+Status ReadBlockInto(const RandomAccessFile* file, const BlockHandle& handle, bool verify_checksum,
+                     char* bytes);
 
 }  // namespace shale
 

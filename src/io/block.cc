@@ -46,8 +46,11 @@ const char* DecodeEntry(const char* p, const char* limit, uint32_t* shared, uint
 
 }  // namespace
 
-Block::Block(BlockContents contents) : contents_(std::move(contents)) {
-  const std::string_view data = contents_.view();
+Block::Block(BlockContents contents) : owned_(std::move(contents)) { Adopt(owned_.view()); }
+
+void Block::Adopt(std::string_view data) {
+  data_ = data.data();
+  size_ = data.size();
   if (data.size() < kFixed32Size) {
     malformed_ = true;
     return;
@@ -85,7 +88,7 @@ BlockIterator::BlockIterator(std::shared_ptr<const Block> block, KeyCompareFn cm
 
 void BlockIterator::Load(std::shared_ptr<const Block> block) {
   block_ = std::move(block);
-  data_ = block_->contents_.view().data();
+  data_ = block_->data_;
   entries_end_ = block_->restart_offset_;
   num_restarts_ = block_->num_restarts_;
   current_ = entries_end_;

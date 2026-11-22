@@ -1764,6 +1764,102 @@ TEST_F(TableDamageTest, IndexBytesReplacedAndResealedAreNeverFollowedOutOfTheFil
   }
 }
 
+// Keys of 56, 57, 1000 and 65,536 bytes make internal keys of 64, 65, 1008 and 65,544 bytes: the
+// edge of what an iterator keeps in place, one byte beyond it, and far beyond. Neighbours share
+// long prefixes, so the keys are built from the ones before them at every length.
+TEST_F(TableTest, KeysLongerThanTheInlineBufferIterateAndCheckOrder) {
+  Entries entries;
+  for (const size_t length : {size_t{56}, size_t{57}, size_t{1000}, size_t{65536}}) {
+    for (int i = 0; i < 6; i++) {
+      char tail[8];
+      std::snprintf(tail, sizeof(tail), "%03d", i);
+      const std::string user_key =
+          std::string(length - 3, static_cast<char>('a' + length % 7)) + tail;
+      entries.emplace_back(IKey(user_key, 100 + static_cast<SequenceNumber>(i)),
+                           "v" + user_key.substr(length - 3));
+    }
+  }
+  std::sort(entries.begin(), entries.end(),
+            [](const auto& a, const auto& b) { return CompareInternalKey(a.first, b.first) < 0; });
+  const std::shared_ptr<Table> table = BuildAndOpen(entries);
+  ASSERT_NE(table, nullptr);
+
+  std::unique_ptr<Iterator> it = table->NewIterator({});
+  const Drained scanned = Drain(it.get());
+  ASSERT_OK(scanned.status);
+  EXPECT_TRUE(scanned.entries == entries);
+
+  for (const auto& [internal_key, value] : entries) {
+    const std::string_view user_key = ExtractUserKey(internal_key);
+    it = table->NewIterator({});
+    it->Seek(IKey(user_key, kMaxSequenceNumber, kValueTypeForSeek));
+    ASSERT_TRUE(it->Valid());
+    EXPECT_TRUE(it->key() == internal_key);
+    EXPECT_EQ(it->value(), value);
+    const Lookup got = Get(*table, user_key, kMaxSequenceNumber);
+    ASSERT_OK(got.status);
+    EXPECT_EQ(got.result.kind, TableGetResult::Kind::kFound);
+    EXPECT_EQ(got.result.value, value);
+  }
+
+  // Keys that are out of order, and long: the check is made on keys that do not fit in place.
+  const std::string prefix = "m" + std::string(998, 'x');
+  const Entries backwards = {{IKey(prefix + "b", 1), "vb"}, {IKey(prefix + "a", 1), "va"}};
+  RawTable raw;
+  const BlockHandle data = raw.AddEntries(backwards, 16);
+  const BlockHandle filter = raw.AddBlock("");
+  const BlockHandle index = raw.AddIndex({{IKey(prefix + "b", 1), data}});
+  WriteFile("/backwards.sst", raw.Finish(filter, index));
+  std::shared_ptr<Table> bad;
+  ASSERT_OK(OpenTable("/backwards.sst", nullptr, &bad));
+  it = bad->NewIterator({});
+  const Drained drained = Drain(it.get());
+  EXPECT_EQ(drained.status.ToString(), "Corruption: keys in the table are not in increasing order");
+  EXPECT_EQ(drained.entries.size(), size_t{1});
+}
+
+// A block larger than the chunk that a read is made in is read in pieces, or as a whole, and in
+// either case its checksum is checked and the blocks beside it are not affected.
+TEST_F(TableTest, BlocksLargerThanAChunkAreStillReadAndChecked) {
+  TableBuilderOptions options;
+  options.block_size = size_t{2} << 20;
+  const Entries entries = NumberedEntries(200000);
+  BuildTable("/big.sst", entries, options);
+  const std::vector<BlockHandle> handles = DataBlockHandles(env_.get(), "/big.sst");
+  ASSERT_GE(handles.size(), size_t{2});
+  ASSERT_GT(handles[0].size, size_t{1} << 20) << "the block is larger than a chunk";
+
+  std::shared_ptr<Table> intact;
+  ASSERT_OK(OpenTable("/big.sst", nullptr, &intact));
+  std::unique_ptr<Iterator> all = intact->NewIterator({});
+  const Drained drained = Drain(all.get());
+  ASSERT_OK(drained.status);
+  EXPECT_TRUE(drained.entries == entries);
+
+  std::string bytes = ReadFile("/big.sst");
+  bytes[static_cast<size_t>(handles[0].offset) + 1000] ^= 0x01;
+  WriteFile("/damaged.sst", bytes);
+  std::shared_ptr<Table> table;
+  ASSERT_OK(OpenTable("/damaged.sst", nullptr, &table)) << "the index and filter are intact";
+  EXPECT_EQ(Get(*table, UserKey(0), kMaxSequenceNumber).status.ToString(),
+            "Corruption: block checksum mismatch");
+  std::unique_ptr<Iterator> it = table->NewIterator({});
+  it->SeekToFirst();
+  EXPECT_FALSE(it->Valid());
+  EXPECT_EQ(it->status().ToString(), "Corruption: block checksum mismatch");
+
+  // Without checksums the damaged block is read, and the damage is whatever it is; with them, the
+  // blocks that are intact read back.
+  const int last = 199999;
+  const Lookup ok = Get(*table, UserKey(last), kMaxSequenceNumber);
+  ASSERT_OK(ok.status);
+  EXPECT_EQ(ok.result.value, ValueOf(last));
+  it = table->NewIterator({});
+  it->Seek(IKey(UserKey(last), kMaxSequenceNumber, kValueTypeForSeek));
+  ASSERT_TRUE(it->Valid());
+  EXPECT_EQ(it->value(), ValueOf(last));
+}
+
 TEST_F(TableTest, ConcurrentReadersShareATableAndACache) {
   // Get() and the iterators are const, and the cache and the read counter are shared. Under
   // ThreadSanitizer this is the check that nothing the readers touch is unguarded; elsewhere it

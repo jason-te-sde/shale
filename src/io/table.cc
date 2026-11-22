@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -169,40 +170,65 @@ Status Table::ReadDataBlock(const TableReadOptions& options, std::string_view in
   }
 
   data_block_reads_.fetch_add(1, std::memory_order_relaxed);
-  BlockContents contents;
-  bool have = false;
-  if (readahead != nullptr) {
-    std::string_view stored;
-    bool found = readahead->Find(handle, &stored);
-    if (!found && readahead->ShouldFill(handle)) {
-      // The limit is where the filter block begins, so that a fill never reads past the data.
-      s = readahead->Fill(*file_, handle, data_end_);
+  std::shared_ptr<const Block> read;
+  const size_t stored_size = static_cast<size_t>(handle.size) + kBlockTrailerSize;
+  if (stored_size <= kReadChunkSize) {
+    // The block and its trailer are one allocation with the block object, whether they come out of
+    // the readahead buffer or off the disk. A handle larger than one chunk is not trusted to name
+    // a buffer before the file has supplied any of it, and is read as ReadBlock() reads.
+    bool have = false;
+    if (readahead != nullptr) {
+      std::string_view stored;
+      bool found = readahead->Find(handle, &stored);
+      if (!found && readahead->ShouldFill(handle)) {
+        // The limit is where the filter block begins, so that a fill never reads past the data.
+        s = readahead->Fill(*file_, handle, data_end_);
+        if (!s.ok()) {
+          return s;
+        }
+        found = readahead->Find(handle, &stored);
+      }
+      if (found) {
+        // What came out of the buffer was read for the sake of other blocks and has been checked
+        // by no one. It is copied into a buffer of its own, which is the block's, and checked as a
+        // block read alone is.
+        s = Block::MakeShared(
+            static_cast<size_t>(handle.size), kBlockTrailerSize,
+            [&](char* bytes) {
+              std::memcpy(bytes, stored.data(), stored.size());
+              return CheckBlockTrailer(std::string_view(bytes, stored.size()),
+                                       options.verify_checksums);
+            },
+            &read);
+        have = s.ok();
+        if (!have) {
+          // A failure here may be the read that filled the buffer and not the block: a byte that
+          // came back wrong once is not a block that is wrong. The buffer is dropped and the block
+          // is read again, by itself, and that read decides.
+          readahead->Discard();
+          data_block_reads_.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    }
+    if (!have) {
+      s = Block::MakeShared(
+          static_cast<size_t>(handle.size), kBlockTrailerSize,
+          [&](char* bytes) {
+            return ReadBlockInto(file_.get(), handle, options.verify_checksums, bytes);
+          },
+          &read);
       if (!s.ok()) {
         return s;
       }
-      found = readahead->Find(handle, &stored);
     }
-    if (found) {
-      // What came out of the buffer was read for the sake of other blocks and has been checked by
-      // no one. It is copied into a buffer of its own and checked as a block read alone is.
-      s = CopyBlock(stored, options.verify_checksums, &contents);
-      have = s.ok();
-      if (!have) {
-        // A failure here may be the read that filled the buffer and not the block: a byte that
-        // came back wrong once is not a block that is wrong. The buffer is dropped and the block
-        // is read again, by itself, and that read decides.
-        readahead->Discard();
-        data_block_reads_.fetch_add(1, std::memory_order_relaxed);
-      }
-    }
-  }
-  if (!have) {
+  } else {
+    BlockContents contents;
     s = ReadBlock(file_.get(), handle, options.verify_checksums, &contents);
     if (!s.ok()) {
       return s;
     }
+    read = std::make_shared<const Block>(std::move(contents));
   }
-  std::shared_ptr<const Block> read = std::make_shared<const Block>(std::move(contents));
   // Only a block that has been checked goes in. The cache is shared with reads that check, and a
   // block that nothing has checked, handed to one of them, would be read as if something had.
   if (cache_ != nullptr && options.fill_cache && options.verify_checksums) {
