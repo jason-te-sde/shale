@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -28,6 +29,7 @@
 #include "shale/iterator.h"
 #include "shale/options.h"
 #include "shale/status.h"
+#include "testkit/counting_env.h"
 #include "testkit/fault_env.h"
 #include "testkit/test_util.h"
 #include "util/dbformat.h"
@@ -1043,6 +1045,50 @@ TEST_F(DBIterTest, ConcurrentIteratorsSeeAPrefixOfTheWrites) {
   EXPECT_EQ(failed.load(), 0);
   EXPECT_GE(scans.load(), 3 * kReaders);
   EXPECT_EQ(Scan(NewIter().get()).size(), static_cast<size_t>(kWrites));
+}
+
+TEST_F(DBIterTest, ScanOfACompactedDatabaseReadsAhead) {
+  CountingEnv counting(env_.get());
+  // Declared after the CountingEnv, so it is destroyed before it: the database is closed on every
+  // path out of the test, and a failed assertion cannot leave it using an Env that is gone.
+  struct CloseOnExit {
+    std::function<void()> close;
+    ~CloseOnExit() { close(); }
+  } close_on_exit{[this] { Close(); }};
+  Options options = CurrentOptions();
+  options.env = &counting;
+  Reopen(options);
+
+  constexpr int kKeys = 20000;
+  for (int i = 0; i < kKeys; i++) {
+    ASSERT_OK(PutUnsynced(UserKey(i), std::string(200, static_cast<char>('a' + i % 26))));
+  }
+  ASSERT_OK(db_->CompactRange(std::nullopt, std::nullopt));
+
+  uint64_t table_bytes = 0;
+  for (const std::string& name : FilesOfType(FileType::kTableFile)) {
+    uint64_t size = 0;
+    ASSERT_OK(env_->GetFileSize(dbname_ + "/" + name, &size));
+    table_bytes += size;
+  }
+  ASSERT_GT(table_bytes, uint64_t{4} << 20);
+
+  Reopen(options);  // a cold block cache
+  counting.ResetCounts();
+  ReadOptions scan;
+  scan.fill_cache = false;
+  size_t keys = 0;
+  {
+    const std::unique_ptr<Iterator> it = db_->NewIterator(scan);
+    for (it->SeekToFirst(); it->Valid(); it->Next()) {
+      keys++;
+    }
+    ASSERT_OK(it->status());
+  }
+  EXPECT_EQ(keys, static_cast<size_t>(kKeys));
+  // A read for each 4 KiB block would be table_bytes / 4096 reads. Reading ahead makes at most a
+  // quarter of that.
+  EXPECT_LE(counting.random_reads() * 4, table_bytes / 4096);
 }
 
 }  // namespace

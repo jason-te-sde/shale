@@ -17,6 +17,8 @@
 
 namespace shale {
 
+class Readahead;
+
 /// What a cached data block is called: the table it is in and where in the file it starts. A
 /// table's `cache_id` is chosen by whoever opens it and must differ from that of every other table
 /// that shares the cache, a file number being the natural choice.
@@ -158,9 +160,10 @@ class Table : public std::enable_shared_from_this<Table> {
   // the iterator moves. Defined in table_iterator.cc.
   class Iter;
 
-  // Reads the block the index value `index_value` names, from the cache if it is there.
+  // Reads the block the index value `index_value` names, from the cache if it is there. With a
+  // `readahead`, the block may come out of its buffer, and a miss may fill it; Get() passes none.
   Status ReadDataBlock(const TableReadOptions& options, std::string_view index_value,
-                       std::shared_ptr<const Block>* block) const;
+                       Readahead* readahead, std::shared_ptr<const Block>* block) const;
 
   const std::unique_ptr<RandomAccessFile> file_;
   const std::string name_;  // the path that iterators add to their errors; may be empty

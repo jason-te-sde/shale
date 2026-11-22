@@ -5,6 +5,7 @@
 // and whose contents are wrong. It lives in the shale_testkit library, which only test targets
 // link.
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -23,6 +24,10 @@ namespace shale {
 class RawTable {
  public:
   BlockHandle AddBlock(std::string_view contents);
+
+  // `bytes` bytes that no index entry names, in the place the next block would go: the gap that
+  // lets a test see that a reader finds blocks by their offsets and not by their order.
+  void AddPadding(size_t bytes);
 
   // A block with one entry for each of `entries`, which are in the order given.
   BlockHandle AddEntries(const Entries& entries, int restart_interval = 1);

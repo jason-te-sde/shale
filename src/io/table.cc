@@ -10,6 +10,7 @@
 
 #include "io/block.h"
 #include "io/bloom.h"
+#include "io/readahead.h"
 #include "io/table_format.h"
 #include "shale/env.h"
 #include "shale/iterator.h"
@@ -153,7 +154,7 @@ Status Table::Open(std::unique_ptr<RandomAccessFile> file, uint64_t file_size, u
 }
 
 Status Table::ReadDataBlock(const TableReadOptions& options, std::string_view index_value,
-                            std::shared_ptr<const Block>* block) const {
+                            Readahead* readahead, std::shared_ptr<const Block>* block) const {
   BlockHandle handle;
   Status s = DecodeDataHandle(index_value, data_end_, &handle);
   if (!s.ok()) {
@@ -169,9 +170,37 @@ Status Table::ReadDataBlock(const TableReadOptions& options, std::string_view in
 
   data_block_reads_.fetch_add(1, std::memory_order_relaxed);
   BlockContents contents;
-  s = ReadBlock(file_.get(), handle, options.verify_checksums, &contents);
-  if (!s.ok()) {
-    return s;
+  bool have = false;
+  if (readahead != nullptr) {
+    std::string_view stored;
+    bool found = readahead->Find(handle, &stored);
+    if (!found && readahead->ShouldFill(handle)) {
+      // The limit is where the filter block begins, so that a fill never reads past the data.
+      s = readahead->Fill(*file_, handle, data_end_);
+      if (!s.ok()) {
+        return s;
+      }
+      found = readahead->Find(handle, &stored);
+    }
+    if (found) {
+      // What came out of the buffer was read for the sake of other blocks and has been checked by
+      // no one. It is copied into a buffer of its own and checked as a block read alone is.
+      s = CopyBlock(stored, options.verify_checksums, &contents);
+      have = s.ok();
+      if (!have) {
+        // A failure here may be the read that filled the buffer and not the block: a byte that
+        // came back wrong once is not a block that is wrong. The buffer is dropped and the block
+        // is read again, by itself, and that read decides.
+        readahead->Discard();
+        data_block_reads_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
+  }
+  if (!have) {
+    s = ReadBlock(file_.get(), handle, options.verify_checksums, &contents);
+    if (!s.ok()) {
+      return s;
+    }
   }
   std::shared_ptr<const Block> read = std::make_shared<const Block>(std::move(contents));
   // Only a block that has been checked goes in. The cache is shared with reads that check, and a
@@ -204,7 +233,7 @@ Status Table::Get(const TableReadOptions& options, std::string_view internal_key
     return index_iter->status();  // OK means the target is after every entry of the table
   }
   std::shared_ptr<const Block> block;
-  Status s = ReadDataBlock(options, index_iter->value(), &block);
+  Status s = ReadDataBlock(options, index_iter->value(), nullptr, &block);
   if (!s.ok()) {
     return s;
   }

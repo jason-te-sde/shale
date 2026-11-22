@@ -67,6 +67,8 @@ shale_add_test(table_format SOURCES io/table_format_test.cc LIBS shale_testkit)
 shale_add_test(table_builder SOURCES io/table_builder_test.cc LIBS shale_testkit)
 shale_add_test(two_level_iterator SOURCES io/two_level_iterator_test.cc LIBS shale_testkit)
 shale_add_test(table SOURCES io/table_test.cc LIBS shale_testkit)
+shale_add_test(readahead SOURCES io/readahead_test.cc LIBS shale_testkit)
+shale_add_test(table_readahead SOURCES io/table_readahead_test.cc LIBS shale_testkit)
 shale_add_test(merging_iterator SOURCES io/merging_iterator_test.cc LIBS shale_testkit)
 
 # The core's tests link shale_core and nothing else, so that the core cannot grow a dependency on the
