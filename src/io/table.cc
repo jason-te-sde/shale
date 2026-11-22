@@ -252,23 +252,21 @@ Status Table::Get(const TableReadOptions& options, std::string_view internal_key
 
   // The first block whose last key is at or after the target is the only one that can hold the
   // first entry at or after it: every block before it ends before the target.
-  std::unique_ptr<Iterator> index_iter =
-      NewBlockIterator(index_block_, CompareInternalKey, kInternalKeyTagSize);
-  index_iter->Seek(internal_key);
-  if (!index_iter->Valid()) {
-    return index_iter->status();  // OK means the target is after every entry of the table
+  BlockIterator index_iter(index_block_, CompareInternalKey, kInternalKeyTagSize);
+  index_iter.Seek(internal_key);
+  if (!index_iter.Valid()) {
+    return index_iter.status();  // OK means the target is after every entry of the table
   }
   std::shared_ptr<const Block> block;
-  Status s = ReadDataBlock(options, index_iter->value(), nullptr, &block);
+  Status s = ReadDataBlock(options, index_iter.value(), nullptr, &block);
   if (!s.ok()) {
     return s;
   }
 
-  std::unique_ptr<Iterator> block_iter =
-      NewBlockIterator(std::move(block), CompareInternalKey, kInternalKeyTagSize);
-  block_iter->Seek(internal_key);
-  if (!block_iter->Valid()) {
-    s = block_iter->status();
+  BlockIterator block_iter(std::move(block), CompareInternalKey, kInternalKeyTagSize);
+  block_iter.Seek(internal_key);
+  if (!block_iter.Valid()) {
+    s = block_iter.status();
     if (!s.ok()) {
       return s;
     }
@@ -280,12 +278,12 @@ Status Table::Get(const TableReadOptions& options, std::string_view internal_key
   // The entry found is not after the last key the index names for the block. If it were, a lookup
   // for the key it holds would have been sent to the next block, and this one is lying about
   // what it ends with.
-  if (CompareInternalKey(block_iter->key(), index_iter->key()) > 0) {
+  if (CompareInternalKey(block_iter.key(), index_iter.key()) > 0) {
     return Status::Corruption("data block holds a key after the last key its index entry names");
   }
 
   ParsedInternalKey found;
-  if (!ParseInternalKey(block_iter->key(), &found)) {
+  if (!ParseInternalKey(block_iter.key(), &found)) {
     return Status::Corruption("bad internal key in data block");
   }
   if (BytewiseCompare(found.user_key, user_key) != 0) {
@@ -294,7 +292,7 @@ Status Table::Get(const TableReadOptions& options, std::string_view internal_key
   switch (found.type) {
     case ValueType::kValue:
       result->kind = TableGetResult::Kind::kFound;
-      result->value.assign(block_iter->value());
+      result->value.assign(block_iter.value());
       return Status::OK();
     case ValueType::kDeletion:
       result->kind = TableGetResult::Kind::kDeleted;
