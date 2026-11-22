@@ -123,7 +123,7 @@ constexpr int kExitUsage = 2;   // the command line is wrong
 constexpr char kUsage[] =
     "usage: shale_bench --db=PATH [--engine=shale|leveldb] [--benchmarks=LIST]\n"
     "                   [--num=1000000] [--sync_num=10000] [--value_size=100] [--repeat=3]\n"
-    "                   [--seed=301] [--json=FILE] [--compact_before_reads]\n"
+    "                   [--seed=301] [--json=FILE] [--compact_before_reads] [--cache_size=BYTES]\n"
     "\n"
     "Runs db_bench-style workloads against shale and prints one line for each benchmark:\n"
     "the median over --repeat runs of operations a second, megabytes a second (of 2^20 bytes,\n"
@@ -140,6 +140,13 @@ constexpr char kUsage[] =
     "key, a block cache of 8 MiB, 1000 open files, no compression, and checksums verified on "
     "every\n"
     "read. It reports no write amplification: its column shows n/a.\n"
+    "\n"
+    "--cache_size=BYTES sets the block cache of the shale engine, a whole number from 0 to\n"
+    "68719476736 (64 GiB); the default is 8388608 (8 MiB), the cache that the main comparison\n"
+    "table uses. It is for diagnostic runs, such as reads with a cache that holds the whole\n"
+    "database: a run with any other size prints a # DIAGNOSTIC line, says \"diagnostic\": true in\n"
+    "the JSON, and is not a figure for the main table. LevelDB keeps its 8 MiB cache, so that\n"
+    "--engine=leveldb with --cache_size is a usage error.\n"
     "\n"
     "PATH is destroyed and made again by every write benchmark: give it a directory that holds\n"
     "nothing you want. The output and the JSON name it by the last component of PATH alone.\n"
@@ -200,6 +207,9 @@ constexpr char kUsage[] =
 constexpr uint64_t kMaxNum = 4294967295;
 constexpr uint64_t kMaxBenchValueSize = uint64_t{1} << 20;
 constexpr uint64_t kMaxRepeat = 1000;
+constexpr uint64_t kMaxCacheSize = uint64_t{64} << 30;
+// The block cache of the LevelDB adapter, which is fixed (tools/bench_leveldb.cc).
+constexpr uint64_t kLevelDBCacheSize = uint64_t{8} << 20;
 
 // ---- The command line's view of the benchmarks. ------------------------------------------------
 
@@ -219,6 +229,8 @@ struct Config {
   std::string json;
   std::string engine = "shale";
   bool compact_before_reads = false;
+  uint64_t cache_size = Options().block_cache_capacity;
+  bool cache_size_given = false;
 
   Config() {
     workload.num = 1000000;
@@ -262,7 +274,8 @@ std::string CheckEngine(const std::string& name) {
 }
 
 // Makes the engine that CheckEngine() accepted.
-std::unique_ptr<BenchEngine> MakeEngine(const std::string& name) {
+std::unique_ptr<BenchEngine> MakeEngine(const Config& config) {
+  const std::string& name = config.engine;
 #if defined(SHALE_BENCH_HAVE_LEVELDB)
   if (name == "leveldb") {
     return NewLevelDBBenchEngine();
@@ -270,7 +283,19 @@ std::unique_ptr<BenchEngine> MakeEngine(const std::string& name) {
 #endif
   SHALE_CHECK(name == "shale",
               "an engine that CheckEngine() accepted and MakeEngine() does not know");
-  return NewShaleBenchEngine(Options());
+  Options options;
+  options.block_cache_capacity = static_cast<size_t>(config.cache_size);
+  return NewShaleBenchEngine(options);
+}
+
+// The block cache that the run's engine has: the adapter's fixed one for LevelDB.
+uint64_t EngineCacheSize(const Config& config) {
+  return config.engine == "leveldb" ? kLevelDBCacheSize : config.cache_size;
+}
+
+// Whether the run is a diagnostic one: its cache is not the default that the main table uses.
+bool IsDiagnostic(const Config& config) {
+  return EngineCacheSize(config) != Options().block_cache_capacity;
 }
 
 // ---- The output. --------------------------------------------------------------------------------
@@ -420,6 +445,10 @@ std::string BuildJson(const Config& config, const std::string& engine, const Mac
   json.String(LastComponent(config.workload.db));
   json.Key("compact_before_reads");
   json.Bool(config.compact_before_reads);
+  json.Key("cache_size");
+  json.Integer(EngineCacheSize(config));
+  json.Key("diagnostic");
+  json.Bool(IsDiagnostic(config));
   json.EndObject();
 
   json.Key("machine");
@@ -519,6 +548,13 @@ void PrintHeader(const Config& config, const std::string& engine, const Machine&
   }
   std::printf("# build: %s, %s %s%s\n", SHALE_BENCH_BUILD_TYPE, SHALE_BENCH_COMPILER_ID,
               SHALE_BENCH_COMPILER_VERSION, extras.c_str());
+  if (IsDiagnostic(config)) {
+    std::printf(
+        "# DIAGNOSTIC: block cache of %llu bytes, not the default %llu: not a figure for the main "
+        "table\n",
+        static_cast<unsigned long long>(config.cache_size),
+        static_cast<unsigned long long>(Options().block_cache_capacity));
+  }
   std::printf("# machine: %s, %u logical cores\n", machine.cpu.c_str(), machine.logical_cores);
   std::printf("# system: %s\n", machine.uname.c_str());
   std::printf(
@@ -604,7 +640,7 @@ int Run(const Config& config) {
   }
 
   const Machine machine = DescribeMachine();
-  const std::unique_ptr<BenchEngine> engine = MakeEngine(config.engine);
+  const std::unique_ptr<BenchEngine> engine = MakeEngine(config);
   PrintHeader(config, engine->Name(), machine);
 
   std::vector<Summary> summaries;
@@ -682,12 +718,13 @@ struct NumberFlag {
 // Reads the flags into `*config`, and sets `*help` for --help. Returns what is wrong with them, or
 // an empty string.
 std::string ParseFlags(const std::vector<std::string>& words, Config* config, bool* help) {
-  const std::array<NumberFlag, 5> number_flags = {{
+  const std::array<NumberFlag, 6> number_flags = {{
       {"num", &config->workload.num, 1, kMaxNum},
       {"sync_num", &config->workload.sync_num, 1, kMaxNum},
       {"value_size", &config->workload.value_size, 1, kMaxBenchValueSize},
       {"repeat", &config->repeat, 1, kMaxRepeat},
       {"seed", &config->workload.seed, 0, UINT64_MAX},
+      {"cache_size", &config->cache_size, 0, kMaxCacheSize},
   }};
   config->benchmarks.assign(kAllBenchmarks.begin(), kAllBenchmarks.end());
   *help = false;
@@ -731,6 +768,7 @@ std::string ParseFlags(const std::vector<std::string>& words, Config* config, bo
                " to " + std::to_string(number_flag->most) + ", not '" + EscapeBytes(*value) + "'";
       }
       *number_flag->target = number;
+      config->cache_size_given = config->cache_size_given || name == "cache_size";
     } else if (name == "benchmarks") {
       if (const std::string wrong = ParseBenchmarks(*value, &config->benchmarks); !wrong.empty()) {
         return wrong;
@@ -749,6 +787,10 @@ std::string ParseFlags(const std::vector<std::string>& words, Config* config, bo
 
   if (*help) {
     return "";
+  }
+  if (config->cache_size_given && config->engine == "leveldb") {
+    return "--cache_size applies to the shale engine only: LevelDB keeps the block cache of 8 MiB "
+           "that docs/benchmarks.md gives it, and reads its tables through a mapping";
   }
   if (config->workload.db.empty()) {
     return "--db=PATH is needed to say where the database goes";
