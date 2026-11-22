@@ -8,7 +8,19 @@
 // ManualScheduler and nothing here starts another.
 //
 // The counts depend on the standard library, since the sizes of the small-string buffer and of
-// std::function's buffer differ, and CI builds both. Each figure has one constant for each.
+// std::function's buffer differ, and CI builds both. Each figure has one constant for each. With
+// libc++, on the machine that measured them, the figures were:
+//
+//                        v0.1.1   one table iterator and readahead   this change
+//   kGetCached                3                 3                          1
+//   kGetRead                  5                 5                          2
+//   kBlockRead                2                 2                          1
+//   kGetReadAndCache          8                 8                          5
+//   kSeekCached              27                13                          8
+//   kSeekRead                31                17                         10
+//
+// The bounds of libstdc++ are the counts of GCC 13, GCC 14 and Clang 17 and 18, in Debug and
+// Release, which agree. v0.1.1 was not measured with libstdc++.
 
 #include <gtest/gtest.h>
 
@@ -32,19 +44,19 @@ namespace shale {
 namespace {
 
 #if defined(_LIBCPP_VERSION)
-constexpr uint64_t kGetCached = 3;
-constexpr uint64_t kGetRead = 5;
-constexpr uint64_t kBlockRead = 2;
-constexpr uint64_t kGetReadAndCache = 8;
-constexpr uint64_t kSeekCached = 13;
-constexpr uint64_t kSeekRead = 17;
+constexpr uint64_t kGetCached = 1;
+constexpr uint64_t kGetRead = 2;
+constexpr uint64_t kBlockRead = 1;
+constexpr uint64_t kGetReadAndCache = 5;
+constexpr uint64_t kSeekCached = 8;
+constexpr uint64_t kSeekRead = 10;
 #else
-constexpr uint64_t kGetCached = 0;
-constexpr uint64_t kGetRead = 0;
-constexpr uint64_t kBlockRead = 0;
-constexpr uint64_t kGetReadAndCache = 0;
-constexpr uint64_t kSeekCached = 0;
-constexpr uint64_t kSeekRead = 0;
+constexpr uint64_t kGetCached = 1;
+constexpr uint64_t kGetRead = 2;
+constexpr uint64_t kBlockRead = 1;
+constexpr uint64_t kGetReadAndCache = 5;
+constexpr uint64_t kSeekCached = 9;
+constexpr uint64_t kSeekRead = 11;
 #endif
 
 constexpr int kKeys = 2000;
