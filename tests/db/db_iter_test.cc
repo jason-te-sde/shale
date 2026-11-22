@@ -209,6 +209,48 @@ std::string KeyWithBadType(std::string_view user_key) {
   return key;
 }
 
+// An iterator over nothing that tells a callback when it is destroyed.
+class DestructionProbe final : public Iterator {
+ public:
+  explicit DestructionProbe(std::function<void()> on_destroy)
+      : on_destroy_(std::move(on_destroy)) {}
+  ~DestructionProbe() override { on_destroy_(); }
+
+  bool Valid() const override { return false; }
+  void SeekToFirst() override {}
+  void Seek(std::string_view /*target*/) override {}
+  void Next() override {}
+  std::string_view key() const override { return {}; }
+  std::string_view value() const override { return {}; }
+  Status status() const override { return Status::OK(); }
+
+ private:
+  const std::function<void()> on_destroy_;
+};
+
+TEST(DBIterPinTest, ReleasesTheInternalIteratorThenThePinThenRunsTheCallback) {
+  // The order that the three wrappers it replaces had, the cleanup outermost: what the internal
+  // iterator points into is released after it, and a count that the callback lowers goes down after
+  // everything the iterator held is gone.
+  std::vector<std::string> events;
+  const auto mem = std::make_shared<MemTable>(1);
+  DBIterPin pin;
+  pin.mem =
+      std::shared_ptr<MemTable>(mem.get(), [&events](MemTable*) { events.emplace_back("mem"); });
+  pin.imm =
+      std::shared_ptr<MemTable>(mem.get(), [&events](MemTable*) { events.emplace_back("imm"); });
+  std::unique_ptr<Iterator> it = NewDBIterator(
+      std::make_unique<DestructionProbe>([&events] { events.emplace_back("internal"); }), 10,
+      std::move(pin), [&events] { events.emplace_back("callback"); });
+  EXPECT_TRUE(events.empty()) << "the pin is held for as long as the iterator lives";
+  it.reset();
+  ASSERT_EQ(events.size(), size_t{4});
+  EXPECT_EQ(events[0], "internal");
+  EXPECT_EQ(events[3], "callback");
+  EXPECT_TRUE((events[1] == "mem" && events[2] == "imm") ||
+              (events[1] == "imm" && events[2] == "mem"));
+}
+
 TEST(DBIterCorruptionTest, AKeyShorterThanTheTagEndsTheIterationWithCorruption) {
   const std::unique_ptr<Iterator> it = NewDBIterator(
       NewVectorIterator({{IKey("a", 1), "1"}, {kShortKey, "x"}, {IKey("z", 2), "2"}}), 10);
