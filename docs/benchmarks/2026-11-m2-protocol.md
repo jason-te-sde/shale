@@ -71,10 +71,12 @@ stated next to the results.
 **The quiet check, before every run.** All of these hold:
 
 - the 1-minute load average is under 2.0;
-- no process is running whose name is `ninja`, `clang` (or `clang++`, `clang-<n>`), `cmake`, `ctest`, `ld`
-  or `ld64`, or begins with `shale_` or `fuzz_`. The names are matched exactly, as whole names (2026-10
-  matched the text `ninja|clang|cmake|ctest|ld64|shale_|fuzz_` anywhere in a name, which would also hold a
-  run for a language server called `clangd`);
+- no process is running whose name is `ninja`, `clang`, `clang++`, any name beginning `clang-` (the versioned drivers, `clang-tidy`, `clang-format`),
+  `cmake`, `ctest`, `ld`
+  or `ld64`, or begins with `shale_` or `fuzz_`. The names are matched as whole names, not as text inside a
+  name, so a language server called `clangd` does not hold a run (2026-10 recorded the pattern
+  `ninja|clang|cmake|ctest|ld64|shale_|fuzz_`; the set of names above still covers what it was meant to
+  catch, `clang-tidy` and `clang-format` included);
 - the machine draws from AC power;
 - the run is made under `caffeinate -ims`, and so is the waiting.
 
@@ -82,11 +84,15 @@ The check is made every 15 seconds, as in 2026-10, and waits up to 2 hours of wa
 Past that, the run is not made, `measure.sh` exits with status 3 and the controller is told. `measure.sh`
 (appendix) does the check, the run and the record, for every run in this protocol, including the probes
 of section 4 D: a probe run is also made after the quiet check, which 2026-10's probes were not.
+`measure.sh` keeps each run's standard output and standard error under `$WORK/logs`, never in the
+repository.
 
 **Go.** No run starts before the controller's Go, which means the GPU evaluation that shares this machine
 has finished. Builds are made before Go, at `-j4` at most; runs are not.
 
 ## 4. Order
+
+The blocks run in the order A, B, W, C, then D.
 
 `$DB` is an empty directory on the internal SSD, made empty again before every run. In the lists below,
 "first pass" is the command as given and "compacted" is the same command with `--compact_before_reads`.
@@ -100,9 +106,9 @@ has finished. Builds are made before Go, at `-j4` at most; runs are not.
 | 3 | `ef v011 leveldb e final` |
 
 This replaces the cyclic rotation of the brief, which kept `ef` before `final` and `final` before
-`leveldb` in every round. Here rounds 1 and 2 are each other's reverse, so every pair of builds that
-neighbour in round 1 (`v011` and `e`, `e` and `ef`, `ef` and `final`, `final` and `leveldb`), and `v011`
-and `final`, run in both orders.
+`leveldb` in every round. Here every neighbouring pair of builds, and `v011` and `final`, run in both
+orders across the three rounds (`ef` and `final` neighbour each other in round 1 and round 2 only in the
+order ef, final in round 1 and final, ef in round 2; `final` and `leveldb` likewise).
 
 Within a round, every build's first-pass run comes before any compacted run, each pass following the
 round's order of builds: for example round 1 is `v011 e ef final leveldb` in the first pass and then
@@ -127,10 +133,18 @@ in rounds 1 and 3 and leveldb, final in round 2.
   `mmap`, `munmap`, `fsync` and `fcntl(F_FULLFSYNC)` and that the probe snapshots around each benchmark.
 - **Profiles** are made with `sample`, through `profile.sh`, `sample_parse.py` and `categories.py`, of
   `readrandom`, `readseq` and `seekrandom` in both states (first pass and compacted).
-- The sources of the probe (`probe.cc`), `interpose.c`, `profile.sh`, `sample_parse.py` and
-  `categories.py` are taken verbatim from section 6 and section 7.5 of
-  [the 2026-10 evidence](2026-10-m2-evidence.txt). Any change to them is recorded as a diff against that
-  text, next to the results.
+- **Every probe run, counting or profiling, goes through `profile.sh`**, which sets
+  `DYLD_INSERT_LIBRARIES` on the probe's own command line. The variable is never set around
+  `measure.sh`: `/usr/bin/env` and `caffeinate` are protected by SIP and drop `DYLD_*` variables, so a
+  probe started under them would run without the counting library and still exit 0. `measure.sh` wraps
+  `profile.sh` (`BENCH=profile.sh`), which is under `caffeinate` and the quiet check without that
+  variable being lost, so no second check is needed inside `profile.sh`.
+- **A probe run is a failure** unless both hold: the standard output that `measure.sh` kept
+  (`$WORK/logs/<measure label>.stdout`) has the line `<profile label>: probe exit 0` that `profile.sh`
+  prints, and the probe's own output file (`$SCRATCH/prof-<profile label>.out`, with `SCRATCH=$WORK/probe`)
+  has lines beginning `interpose:`. `profile.sh` itself always exits 0, so these two checks, which are made
+  after the run and written into the evidence, are what decide. A failed probe run is run once more and
+  both are recorded, as in section 5.
 - Both probes are built with the one command that 2026-10 recorded, `c++ -O2 -g -std=c++20`, against
   the Release libraries of the build probed (`v011` or `final`), and with the same arguments except
   for that build's directory. `interpose.dylib` is built once and used for both. The evidence records the
@@ -176,8 +190,7 @@ shale_bench --engine=shale --benchmarks=fillseq,fillrandom,overwrite --num=10000
 
 for `<build>` in `v011`, `e`, `ef`, `final` and `leveldb` (with `--engine=leveldb` for the last).
 
-**C.** The benchmark list of B, with `--cache_size`, so that the reads see the same compaction state as in
-A and B:
+**C.** The benchmark list of B, with `--cache_size`, so that C runs the same sequence of benchmarks as B:
 
 ```
 shale_bench --engine=shale --cache_size=1073741824 --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-diagnostic/<final|leveldb>-<pass>-<r>.json
@@ -188,10 +201,11 @@ leave out `--cache_size` (it is a usage error with `--engine=leveldb`) and use `
 LevelDB's cache is as configured, 8 MiB. The diagnostic rows that are reported are `readrandom` and
 `seekrandom`; the other benchmarks are there for the state they leave.
 
-**A failed run.** `measure.sh` records the exit status and keeps a non-empty standard error in a file next
-to the JSON file (the same name with `.stderr`), and names it in the record. A run that fails is run again
-once. The rerun writes the same `--json` path, replacing what the failed run left, and appends to the same
-standard error file; both runs are in the evidence file. A second failure stops the measurement and the
+**A failed run.** `measure.sh` records the exit status and keeps a non-empty standard error in
+`$WORK/logs/<label>.stderr`, and names it in the record by that `$WORK`-relative path, with its last line
+(paths under `$WORK` and `$DB` written as such). A run that fails is run again once. The rerun writes the
+same `--json` path, replacing what the failed run left, and appends to the same standard error file; both
+runs are in the evidence file. A second failure stops the measurement and the
 controller is told.
 
 ## 6. What is reported
@@ -248,8 +262,9 @@ quiet line (the load, and `waited`, as in section 7.1 of the 2026-10 evidence), 
 power, the command, the exit status, the end and the uptime. The fields and their wording are those of
 sections 0 and 7.1 of the 2026-10 evidence, laid out as in section 0 (the label at the margin, each field
 indented by two spaces); the command is written with `$WORK` and `$DB` for those paths, as the
-2026-10 evidence writes `$DB`. Two things are new: a line naming the standard error file and its last line,
-when the run wrote any, and the exact-name matching of the quiet check.
+2026-10 evidence writes `$DB`. Three things are new: a line naming the standard output file, a line naming the standard error file and
+its last line (with `$WORK` and `$DB` substituted) when the run wrote any, and the whole-name matching of the
+quiet check.
 
 ```bash
 #!/usr/bin/env bash
@@ -257,13 +272,13 @@ when the run wrote any, and the exact-name matching of the quiet check.
 # Waits for the machine to be quiet, then runs one command under caffeinate and appends the record of
 # the run to $EVIDENCE. $BENCH is the command (shale_bench, or a probe), $DB the database directory (made
 # empty before the run), $WORK the scratch directory. Paths under $WORK and $DB are written to the
-# record as $WORK and $DB. Standard error is kept in a file next to the --json file (or in $WORK/logs)
-# when it is not empty, and named in the record. Exit status: the run's, or 3 if the machine was not
+# record as $WORK and $DB. Standard output and standard error are kept in $WORK/logs (never in the
+# repository), and a non-empty standard error is named in the record. Exit status: the run's, or 3 if the machine was not
 # quiet within two hours of wall time.
 set -uo pipefail
 : "${BENCH:?}" "${DB:?}" "${EVIDENCE:?}" "${WORK:?}"
 label=$1; shift
-names='^(ninja|clang|clang\+\+|clang-[0-9]+|cmake|ctest|ld|ld64|shale_.*|fuzz_.*)$'
+names='^(ninja|clang|clang\+\+|clang-.*|cmake|ctest|ld|ld64|shale_.*|fuzz_.*)$'
 busy='process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*'
 limit=7200 poll=15 begin=$(date +%s)
 while :; do
@@ -278,9 +293,10 @@ while :; do
   fi
   caffeinate -ims sleep "$poll"
 done
-errfile="$WORK/logs/${label//[^A-Za-z0-9._-]/_}.stderr"
-for a in "$@"; do case "$a" in --json=*) mkdir -p "$(dirname "${a#--json=}")"; errfile="${a#--json=}"; errfile="${errfile%.json}.stderr";; esac; done
-mkdir -p "$(dirname "$errfile")"
+base="$WORK/logs/${label//[^A-Za-z0-9._-]/_}"
+errfile="$base.stderr" outfile="$base.stdout"
+for a in "$@"; do case "$a" in --json=*) mkdir -p "$(dirname "${a#--json=}")";; esac; done
+mkdir -p "$WORK/logs"
 shown() { local s=$*; s=${s//"$DB"/\$DB}; s=${s//"$WORK"/\$WORK}; echo "$s"; }
 rm -rf "$DB"; mkdir -p "$DB"
 {
@@ -290,21 +306,23 @@ rm -rf "$DB"; mkdir -p "$DB"
   echo "  uptime at start: $(uptime)"
   echo "  power at start: $power"
   echo "  command: $(shown "caffeinate -ims $BENCH $*")"
+  echo "  standard output kept in: $(shown "$outfile")"
 } >> "$EVIDENCE"
-caffeinate -ims "$BENCH" "$@" 2> "$errfile.run"
+caffeinate -ims "$BENCH" "$@" > "$outfile.run" 2> "$errfile.run"
 status=$?
 {
   echo "  exit status: $status"
   if [ -s "$errfile.run" ]; then
     echo "  standard error kept in: $(shown "$errfile")"
-    echo "  last line of standard error: $(tail -n 1 "$errfile.run")"
+    echo "  last line of standard error: $(shown "$(tail -n 1 "$errfile.run")")"
   fi
   echo "  end: $(date '+%Y-%m-%d %H:%M:%S %z')"
   echo "  uptime at end: $(uptime)"
   echo
 } >> "$EVIDENCE"
+cat "$outfile.run" >> "$outfile"; cat "$outfile.run"
 if [ -s "$errfile.run" ]; then cat "$errfile.run" >> "$errfile"; cat "$errfile.run" >&2; fi
-rm -f "$errfile.run"
+rm -f "$errfile.run" "$outfile.run"
 exit "$status"
 ```
 
