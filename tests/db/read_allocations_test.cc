@@ -43,28 +43,55 @@ namespace shale {
 
 namespace {
 
+// The bounds of one run of the figures.
+struct Bounds {
+  uint64_t get_cached;
+  uint64_t get_read;
+  uint64_t block_read;
+  uint64_t get_read_and_cache;
+  uint64_t seek_cached;
+  uint64_t seek_read;
+};
+
+// Keys of 7 bytes, which fit the small-string buffer of both standard libraries with their tag.
 #if defined(_LIBCPP_VERSION)
-constexpr uint64_t kGetCached = 1;
-constexpr uint64_t kGetRead = 2;
-constexpr uint64_t kBlockRead = 1;
-constexpr uint64_t kGetReadAndCache = 5;
-constexpr uint64_t kSeekCached = 8;
-constexpr uint64_t kSeekRead = 10;
+constexpr Bounds kShortKeys = {
+    /*kGetCached=*/1,       /*kGetRead=*/2,    /*kBlockRead=*/1,
+    /*kGetReadAndCache=*/5, /*kSeekCached=*/8, /*kSeekRead=*/10};
 #else
-constexpr uint64_t kGetCached = 1;
-constexpr uint64_t kGetRead = 2;
-constexpr uint64_t kBlockRead = 1;
-constexpr uint64_t kGetReadAndCache = 5;
-constexpr uint64_t kSeekCached = 9;
-constexpr uint64_t kSeekRead = 11;
+constexpr Bounds kShortKeys = {1, 2, 1, 5, 9, 11};
+#endif
+
+// Keys of 16 bytes, as the benchmark's are: 24 bytes with their tag, which no small-string buffer
+// holds, so every copy of a key that a std::string makes is an allocation.
+#if defined(_LIBCPP_VERSION)
+constexpr Bounds kLongKeys = {1, 2, 1, 5, 9, 11};
+#else
+constexpr Bounds kLongKeys = {0, 0, 0, 0, 0, 0};
 #endif
 
 constexpr int kKeys = 2000;
 constexpr int kLevel0First = 5000;
 constexpr int kLevel0Count = 500;
 
-class ReadAllocationsTest : public ::testing::Test {
+// The user key of number `i`, padded to `size` bytes: keys of every size sort as the numbers do.
+std::string KeyOf(size_t size, int i) {
+  std::string key = UserKey(i);
+  key.resize(size, 'x');
+  return key;
+}
+
+// Run once for each size of key.
+class ReadAllocationsTest : public ::testing::TestWithParam<size_t> {
  protected:
+  size_t key_size() const { return GetParam(); }
+  std::string KeyOf(int i) const { return shale::KeyOf(key_size(), i); }
+  const Bounds& bounds() const { return key_size() == 7 ? kShortKeys : kLongKeys; }
+  // The names of the figures: those of 7-byte keys are bare, the others carry the size.
+  std::string Name(const char* figure) const {
+    return key_size() == 7 ? figure : std::string(figure) + std::to_string(key_size());
+  }
+
   // A database of 2000 keys of 100-byte values in level 1, and a level-0 table whose range is
   // above every key the tests look up.
   void SetUp() override {
@@ -76,12 +103,12 @@ class ReadAllocationsTest : public ::testing::Test {
     ASSERT_OK(DB::Open(options, "/db", &db_));
     const std::string value(100, 'v');
     for (int i = 0; i < kKeys; i++) {
-      ASSERT_OK(db_->Put(WriteOptions(), UserKey(i), value));
+      ASSERT_OK(db_->Put(WriteOptions(), KeyOf(i), value));
     }
     ASSERT_OK(db_->Flush());
     ASSERT_OK(db_->CompactRange(std::nullopt, std::nullopt));
     for (int i = kLevel0First; i < kLevel0First + kLevel0Count; i++) {
-      ASSERT_OK(db_->Put(WriteOptions(), UserKey(i), value));
+      ASSERT_OK(db_->Put(WriteOptions(), KeyOf(i), value));
     }
     ASSERT_OK(db_->Flush());
   }
@@ -90,12 +117,13 @@ class ReadAllocationsTest : public ::testing::Test {
 
   // Looks `key` up, and returns the allocations that took.
   uint64_t CountGet(const ReadOptions& options, int key) {
+    const std::string user_key = KeyOf(key);
     std::string value;
     Status s;
     uint64_t count = 0;
     {
       const AllocationCounter counter;
-      s = db_->Get(options, UserKey(key), &value);
+      s = db_->Get(options, user_key, &value);
       count = counter.count();
     }
     EXPECT_OK(s);
@@ -106,18 +134,19 @@ class ReadAllocationsTest : public ::testing::Test {
   // Makes an iterator, seeks to `key`, reads the entry, and destroys the iterator: the allocations
   // of all of it.
   uint64_t CountSeek(const ReadOptions& options, int key) {
+    const std::string user_key = KeyOf(key);
     uint64_t count = 0;
     bool valid = false;
     {
       const AllocationCounter counter;
       {
         std::unique_ptr<Iterator> it = db_->NewIterator(options);
-        it->Seek(UserKey(key));
+        it->Seek(user_key);
         valid = it->Valid();
         if (valid) {
           const std::string_view k = it->key();
           const std::string_view v = it->value();
-          valid = k == UserKey(key) && v.size() == 100;
+          valid = k == user_key && v.size() == 100;
         }
       }
       count = counter.count();
@@ -135,24 +164,24 @@ class ReadAllocationsTest : public ::testing::Test {
   std::unique_ptr<DB> db_;
 };
 
-TEST_F(ReadAllocationsTest, GetThatFindsItsBlockInTheCache) {
+TEST_P(ReadAllocationsTest, GetThatFindsItsBlockInTheCache) {
   const ReadOptions options;
   CountGet(options, 1000);  // opens the table and caches the block
   const uint64_t count = CountGet(options, 1000);
-  Print("kGetCached", count);
-  EXPECT_LE(count, kGetCached);
+  Print(Name("kGetCached").c_str(), count);
+  EXPECT_LE(count, bounds().get_cached);
 }
 
-TEST_F(ReadAllocationsTest, GetThatReadsItsBlock) {
+TEST_P(ReadAllocationsTest, GetThatReadsItsBlock) {
   ReadOptions options;
   options.fill_cache = false;
   CountGet(options, 100);  // opens the table
   const uint64_t count = CountGet(options, 1000);
-  Print("kGetRead", count);
-  EXPECT_LE(count, kGetRead);
+  Print(Name("kGetRead").c_str(), count);
+  EXPECT_LE(count, bounds().get_read);
 }
 
-TEST_F(ReadAllocationsTest, BlockReadIsTheDifference) {
+TEST_P(ReadAllocationsTest, BlockReadIsTheDifference) {
   const ReadOptions cached;
   ReadOptions uncached;
   uncached.fill_cache = false;
@@ -160,39 +189,39 @@ TEST_F(ReadAllocationsTest, BlockReadIsTheDifference) {
   const uint64_t hit = CountGet(cached, 1000);
   const uint64_t read = CountGet(uncached, 1500);
   ASSERT_GE(read, hit);
-  Print("kBlockRead", read - hit);
-  EXPECT_LE(read - hit, kBlockRead);
+  Print(Name("kBlockRead").c_str(), read - hit);
+  EXPECT_LE(read - hit, bounds().block_read);
 }
 
-TEST_F(ReadAllocationsTest, GetThatReadsAndCachesItsBlock) {
+TEST_P(ReadAllocationsTest, GetThatReadsAndCachesItsBlock) {
   const ReadOptions options;
   CountGet(options, 100);  // opens the table
   const uint64_t count = CountGet(options, 1000);
-  Print("kGetReadAndCache", count);
-  EXPECT_LE(count, kGetReadAndCache);
+  Print(Name("kGetReadAndCache").c_str(), count);
+  EXPECT_LE(count, bounds().get_read_and_cache);
 }
 
-TEST_F(ReadAllocationsTest, NewIteratorAndSeekWithBlocksCached) {
+TEST_P(ReadAllocationsTest, NewIteratorAndSeekWithBlocksCached) {
   const ReadOptions options;
   CountSeek(options, 1000);  // opens the tables and caches their blocks
   const uint64_t count = CountSeek(options, 1000);
-  Print("kSeekCached", count);
-  EXPECT_LE(count, kSeekCached);
+  Print(Name("kSeekCached").c_str(), count);
+  EXPECT_LE(count, bounds().seek_cached);
 }
 
-TEST_F(ReadAllocationsTest, NewIteratorAndSeekThatReadsBlocks) {
+TEST_P(ReadAllocationsTest, NewIteratorAndSeekThatReadsBlocks) {
   ReadOptions options;
   options.fill_cache = false;
   CountSeek(options, 100);  // opens the tables
   const uint64_t count = CountSeek(options, 1000);
-  Print("kSeekRead", count);
-  EXPECT_LE(count, kSeekRead);
+  Print(Name("kSeekRead").c_str(), count);
+  EXPECT_LE(count, bounds().seek_read);
 }
 
-TEST_F(ReadAllocationsTest, NextWithinABlockAllocatesNothing) {
+TEST_P(ReadAllocationsTest, NextWithinABlockAllocatesNothing) {
   const ReadOptions options;
   std::unique_ptr<Iterator> it = db_->NewIterator(options);
-  it->Seek(UserKey(1000));
+  it->Seek(KeyOf(1000));
   ASSERT_TRUE(it->Valid());
   it->Next();  // the first step after a seek
   ASSERT_TRUE(it->Valid());
@@ -205,10 +234,15 @@ TEST_F(ReadAllocationsTest, NextWithinABlockAllocatesNothing) {
     count = counter.count();
   }
   ASSERT_TRUE(it->Valid());
-  EXPECT_EQ(it->key(), UserKey(1011));
-  Print("next", count);
+  EXPECT_EQ(it->key(), KeyOf(1011));
+  Print(Name("next").c_str(), count);
   EXPECT_EQ(count, 0u);
 }
+
+INSTANTIATE_TEST_SUITE_P(KeySizes, ReadAllocationsTest, ::testing::Values(size_t{7}, size_t{16}),
+                         [](const ::testing::TestParamInfo<size_t>& info) {
+                           return "Keys" + std::to_string(info.param);
+                         });
 
 }  // namespace
 
