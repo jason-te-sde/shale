@@ -7,6 +7,43 @@ a minor release may change the API.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-23
+
+No file the engine writes has changed, and the table format version is the same. The figures below are from [the 2026-11 measurement](docs/benchmarks.md#2026-11-the-read-path-012),
+made on one Apple M2 in one session with v0.1.1 and 0.1.2 run in interleaved rounds; each is a median of three rounds.
+A ratio above 1 means that 0.1.2 is faster.
+
+### Changed
+
+- **Every read row of `shale_bench` is faster than in v0.1.1**, in the first pass and after a compaction, by the rule
+  of the protocol (the rounds of the two builds do not overlap and the medians are at least 3% apart). Ratios of
+  0.1.2 to v0.1.1, first pass and compacted: `readseq` 1.97 and 1.98, `seekrandom` 1.24 and 1.25, `readmissing` 1.11 and
+  1.16, `readrandom` 1.04 and 1.04
+  ([results](docs/benchmarks.md#2026-11-the-read-rows-in-interleaved-rounds)).
+- **A table is read through one iterator**, in place of a stack of five, and a compaction reads its input tables through
+  it. It makes every check the old path made (the block checksum whenever `verify_checksums` is set, the type byte, key
+  order, the bound of each index entry and the landing of a seek), and every error is the same and still names the file.
+- **A table iterator reads ahead** once it has moved to the next data block twice in a row after a seek: one read takes
+  the block and the 8 KiB after it, then twice as many each time, up to 256 KiB. A seek starts again and `Get()` never
+  reads ahead. A table read in order costs up to 256 KiB plus one block of buffer. It cut the `pread` calls of
+  `readseq` from 31,786 to 875 in the first pass and from 27,711 to 765 after a compaction. There is no option for it.
+- **A read allocates less.** A `Get` whose block is cached allocates 1 time against 6 in v0.1.1, a `Get` that reads
+  its block from the file 2 against 8, and a seek whose blocks are cached 9 against 39 (libc++, 16-byte keys, as
+  `read_allocations_test` counts them; [figures](docs/benchmarks.md#2026-11-allocations-per-operation)).
+- **Compaction is faster.** A compaction of the whole key range of the same files took 2.593 s in v0.1.1 and 1.509 s
+  in 0.1.2, with the same compactions and the same bytes read and written
+  ([figures](docs/benchmarks.md#2026-11-e-made-compaction-faster)). After `overwrite`, 0.1.2 has made all 50 of its
+  compactions when the last write returns, where v0.1.1 has made 37 or 38.
+
+### Added
+
+- `shale_bench --cache_size=BYTES` sets the block cache of the shale engine, from 0 to 64 GiB (default 8 MiB). A run with
+  any other size prints a `# DIAGNOSTIC` line and says `"diagnostic": true` in its JSON, because it is not a row of the
+  main comparison.
+- `shale_bench --existing_db=WRITE` opens the database at `--db` as it is and runs only reads on it, checked against
+  what the write benchmark `WRITE` makes. After every write run `shale_bench` now waits until the engine's background
+  is idle, and a write row's JSON gives its figures when the last write returned and once settled.
+
 ## [0.1.1] - 2026-10-20
 
 ### Fixed
@@ -56,6 +93,7 @@ The first release.
   [format](docs/format.md), the [operations guide](docs/operations.md), [testing](docs/testing.md), the
   [benchmarks](docs/benchmarks.md) and seven [design records](docs/design/).
 
-[Unreleased]: https://github.com/jason-te-sde/shale/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/jason-te-sde/shale/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/jason-te-sde/shale/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/jason-te-sde/shale/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jason-te-sde/shale/releases/tag/v0.1.0
