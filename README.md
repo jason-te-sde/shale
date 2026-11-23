@@ -229,90 +229,100 @@ LevelDB and RocksDB: the default that cannot lose a confirmed write.
 ## Measured
 
 <!-- benchmarks:begin (copied from docs/benchmarks.md: replace everything up to the end marker) -->
-shale and LevelDB on one machine, through the same workloads and the same code (`shale_bench`). **A ratio
-under 1 means shale is slower.** Each figure is the median of three runs, with the lowest and the highest in
-brackets. Every read was checked against a record of what was written. The figures of shale are those of
-the final build, after four changes that a first measurement led to
-([docs/benchmarks.md](docs/benchmarks.md) has the figures before them).
+shale 0.1.2 next to v0.1.1 and LevelDB on one machine, through the same workloads and the same code (`shale_bench`), all
+built and run in one session on 2026-11-22. A ratio is the first figure over the second: above 1 means the first is faster. Each
+figure is the median of three runs, with the lowest and the highest in brackets. Every read was checked against a record of
+what was written.
 
-In short, measured on 2026-10-18 with both engines in the same session:
+In short:
 
-- **Writes.** On `fillseq` and `fillrandom` shale is level with LevelDB: 0.99 and 0.98 of its ops/s in
-  three interleaved rounds of the two engines, against 0.87 and 0.90 before the changes. `overwrite` is
-  0.84 (0.81 before). The single runs of the full commands put shale above LevelDB on all three in the first
-  pass and below it in the second; the write rows of this machine move by up to 16% from one run to the next,
-  which is why the interleaved rounds are the figure to use. Synced writes are level (1.02, 1.03).
-- **Reads.** LevelDB is faster at reading what is there: `readrandom` 0.70 and 0.74, `readseq` 0.28 and 0.46,
-  `seekrandom` 0.28 and 0.68 (first pass, and compacted before the reads). shale is faster at keys that
-  are not there: `readmissing` 1.21 and 2.49.
-- **The changes.** Four inefficiencies that the first measurement found were fixed. A synced write still
-  survives a power loss with every write acknowledged before it, and a power loss still leaves a prefix of
-  the writes. Since a memtable switch no longer syncs, recovery now also sets aside a log that begins after
-  a gap that a power loss left, whatever `paranoid_checks` says
-  ([durability](docs/design/0004-durability.md), D6). Inlining `Status::ok()` and the key comparison
-  made `readseq` 9% faster in the compacted pass, and the first-pass reads 7% to 59% faster in runs
-  that are less steady; reading blocks into buffers that are not zero-filled, 2% on the point reads
-  and seeks; writing the MANIFEST without the database mutex held, nothing measurable on its own;
-  taking the syncs of a memtable switch off the writer's path, 4% to 13% on the write rows in the
-  interleaved rounds. Each, with its figures, is in [docs/benchmarks.md](docs/benchmarks.md).
+- **Faster reads than v0.1.1.** In three interleaved rounds of the builds, after a compaction `readseq` is
+  1.94 times as fast, `seekrandom` 1.23 times and `readmissing`
+  1.13 times; under the commands as given `readseq` is 1.32 times as
+  fast. Readahead took the `pread` calls of `readseq` from 31,285 to 932, and a cached
+  `Get` allocates once where it allocated 6 times.
+- **Ahead of LevelDB on `readmissing`**: 1.16 and 3.07 (first
+  pass, compacted), with all three rounds of shale above all three of LevelDB's. Synced writes (`fillsync`, one run of each) are 348
+  ops/s against LevelDB's 336.
+- **What changed.** One table iterator that makes every check itself, readahead for a table read in order, and fewer
+  allocations for a read. No file the engine writes has changed.
 
-**Machine.** Apple M2, 8 cores (4 performance, 4 efficiency), 16 GiB, macOS 26.6.2 (build 25G83), `Darwin 25.6.0
-arm64`; shale a Release build with Apple clang 21.0.0; LevelDB 1.23, the Homebrew bottle `leveldb 1.23_2`;
-1,000,000 keys of 16 bytes and values of 100 bytes (`fillsync`: 10,000 puts).
+The rows where LevelDB is faster, the rows that did not improve, the write rows in rounds, a diagnostic run with the whole
+database in the block cache, and what these numbers do not say are in [docs/benchmarks.md](docs/benchmarks.md#2026-11-where-shale-is-still-slower-and-why)
+and the sections after it. The figures of 2026-10 that the file keeps were made on another version of macOS, and are not
+comparable with these.
 
-**Commands.** `$DB` is an empty directory on the internal SSD.
+**Machine.** Apple M2, 8 cores (4 performance, 4 efficiency), 16 GiB, macOS 27.2.1 (build 26B131), `Darwin 27.2.0 arm64`; shale a
+Release build with Apple clang 21.0.0; LevelDB 1.23, the Homebrew bottle `leveldb 1.23_2`; 1,000,000 keys of 16 bytes and values
+of 100 bytes (`fillsync`: 10,000 puts). The builds are clean exports of v0.1.1 (`9fefedf`) and of `59e795e`, whose library is that of
+0.1.2.
+
+**Commands.** `$DB` is an empty directory on the internal SSD, `$WORK/<build>` the export of a build.
 
 ```
-cmake --preset release -DSHALE_BUILD_BENCH=ON -DCMAKE_PREFIX_PATH=$(brew --prefix leveldb)
-cmake --build --preset release
+cmake -S $WORK/<build> -B $WORK/<build>/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSHALE_BUILD_BENCH=ON \
+  -DSHALE_BUILD_TESTS=OFF -DCMAKE_PREFIX_PATH=$(brew --prefix leveldb)
+cmake --build $WORK/<build>/build --target shale_bench
 
-caffeinate -ims build/release/tools/shale_bench --engine=shale \
+caffeinate -ims $WORK/<build>/build/tools/shale_bench --engine=shale \
   --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom \
-  --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2.json
-caffeinate -ims build/release/tools/shale_bench --engine=leveldb \
+  --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-<build>.json
+caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb \
   --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom \
-  --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-10-m2-leveldb.json
+  --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-leveldb.json
 ```
 
-The commands as given:
+The commands as given, one run of each (`<build>` is `v011` and `final`):
 
-| benchmark | shale ops/s | LevelDB ops/s | shale / LevelDB |
-| --- | ---: | ---: | ---: |
-| fillseq | 441,200 (435,705 to 441,654) | 408,109 (403,560 to 413,307) | 1.08 |
-| fillrandom | 290,445 (288,418 to 291,838) | 247,073 (243,598 to 253,134) | 1.18 |
-| fillsync | 345 (344 to 346) | 337 (336 to 337) | 1.02 |
-| overwrite | 239,958 (235,260 to 240,642) | 237,847 (234,719 to 240,619) | 1.01 |
-| readrandom | 304,512 (297,775 to 304,775) | 431,943 (369,074 to 434,236) | 0.70 |
-| readmissing | 1,294,124 (1,293,920 to 1,297,000) | 1,065,736 (1,065,329 to 1,067,809) | 1.21 |
-| readseq | 3,478,488 (3,477,337 to 3,486,352) | 12,453,332 (12,437,695 to 12,484,537) | 0.28 |
-| seekrandom | 103,190 (103,153 to 103,327) | 366,458 (364,424 to 366,875) | 0.28 |
+| benchmark | v0.1.1 ops/s | 0.1.2 ops/s | LevelDB ops/s | 0.1.2 / v0.1.1 | 0.1.2 / LevelDB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| fillseq | 353,592 (351,506 to 361,211) | 364,009 (357,450 to 368,952) | 372,806 (356,444 to 377,477) | 1.03 | 0.98 |
+| fillrandom | 250,686 (203,065 to 256,023) | 255,153 (236,936 to 260,382) | 251,158 (213,446 to 257,578) | 1.02 | 1.02 |
+| fillsync | 339 (339 to 341) | 348 (347 to 348) | 336 (336 to 337) | 1.03 | 1.03 |
+| overwrite | 227,493 (225,379 to 229,440) | 212,776 (211,357 to 214,231) | 262,602 (261,650 to 264,170) | 0.94 | 0.81 |
+| readrandom | 335,910 (322,018 to 336,597) | 311,709 (310,336 to 312,012) | 449,074 (393,755 to 453,608) | 0.93 | 0.69 |
+| readmissing | 1,561,970 (1,557,656 to 1,567,684) | 1,237,600 (1,235,168 to 1,238,079) | 1,081,730 (1,081,608 to 1,090,322) | 0.79 | 1.14 |
+| readseq | 4,308,290 (4,271,166 to 4,313,903) | 5,642,695 (5,586,235 to 5,644,453) | 12,757,807 (12,741,302 to 12,764,111) | 1.31 | 0.44 |
+| seekrandom | 170,310 (170,249 to 170,769) | 99,196 (98,762 to 99,346) | 386,148 (385,988 to 386,291) | 0.58 | 0.26 |
 
 The same, with `--compact_before_reads` (the database is compacted once, before the reads):
 
-| benchmark | shale ops/s | LevelDB ops/s | shale / LevelDB |
-| --- | ---: | ---: | ---: |
-| fillseq | 377,485 (372,644 to 380,806) | 413,846 (404,282 to 415,407) | 0.91 |
-| fillrandom | 242,763 (242,581 to 246,257) | 249,546 (248,928 to 252,725) | 0.97 |
-| fillsync | 345 (342 to 346) | 337 (336 to 344) | 1.03 |
-| overwrite | 212,334 (209,492 to 213,469) | 245,928 (240,790 to 250,904) | 0.86 |
-| readrandom | 375,821 (375,674 to 376,086) | 505,382 (504,340 to 505,730) | 0.74 |
-| readmissing | 4,111,598 (4,108,292 to 4,117,099) | 1,651,735 (1,648,003 to 1,659,988) | 2.49 |
-| readseq | 6,062,353 (6,058,940 to 6,066,268) | 13,299,420 (13,227,572 to 13,319,319) | 0.46 |
-| seekrandom | 287,504 (287,476 to 287,849) | 424,286 (423,382 to 425,101) | 0.68 |
+| benchmark | v0.1.1 ops/s | 0.1.2 ops/s | LevelDB ops/s | 0.1.2 / v0.1.1 | 0.1.2 / LevelDB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| fillseq | 365,033 (364,026 to 366,166) | 354,400 (354,062 to 354,430) | 371,536 (365,014 to 376,294) | 0.97 | 0.95 |
+| fillrandom | 257,077 (250,349 to 258,904) | 251,713 (245,578 to 259,095) | 264,359 (257,184 to 264,676) | 0.98 | 0.95 |
+| fillsync | 347 (347 to 347) | 346 (346 to 347) | 338 (337 to 338) | 1.00 | 1.02 |
+| overwrite | 233,306 (228,958 to 235,646) | 213,097 (211,641 to 214,790) | 218,716 (218,708 to 223,255) | 0.91 | 0.97 |
+| readrandom | 385,798 (375,496 to 387,503) | 426,068 (420,045 to 426,503) | 537,590 (535,234 to 539,030) | 1.10 | 0.79 |
+| readmissing | 4,232,505 (4,175,567 to 4,259,019) | 4,939,866 (4,938,384 to 4,944,253) | 1,598,519 (1,577,105 to 1,617,481) | 1.17 | 3.09 |
+| readseq | 6,063,439 (5,974,389 to 6,084,389) | 11,987,150 (11,839,866 to 12,001,236) | 13,557,959 (13,551,352 to 13,570,408) | 1.98 | 0.88 |
+| seekrandom | 297,692 (295,511 to 299,952) | 383,716 (375,822 to 384,326) | 450,217 (449,974 to 450,501) | 1.29 | 0.85 |
 
-The write rows of this machine move by up to 16% from one run to the next, so the figure to use for them is the
-one of three rounds that ran the builds one after the other, each run after a check for a quiet machine
-(ops/s, the median of the three rounds' medians; "before" is the build with the first two changes, which do not
-touch writing, and without the MANIFEST and switch changes; "with both" is the final build):
+The figure to use for a read row or a write row is the one of three rounds that ran the builds one after the other, in three
+orders (the median of the three rounds' medians, with the lowest and highest round in brackets), with the rules for what counts as
+a change and what counts as level, all in [docs/benchmarks.md](docs/benchmarks.md#2026-11-the-read-rows-in-interleaved-rounds).
+The reads, in rounds:
 
-| benchmark | shale before | with the MANIFEST change | with both | LevelDB | before / LevelDB | after / LevelDB |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| fillseq | 388,887 | 390,531 | 441,871 | 447,959 | 0.87 | 0.99 |
-| fillrandom | 262,190 | 266,595 | 287,276 | 292,827 | 0.90 | 0.98 |
-| overwrite | 233,344 | 232,679 | 242,683 | 289,526 | 0.81 | 0.84 |
+First pass:
 
-What each row is, how the two engines were matched, where shale is slower and why, and what these numbers do not
-say are in [docs/benchmarks.md](docs/benchmarks.md), with the latency and write-amplification tables.
+| benchmark | v0.1.1 ops/s | 0.1.2 ops/s | LevelDB ops/s | 0.1.2 / v0.1.1 | 0.1.2 / LevelDB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| readrandom | 339,730 (336,779 to 343,593) | 319,693 (318,462 to 323,789) | 458,438 (454,874 to 458,762) | 0.94 | 0.70 |
+| readmissing | 1,465,520 (1,459,442 to 1,509,805) | 1,219,835 (1,213,390 to 1,221,941) | 1,053,136 (981,823 to 1,078,242) | 0.83 | 1.16 |
+| readseq | 4,322,745 (4,287,624 to 4,330,466) | 5,696,584 (5,680,023 to 5,698,458) | 12,792,345 (12,698,473 to 12,805,115) | 1.32 | 0.45 |
+| seekrandom | 173,310 (172,280 to 174,115) | 101,870 (101,592 to 103,560) | 387,072 (387,021 to 388,032) | 0.59 | 0.26 |
+
+Compacted before the reads:
+
+| benchmark | v0.1.1 ops/s | 0.1.2 ops/s | LevelDB ops/s | 0.1.2 / v0.1.1 | 0.1.2 / LevelDB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| readrandom | 405,792 (401,169 to 405,854) | 411,782 (407,310 to 415,907) | 537,160 (536,586 to 538,149) | 1.01 | 0.77 |
+| readmissing | 4,387,081 (4,291,835 to 4,400,609) | 4,942,452 (4,930,658 to 4,957,097) | 1,609,096 (1,596,734 to 1,614,120) | 1.13 | 3.07 |
+| readseq | 6,128,582 (5,874,496 to 6,133,715) | 11,887,444 (11,858,135 to 11,917,034) | 13,587,072 (13,537,051 to 13,596,524) | 1.94 | 0.87 |
+| seekrandom | 307,251 (304,001 to 308,187) | 378,730 (375,938 to 381,391) | 452,616 (451,579 to 453,742) | 1.23 | 0.84 |
+
+What each row is, how the two engines were matched, and the latency and write-amplification tables are in
+[docs/benchmarks.md](docs/benchmarks.md).
 <!-- benchmarks:end -->
 
 ## Bugs found while building it

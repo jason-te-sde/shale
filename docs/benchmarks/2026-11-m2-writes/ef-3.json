@@ -1,0 +1,210 @@
+{
+  "tool": "shale_bench",
+  "engine": "shale",
+  "config": {
+    "benchmarks": [
+      "fillseq",
+      "fillrandom",
+      "overwrite"
+    ],
+    "num": 1000000,
+    "sync_num": 10000,
+    "value_size": 100,
+    "repeat": 3,
+    "seed": 301,
+    "db": "db",
+    "compact_before_reads": false
+  },
+  "machine": {
+    "uname": "Darwin 27.2.0 arm64",
+    "cpu": "Apple M2",
+    "logical_cores": 8,
+    "clock_nominal_period_ns": 1,
+    "clock_smallest_step_ns": 41
+  },
+  "build": {
+    "compiler_id": "AppleClang",
+    "compiler_version": "21.0.0.21000334",
+    "build_type": "Release",
+    "sanitizer": "",
+    "coverage": false,
+    "flaw": ""
+  },
+  "megabyte_bytes": 1048576,
+  "results": [
+    {
+      "name": "fillseq",
+      "kind": "write",
+      "source": "fillseq",
+      "entries": 1000000,
+      "compact_seconds": null,
+      "ops_per_sec": 360449.168410986,
+      "mb_per_sec": 39.875129257,
+      "p50_us": 2.084000000,
+      "p99_us": 5.125000000,
+      "p999_us": 15.166000000,
+      "write_amplification": "2.17",
+      "spread_percent": 1.940185756,
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 2.747965833,
+          "engine_seconds": 2.685027350,
+          "ops_per_sec": 363905.543508262,
+          "mb_per_sec": 40.257494971,
+          "p50_us": 2.084000000,
+          "p99_us": 4.958000000,
+          "p999_us": 14.792000000,
+          "average_us": 2.685027350,
+          "write_amplification": "2.17",
+          "found": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 2.774316291,
+          "engine_seconds": 2.709394588,
+          "ops_per_sec": 360449.168410986,
+          "mb_per_sec": 39.875129257,
+          "p50_us": 2.084000000,
+          "p99_us": 5.250000000,
+          "p999_us": 16.833000000,
+          "average_us": 2.709394588,
+          "write_amplification": "2.17",
+          "found": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 2.801809834,
+          "engine_seconds": 2.738352373,
+          "ops_per_sec": 356912.160084880,
+          "mb_per_sec": 39.483843393,
+          "p50_us": 2.125000000,
+          "p99_us": 5.125000000,
+          "p999_us": 15.166000000,
+          "average_us": 2.738352373,
+          "write_amplification": "2.17",
+          "found": null
+        }
+      ]
+    },
+    {
+      "name": "fillrandom",
+      "kind": "write",
+      "source": "fillrandom",
+      "entries": 632460,
+      "compact_seconds": null,
+      "ops_per_sec": 249080.793299003,
+      "mb_per_sec": 27.554866812,
+      "p50_us": 2.458000000,
+      "p99_us": 5.792000000,
+      "p999_us": 175.125000000,
+      "write_amplification": "5.09",
+      "spread_percent": 2.124664072,
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 4.014761583,
+          "engine_seconds": 3.894209612,
+          "ops_per_sec": 249080.793299003,
+          "mb_per_sec": 27.554866812,
+          "p50_us": 2.458000000,
+          "p99_us": 5.792000000,
+          "p999_us": 150.792000000,
+          "average_us": 3.894209612,
+          "write_amplification": "5.09",
+          "found": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 4.071918250,
+          "engine_seconds": 3.953117267,
+          "ops_per_sec": 245584.498166190,
+          "mb_per_sec": 27.168084895,
+          "p50_us": 2.458000000,
+          "p99_us": 6.125000000,
+          "p999_us": 183.459000000,
+          "average_us": 3.953117267,
+          "write_amplification": "5.09",
+          "found": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 3.986022958,
+          "engine_seconds": 3.855392495,
+          "ops_per_sec": 250876.628292616,
+          "mb_per_sec": 27.753533251,
+          "p50_us": 2.417000000,
+          "p99_us": 5.750000000,
+          "p999_us": 175.125000000,
+          "average_us": 3.855392495,
+          "write_amplification": "5.09",
+          "found": null
+        }
+      ]
+    },
+    {
+      "name": "overwrite",
+      "kind": "write",
+      "source": "overwrite",
+      "entries": 1000000,
+      "compact_seconds": null,
+      "ops_per_sec": 211454.249375344,
+      "mb_per_sec": 23.392384460,
+      "p50_us": 2.625000000,
+      "p99_us": 6.083000000,
+      "p999_us": 287.708000000,
+      "write_amplification": "7.39",
+      "spread_percent": 0.511627662,
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 4.722441792,
+          "engine_seconds": 4.595611650,
+          "ops_per_sec": 211754.859889229,
+          "mb_per_sec": 23.425639865,
+          "p50_us": 2.625000000,
+          "p99_us": 6.083000000,
+          "p999_us": 283.875000000,
+          "average_us": 4.595611650,
+          "write_amplification": "7.39",
+          "found": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 4.746692709,
+          "engine_seconds": 4.620856431,
+          "ops_per_sec": 210673.001457192,
+          "mb_per_sec": 23.305957955,
+          "p50_us": 2.625000000,
+          "p99_us": 6.083000000,
+          "p999_us": 292.875000000,
+          "average_us": 4.620856431,
+          "write_amplification": "7.39",
+          "found": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 4.729155375,
+          "engine_seconds": 4.601444360,
+          "ops_per_sec": 211454.249375344,
+          "mb_per_sec": 23.392384460,
+          "p50_us": 2.625000000,
+          "p99_us": 6.083000000,
+          "p999_us": 287.708000000,
+          "average_us": 4.601444360,
+          "write_amplification": "7.39",
+          "found": null
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1766 @@
+Evidence behind the explanations in docs/benchmarks.md, 2026-11
+===============================================================
+
+This file holds what was recorded in the session of 2026-11-22 that measured the read path of 0.1.2 against v0.1.1 and
+LevelDB: the machine, every run with its load, wait and exit status, the system calls and the engine's counters around each
+read benchmark, where the time of the calling thread went, the allocation counts, and the sources of what made the runs.
+The tables of docs/benchmarks.md are made from the JSON files next to this one, under the protocol
+docs/benchmarks/2026-11-m2-protocol.md, which was committed before the first run. What is here comes from the same
+session (the probe runs) or from the change that made the counts (section 3). The probe is that of 2026-10
+(docs/benchmarks/2026-10-m2-evidence.txt, sections 6 and 7.5), compiled with `c++ -O2 -g -std=c++20` against each build's
+Release libraries; its speeds are not quoted, only its counts and shares. `$WORK` is the scratch directory of the session,
+`$DB` the empty database directory. Paths in this file are written with those names.
+
+The session differs from the one of 2026-10 in the operating system (macOS 27.2.1, then 26.6.2), libc++ (2200.27.0, then
+2000.63.0) and libSystem (1359, then 1356); section 0 has the record.
+
+0. The machine and every run
+------------------------------------------------------------
+Taken before the first run, with the commands of the protocol (section 3).
+
+  == date
+  2026-11-22 18:46:01 -0800
+  == sysctl
+  Apple M2
+  hw.ncpu=8 hw.physicalcpu=8 hw.perflevel0.logicalcpu=4 hw.perflevel1.logicalcpu=4 hw.memsize=17179869184
+  == sw_vers
+  ProductName:		macOS
+  ProductVersion:		27.2.1
+  BuildVersion:		26B131
+  == uname -srm
+  Darwin 27.2.0 arm64
+  == pmset
+  Now drawing from 'AC Power'
+   -InternalBattery-0 (id=36831331)	80%; AC attached; not charging present: true
+  == disk
+     Volume Name:               Macintosh HD
+     File System Personality:   APFS
+     Protocol:                  Apple Fabric
+     Device Location:           Internal
+     Solid State:               Yes
+  /dev/disk3s5   228Gi   147Gi    54Gi    74%    1.6M  564M    0%   /System/Volumes/Data
+  == compiler
+  Apple clang version 21.0.0 (clang-2100.3.34.2)
+  Target: arm64-apple-darwin27.2.0
+  Thread model: posix
+  InstalledDir: /Library/Developer/CommandLineTools/usr/bin
+  == cmake
+  cmake version 4.4.3
+  == leveldb
+  leveldb 1.23_2
+  snappy 1.3.1
+  /opt/homebrew/opt/leveldb/lib/libleveldb.dylib:
+  	/opt/homebrew/opt/leveldb/lib/libleveldb.1.dylib (compatibility version 1.0.0, current version 1.23.0)
+  	/opt/homebrew/opt/snappy/lib/libsnappy.1.dylib (compatibility version 1.0.0, current version 1.2.2)
+  	/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2000.63.0)
+  	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1356.0.0)
+  == shale_bench (final)
+  $WORK/final/build/tools/shale_bench:
+  	/opt/homebrew/opt/leveldb/lib/libleveldb.1.dylib (compatibility version 1.0.0, current version 1.23.0)
+  	/opt/homebrew/opt/snappy/lib/libsnappy.1.dylib (compatibility version 1.0.0, current version 1.3.1)
+  	/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 2200.27.0)
+  	/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1359.0.0)
+
+
+Every run, in order, as `measure.sh` wrote it (each after the quiet check: a 1-minute load under 2.0, none of the named
+processes, AC power; `waited` is how long the check waited). Blocks are A (the full commands), B (the read rounds),
+W (the write rounds), C (the diagnostic rounds) and D (the probes) of the protocol, in that order. Every exit status is 0,
+and no run was run again. "standard output kept in" names a file under $WORK/logs that was not committed.
+
+A first v011
+  quiet: load average (1 min) 1.99, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 15 s
+  start: 2026-11-22 18:50:45 -0800
+  uptime at start: 18:50  up 20:38, 1 user, load averages: 1.99 2.32 2.33
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/v011/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-v011.json
+  standard output kept in: $WORK/logs/A_first_v011.stdout
+  exit status: 0
+  end: 2026-11-22 18:53:26 -0800
+  uptime at end: 18:53  up 20:40, 1 user, load averages: 2.46 2.35 2.33
+
+A first e
+  quiet: load average (1 min) 1.88, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 46 s
+  start: 2026-11-22 18:54:12 -0800
+  uptime at start: 18:54  up 20:41, 1 user, load averages: 1.88 2.21 2.29
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/e/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-e.json
+  standard output kept in: $WORK/logs/A_first_e.stdout
+  exit status: 0
+  end: 2026-11-22 18:57:08 -0800
+  uptime at end: 18:57  up 20:44, 1 user, load averages: 2.14 2.19 2.25
+
+A first ef
+  quiet: load average (1 min) 1.87, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 31 s
+  start: 2026-11-22 18:57:39 -0800
+  uptime at start: 18:57  up 20:44, 1 user, load averages: 1.87 2.12 2.23
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/ef/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-ef.json
+  standard output kept in: $WORK/logs/A_first_ef.stdout
+  exit status: 0
+  end: 2026-11-22 19:00:35 -0800
+  uptime at end: 19:00  up 20:47, 1 user, load averages: 2.59 2.27 2.25
+
+A first final
+  quiet: load average (1 min) 1.97, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 60 s
+  start: 2026-11-22 19:01:35 -0800
+  uptime at start: 19:01  up 20:48, 1 user, load averages: 1.97 2.15 2.21
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-final.json
+  standard output kept in: $WORK/logs/A_first_final.stdout
+  exit status: 0
+  end: 2026-11-22 19:04:28 -0800
+  uptime at end: 19:04  up 20:51, 1 user, load averages: 1.89 2.09 2.18
+
+A first leveldb
+  quiet: load average (1 min) 1.89, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 19:04:28 -0800
+  uptime at start: 19:04  up 20:51, 1 user, load averages: 1.89 2.09 2.18
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-leveldb.json
+  standard output kept in: $WORK/logs/A_first_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 19:06:57 -0800
+  uptime at end: 19:06  up 20:54, 1 user, load averages: 2.24 2.07 2.14
+
+A compacted v011
+  quiet: load average (1 min) 1.94, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 121 s
+  start: 2026-11-22 19:08:58 -0800
+  uptime at start: 19:08  up 20:56, 1 user, load averages: 1.94 2.08 2.14
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/v011/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-v011-compacted.json --compact_before_reads
+  standard output kept in: $WORK/logs/A_compacted_v011.stdout
+  exit status: 0
+  end: 2026-11-22 19:11:30 -0800
+  uptime at end: 19:11  up 20:58, 1 user, load averages: 2.65 2.25 2.19
+
+A compacted e
+  quiet: load average (1 min) 1.83, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 60 s
+  start: 2026-11-22 19:12:30 -0800
+  uptime at start: 19:12  up 20:59, 1 user, load averages: 1.83 2.08 2.13
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/e/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-e-compacted.json --compact_before_reads
+  standard output kept in: $WORK/logs/A_compacted_e.stdout
+  exit status: 0
+  end: 2026-11-22 19:15:02 -0800
+  uptime at end: 19:15  up 21:02, 1 user, load averages: 2.88 2.40 2.24
+
+A compacted ef
+  quiet: load average (1 min) 1.93, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 829 s
+  start: 2026-11-22 19:28:51 -0800
+  uptime at start: 19:28  up 21:16, 1 user, load averages: 1.93 2.63 2.56
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/ef/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-ef-compacted.json --compact_before_reads
+  standard output kept in: $WORK/logs/A_compacted_ef.stdout
+  exit status: 0
+  end: 2026-11-22 19:31:21 -0800
+  uptime at end: 19:31  up 21:18, 1 user, load averages: 1.79 2.31 2.43
+
+A compacted final
+  quiet: load average (1 min) 1.79, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 1 s
+  start: 2026-11-22 19:31:22 -0800
+  uptime at start: 19:31  up 21:18, 1 user, load averages: 1.79 2.31 2.43
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-final-compacted.json --compact_before_reads
+  standard output kept in: $WORK/logs/A_compacted_final.stdout
+  exit status: 0
+  end: 2026-11-22 19:33:50 -0800
+  uptime at end: 19:33  up 21:21, 1 user, load averages: 2.44 2.36 2.42
+
+A compacted leveldb
+  quiet: load average (1 min) 1.98, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 45 s
+  start: 2026-11-22 19:34:35 -0800
+  uptime at start: 19:34  up 21:21, 1 user, load averages: 1.98 2.23 2.37
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-leveldb-compacted.json --compact_before_reads
+  standard output kept in: $WORK/logs/A_compacted_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 19:37:05 -0800
+  uptime at end: 19:37  up 21:24, 1 user, load averages: 2.26 2.34 2.40
+
+B first r1 v011
+  quiet: load average (1 min) 1.99, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 91 s
+  start: 2026-11-22 19:38:36 -0800
+  uptime at start: 19:38  up 21:25, 1 user, load averages: 1.99 2.27 2.36
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/v011/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/v011-first-1.json
+  standard output kept in: $WORK/logs/B_first_r1_v011.stdout
+  exit status: 0
+  end: 2026-11-22 19:39:30 -0800
+  uptime at end: 19:39  up 21:26, 1 user, load averages: 2.23 2.30 2.37
+
+B first r1 e
+  quiet: load average (1 min) 1.98, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 60 s
+  start: 2026-11-22 19:40:30 -0800
+  uptime at start: 19:40  up 21:27, 1 user, load averages: 1.98 2.22 2.33
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/e/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/e-first-1.json
+  standard output kept in: $WORK/logs/B_first_r1_e.stdout
+  exit status: 0
+  end: 2026-11-22 19:41:43 -0800
+  uptime at end: 19:41  up 21:28, 1 user, load averages: 2.05 2.18 2.30
+
+B first r1 ef
+  quiet: load average (1 min) 1.89, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 15 s
+  start: 2026-11-22 19:41:58 -0800
+  uptime at start: 19:41  up 21:29, 1 user, load averages: 1.89 2.13 2.29
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/ef/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/ef-first-1.json
+  standard output kept in: $WORK/logs/B_first_r1_ef.stdout
+  exit status: 0
+  end: 2026-11-22 19:43:12 -0800
+  uptime at end: 19:43  up 21:30, 1 user, load averages: 2.12 2.19 2.30
+
+B first r1 final
+  quiet: load average (1 min) 1.95, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 16 s
+  start: 2026-11-22 19:43:28 -0800
+  uptime at start: 19:43  up 21:30, 1 user, load averages: 2.19 2.20 2.30
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/final-first-1.json
+  standard output kept in: $WORK/logs/B_first_r1_final.stdout
+  exit status: 0
+  end: 2026-11-22 19:44:37 -0800
+  uptime at end: 19:44  up 21:31, 1 user, load averages: 1.82 2.09 2.25
+
+B first r1 leveldb
+  quiet: load average (1 min) 1.82, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 19:44:37 -0800
+  uptime at start: 19:44  up 21:31, 1 user, load averages: 1.82 2.09 2.25
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/leveldb-first-1.json
+  standard output kept in: $WORK/logs/B_first_r1_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 19:45:17 -0800
+  uptime at end: 19:45  up 21:32, 1 user, load averages: 2.18 2.16 2.26
+
+B compacted r1 v011
+  quiet: load average (1 min) 1.91, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 15 s
+  start: 2026-11-22 19:45:32 -0800
+  uptime at start: 19:45  up 21:32, 1 user, load averages: 1.91 2.10 2.24
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/v011/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/v011-compacted-1.json --compact_before_reads
+  standard output kept in: $WORK/logs/B_compacted_r1_v011.stdout
+  exit status: 0
+  end: 2026-11-22 19:46:17 -0800
+  uptime at end: 19:46  up 21:33, 1 user, load averages: 1.97 2.10 2.23
+
+B compacted r1 e
+  quiet: load average (1 min) 1.97, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 19:46:17 -0800
+  uptime at start: 19:46  up 21:33, 1 user, load averages: 1.97 2.10 2.23
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/e/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/e-compacted-1.json --compact_before_reads
+  standard output kept in: $WORK/logs/B_compacted_r1_e.stdout
+  exit status: 0
+  end: 2026-11-22 19:46:59 -0800
+  uptime at end: 19:46  up 21:34, 1 user, load averages: 2.07 2.11 2.23
+
+B compacted r1 ef
+  quiet: load average (1 min) 1.90, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 15 s
+  start: 2026-11-22 19:47:14 -0800
+  uptime at start: 19:47  up 21:34, 1 user, load averages: 1.90 2.07 2.21
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/ef/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/ef-compacted-1.json --compact_before_reads
+  standard output kept in: $WORK/logs/B_compacted_r1_ef.stdout
+  exit status: 0
+  end: 2026-11-22 19:47:58 -0800
+  uptime at end: 19:47  up 21:35, 1 user, load averages: 2.08 2.10 2.22
+
+B compacted r1 final
+  quiet: load average (1 min) 1.84, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 15 s
+  start: 2026-11-22 19:48:13 -0800
+  uptime at start: 19:48  up 21:35, 1 user, load averages: 1.84 2.05 2.20
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/final-compacted-1.json --compact_before_reads
+  standard output kept in: $WORK/logs/B_compacted_r1_final.stdout
+  exit status: 0
+  end: 2026-11-22 19:48:54 -0800
+  uptime at end: 19:48  up 21:36, 1 user, load averages: 1.82 2.02 2.18
+
+B compacted r1 leveldb
+  quiet: load average (1 min) 1.82, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 19:48:54 -0800
+  uptime at start: 19:48  up 21:36, 1 user, load averages: 1.82 2.02 2.18
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/leveldb-compacted-1.json --compact_before_reads
+  standard output kept in: $WORK/logs/B_compacted_r1_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 19:49:32 -0800
+  uptime at end: 19:49  up 21:36, 1 user, load averages: 1.75 1.97 2.15
+
+B first r2 leveldb
+  quiet: load average (1 min) 1.75, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 19:49:32 -0800
+  uptime at start: 19:49  up 21:36, 1 user, load averages: 1.75 1.97 2.15
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/leveldb-first-2.json
+  standard output kept in: $WORK/logs/B_first_r2_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 19:50:12 -0800
+  uptime at end: 19:50  up 21:37, 1 user, load averages: 2.63 2.19 2.23
+
+B first r2 final
+  quiet: load average (1 min) 1.90, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 45 s
+  start: 2026-11-22 19:50:57 -0800
+  uptime at start: 19:50  up 21:38, 1 user, load averages: 1.90 2.05 2.17
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/final-first-2.json
+  standard output kept in: $WORK/logs/B_first_r2_final.stdout
+  exit status: 0
+  end: 2026-11-22 19:52:02 -0800
+  uptime at end: 19:52  up 21:39, 1 user, load averages: 1.86 2.01 2.15
+
+B first r2 ef
+  quiet: load average (1 min) 1.86, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 19:52:02 -0800
+  uptime at start: 19:52  up 21:39, 1 user, load averages: 1.86 2.01 2.15
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/ef/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/ef-first-2.json
+  standard output kept in: $WORK/logs/B_first_r2_ef.stdout
+  exit status: 0
+  end: 2026-11-22 19:53:11 -0800
+  uptime at end: 19:53  up 21:40, 1 user, load averages: 1.88 1.99 2.13
+
+B first r2 e
+  quiet: load average (1 min) 1.88, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 19:53:11 -0800
+  uptime at start: 19:53  up 21:40, 1 user, load averages: 1.88 1.99 2.13
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/e/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/e-first-2.json
+  standard output kept in: $WORK/logs/B_first_r2_e.stdout
+  exit status: 0
+  end: 2026-11-22 19:54:20 -0800
+  uptime at end: 19:54  up 21:41, 1 user, load averages: 1.84 1.94 2.10
+
+B first r2 v011
+  quiet: load average (1 min) 1.84, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 19:54:20 -0800
+  uptime at start: 19:54  up 21:41, 1 user, load averages: 1.84 1.94 2.10
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/v011/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/v011-first-2.json
+  standard output kept in: $WORK/logs/B_first_r2_v011.stdout
+  exit status: 0
+  end: 2026-11-22 19:55:11 -0800
+  uptime at end: 19:55  up 21:42, 1 user, load averages: 2.16 2.04 2.12
+
+B compacted r2 leveldb
+  quiet: load average (1 min) 1.90, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 30 s
+  start: 2026-11-22 19:55:41 -0800
+  uptime at start: 19:55  up 21:42, 1 user, load averages: 1.91 1.98 2.10
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/leveldb-compacted-2.json --compact_before_reads
+  standard output kept in: $WORK/logs/B_compacted_r2_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 19:56:19 -0800
+  uptime at end: 19:56  up 21:43, 1 user, load averages: 1.90 1.97 2.09
+
+B compacted r2 final
+  quiet: load average (1 min) 1.90, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 19:56:19 -0800
+  uptime at start: 19:56  up 21:43, 1 user, load averages: 1.90 1.97 2.09
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/final-compacted-2.json --compact_before_reads
+  standard output kept in: $WORK/logs/B_compacted_r2_final.stdout
+  exit status: 0
+  end: 2026-11-22 19:57:01 -0800
+  uptime at end: 19:57  up 21:44, 1 user, load averages: 1.98 1.99 2.08
+
+B compacted r2 ef
+  quiet: load average (1 min) 1.98, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 19:57:01 -0800
+  uptime at start: 19:57  up 21:44, 1 user, load averages: 1.98 1.99 2.08
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/ef/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/ef-compacted-2.json --compact_before_reads
+  standard output kept in: $WORK/logs/B_compacted_r2_ef.stdout
+  exit status: 0
+  end: 2026-11-22 19:57:45 -0800
+  uptime at end: 19:57  up 21:45, 1 user, load averages: 2.53 2.14 2.13
+
+B compacted r2 e
+  quiet: load average (1 min) 1.94, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 272 s
+  start: 2026-11-22 20:02:17 -0800
+  uptime at start: 20:02  up 21:49, 1 user, load averages: 1.94 2.13 2.14
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/e/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/e-compacted-2.json --compact_before_reads
+  standard output kept in: $WORK/logs/B_compacted_r2_e.stdout
+  exit status: 0
+  end: 2026-11-22 20:03:00 -0800
+  uptime at end: 20:03  up 21:50, 1 user, load averages: 2.43 2.23 2.17
+
+B compacted r2 v011
+  quiet: load average (1 min) 1.93, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 271 s
+  start: 2026-11-22 20:07:31 -0800
+  uptime at start: 20:07  up 21:54, 1 user, load averages: 1.93 2.16 2.15
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/v011/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/v011-compacted-2.json --compact_before_reads
+  standard output kept in: $WORK/logs/B_compacted_r2_v011.stdout
+  exit status: 0
+  end: 2026-11-22 20:08:16 -0800
+  uptime at end: 20:08  up 21:55, 1 user, load averages: 2.16 2.20 2.17
+
+B first r3 ef
+  quiet: load average (1 min) 1.98, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 15 s
+  start: 2026-11-22 20:08:31 -0800
+  uptime at start: 20:08  up 21:55, 1 user, load averages: 1.98 2.16 2.15
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/ef/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/ef-first-3.json
+  standard output kept in: $WORK/logs/B_first_r3_ef.stdout
+  exit status: 0
+  end: 2026-11-22 20:09:40 -0800
+  uptime at end: 20:09  up 21:56, 1 user, load averages: 2.40 2.27 2.19
+
+B first r3 v011
+  quiet: load average (1 min) 1.91, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 211 s
+  start: 2026-11-22 20:13:11 -0800
+  uptime at start: 20:13  up 22 hrs, 1 user, load averages: 1.91 2.12 2.14
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/v011/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/v011-first-3.json
+  standard output kept in: $WORK/logs/B_first_r3_v011.stdout
+  exit status: 0
+  end: 2026-11-22 20:14:02 -0800
+  uptime at end: 20:14  up 22:01, 1 user, load averages: 2.25 2.19 2.17
+
+B first r3 leveldb
+  quiet: load average (1 min) 1.92, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 46 s
+  start: 2026-11-22 20:14:48 -0800
+  uptime at start: 20:14  up 22:02, 1 user, load averages: 1.92 2.11 2.14
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/leveldb-first-3.json
+  standard output kept in: $WORK/logs/B_first_r3_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 20:15:27 -0800
+  uptime at end: 20:15  up 22:02, 1 user, load averages: 2.42 2.21 2.17
+
+B first r3 e
+  quiet: load average (1 min) 1.90, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 227 s
+  start: 2026-11-22 20:19:14 -0800
+  uptime at start: 20:19  up 22:06, 1 user, load averages: 1.90 2.13 2.15
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/e/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/e-first-3.json
+  standard output kept in: $WORK/logs/B_first_r3_e.stdout
+  exit status: 0
+  end: 2026-11-22 20:20:22 -0800
+  uptime at end: 20:20  up 22:07, 1 user, load averages: 2.19 2.19 2.17
+
+B first r3 final
+  quiet: load average (1 min) 1.81, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 45 s
+  start: 2026-11-22 20:21:07 -0800
+  uptime at start: 20:21  up 22:08, 1 user, load averages: 1.81 2.09 2.13
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/final-first-3.json
+  standard output kept in: $WORK/logs/B_first_r3_final.stdout
+  exit status: 0
+  end: 2026-11-22 20:22:12 -0800
+  uptime at end: 20:22  up 22:09, 1 user, load averages: 1.98 2.11 2.14
+
+B compacted r3 ef
+  quiet: load average (1 min) 1.98, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 20:22:12 -0800
+  uptime at start: 20:22  up 22:09, 1 user, load averages: 1.98 2.11 2.14
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/ef/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/ef-compacted-3.json --compact_before_reads
+  standard output kept in: $WORK/logs/B_compacted_r3_ef.stdout
+  exit status: 0
+  end: 2026-11-22 20:22:55 -0800
+  uptime at end: 20:22  up 22:10, 1 user, load averages: 2.48 2.24 2.18
+
+B compacted r3 v011
+  quiet: load average (1 min) 1.95, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 30 s
+  start: 2026-11-22 20:23:25 -0800
+  uptime at start: 20:23  up 22:10, 1 user, load averages: 1.95 2.14 2.15
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/v011/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/v011-compacted-3.json --compact_before_reads
+  standard output kept in: $WORK/logs/B_compacted_r3_v011.stdout
+  exit status: 0
+  end: 2026-11-22 20:24:10 -0800
+  uptime at end: 20:24  up 22:11, 1 user, load averages: 2.29 2.21 2.17
+
+B compacted r3 leveldb
+  quiet: load average (1 min) 1.93, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 15 s
+  start: 2026-11-22 20:24:25 -0800
+  uptime at start: 20:24  up 22:11, 1 user, load averages: 1.93 2.14 2.14
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/leveldb-compacted-3.json --compact_before_reads
+  standard output kept in: $WORK/logs/B_compacted_r3_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 20:25:03 -0800
+  uptime at end: 20:25  up 22:12, 1 user, load averages: 1.99 2.13 2.14
+
+B compacted r3 e
+  quiet: load average (1 min) 1.99, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 20:25:03 -0800
+  uptime at start: 20:25  up 22:12, 1 user, load averages: 1.99 2.13 2.14
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/e/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/e-compacted-3.json --compact_before_reads
+  standard output kept in: $WORK/logs/B_compacted_r3_e.stdout
+  exit status: 0
+  end: 2026-11-22 20:25:46 -0800
+  uptime at end: 20:25  up 22:13, 1 user, load averages: 2.04 2.13 2.14
+
+B compacted r3 final
+  quiet: load average (1 min) 1.94, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 31 s
+  start: 2026-11-22 20:26:17 -0800
+  uptime at start: 20:26  up 22:13, 1 user, load averages: 1.94 2.10 2.13
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-reads/final-compacted-3.json --compact_before_reads
+  standard output kept in: $WORK/logs/B_compacted_r3_final.stdout
+  exit status: 0
+  end: 2026-11-22 20:26:58 -0800
+  uptime at end: 20:26  up 22:14, 1 user, load averages: 1.94 2.08 2.12
+
+W r1 v011
+  quiet: load average (1 min) 1.94, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 20:26:58 -0800
+  uptime at start: 20:26  up 22:14, 1 user, load averages: 1.94 2.08 2.12
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/v011/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,overwrite --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-writes/v011-1.json
+  standard output kept in: $WORK/logs/W_r1_v011.stdout
+  exit status: 0
+  end: 2026-11-22 20:27:40 -0800
+  uptime at end: 20:27  up 22:14, 1 user, load averages: 2.51 2.21 2.17
+
+W r1 e
+  quiet: load average (1 min) 1.83, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 61 s
+  start: 2026-11-22 20:28:41 -0800
+  uptime at start: 20:28  up 22:15, 1 user, load averages: 1.83 2.10 2.13
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/e/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,overwrite --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-writes/e-1.json
+  standard output kept in: $WORK/logs/W_r1_e.stdout
+  exit status: 0
+  end: 2026-11-22 20:29:30 -0800
+  uptime at end: 20:29  up 22:16, 1 user, load averages: 2.16 2.14 2.14
+
+W r1 ef
+  quiet: load average (1 min) 1.76, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 45 s
+  start: 2026-11-22 20:30:15 -0800
+  uptime at start: 20:30  up 22:17, 1 user, load averages: 1.76 2.06 2.11
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/ef/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,overwrite --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-writes/ef-1.json
+  standard output kept in: $WORK/logs/W_r1_ef.stdout
+  exit status: 0
+  end: 2026-11-22 20:31:08 -0800
+  uptime at end: 20:31  up 22:18, 1 user, load averages: 2.00 2.08 2.11
+
+W r1 final
+  quiet: load average (1 min) 1.95, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 150 s
+  start: 2026-11-22 20:33:38 -0800
+  uptime at start: 20:33  up 22:20, 1 user, load averages: 1.95 2.16 2.15
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,overwrite --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-writes/final-1.json
+  standard output kept in: $WORK/logs/W_r1_final.stdout
+  exit status: 0
+  end: 2026-11-22 20:34:31 -0800
+  uptime at end: 20:34  up 22:21, 1 user, load averages: 2.35 2.24 2.17
+
+W r1 leveldb
+  quiet: load average (1 min) 1.84, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 106 s
+  start: 2026-11-22 20:36:17 -0800
+  uptime at start: 20:36  up 22:23, 1 user, load averages: 1.84 2.12 2.13
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=fillseq,fillrandom,overwrite --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-writes/leveldb-1.json
+  standard output kept in: $WORK/logs/W_r1_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 20:37:04 -0800
+  uptime at end: 20:37  up 22:24, 1 user, load averages: 1.86 2.08 2.12
+
+W r2 leveldb
+  quiet: load average (1 min) 1.86, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 20:37:04 -0800
+  uptime at start: 20:37  up 22:24, 1 user, load averages: 1.86 2.08 2.12
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=fillseq,fillrandom,overwrite --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-writes/leveldb-2.json
+  standard output kept in: $WORK/logs/W_r2_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 20:37:52 -0800
+  uptime at end: 20:37  up 22:25, 1 user, load averages: 1.78 2.02 2.09
+
+W r2 final
+  quiet: load average (1 min) 1.78, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 20:37:52 -0800
+  uptime at start: 20:37  up 22:25, 1 user, load averages: 1.78 2.02 2.09
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,overwrite --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-writes/final-2.json
+  standard output kept in: $WORK/logs/W_r2_final.stdout
+  exit status: 0
+  end: 2026-11-22 20:38:45 -0800
+  uptime at end: 20:38  up 22:26, 1 user, load averages: 1.96 2.04 2.09
+
+W r2 ef
+  quiet: load average (1 min) 1.96, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 20:38:45 -0800
+  uptime at start: 20:38  up 22:26, 1 user, load averages: 1.96 2.04 2.09
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/ef/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,overwrite --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-writes/ef-2.json
+  standard output kept in: $WORK/logs/W_r2_ef.stdout
+  exit status: 0
+  end: 2026-11-22 20:39:37 -0800
+  uptime at end: 20:39  up 22:26, 1 user, load averages: 1.98 2.06 2.09
+
+W r2 e
+  quiet: load average (1 min) 1.98, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 20:39:37 -0800
+  uptime at start: 20:39  up 22:26, 1 user, load averages: 1.98 2.06 2.09
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/e/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,overwrite --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-writes/e-2.json
+  standard output kept in: $WORK/logs/W_r2_e.stdout
+  exit status: 0
+  end: 2026-11-22 20:40:23 -0800
+  uptime at end: 20:40  up 22:27, 1 user, load averages: 2.51 2.18 2.13
+
+W r2 v011
+  quiet: load average (1 min) 1.86, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 60 s
+  start: 2026-11-22 20:41:23 -0800
+  uptime at start: 20:41  up 22:28, 1 user, load averages: 1.86 2.06 2.09
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/v011/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,overwrite --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-writes/v011-2.json
+  standard output kept in: $WORK/logs/W_r2_v011.stdout
+  exit status: 0
+  end: 2026-11-22 20:42:05 -0800
+  uptime at end: 20:42  up 22:29, 1 user, load averages: 2.53 2.21 2.14
+
+W r3 ef
+  quiet: load average (1 min) 1.96, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 45 s
+  start: 2026-11-22 20:42:50 -0800
+  uptime at start: 20:42  up 22:30, 1 user, load averages: 1.96 2.10 2.10
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/ef/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,overwrite --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-writes/ef-3.json
+  standard output kept in: $WORK/logs/W_r3_ef.stdout
+  exit status: 0
+  end: 2026-11-22 20:43:34 -0800
+  uptime at end: 20:43  up 22:30, 1 user, load averages: 2.07 2.11 2.11
+
+W r3 v011
+  quiet: load average (1 min) 1.91, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 15 s
+  start: 2026-11-22 20:43:49 -0800
+  uptime at start: 20:43  up 22:31, 1 user, load averages: 1.91 2.07 2.09
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/v011/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,overwrite --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-writes/v011-3.json
+  standard output kept in: $WORK/logs/W_r3_v011.stdout
+  exit status: 0
+  end: 2026-11-22 20:44:32 -0800
+  uptime at end: 20:44  up 22:31, 1 user, load averages: 2.20 2.13 2.11
+
+W r3 leveldb
+  quiet: load average (1 min) 1.79, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 30 s
+  start: 2026-11-22 20:45:02 -0800
+  uptime at start: 20:45  up 22:32, 1 user, load averages: 1.79 2.03 2.07
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=fillseq,fillrandom,overwrite --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-writes/leveldb-3.json
+  standard output kept in: $WORK/logs/W_r3_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 20:45:44 -0800
+  uptime at end: 20:45  up 22:32, 1 user, load averages: 1.84 2.01 2.06
+
+W r3 e
+  quiet: load average (1 min) 1.84, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 20:45:44 -0800
+  uptime at start: 20:45  up 22:32, 1 user, load averages: 1.84 2.01 2.06
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/e/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,overwrite --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-writes/e-3.json
+  standard output kept in: $WORK/logs/W_r3_e.stdout
+  exit status: 0
+  end: 2026-11-22 20:46:28 -0800
+  uptime at end: 20:46  up 22:33, 1 user, load averages: 2.26 2.10 2.09
+
+W r3 final
+  quiet: load average (1 min) 1.87, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 60 s
+  start: 2026-11-22 20:47:28 -0800
+  uptime at start: 20:47  up 22:34, 1 user, load averages: 1.87 2.03 2.06
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --benchmarks=fillseq,fillrandom,overwrite --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-writes/final-3.json
+  standard output kept in: $WORK/logs/W_r3_final.stdout
+  exit status: 0
+  end: 2026-11-22 20:48:12 -0800
+  uptime at end: 20:48  up 22:35, 1 user, load averages: 2.04 2.07 2.08
+
+C first r1 final
+  quiet: load average (1 min) 1.93, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 45 s
+  start: 2026-11-22 20:48:57 -0800
+  uptime at start: 20:48  up 22:36, 1 user, load averages: 1.93 2.04 2.07
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --cache_size=1073741824 --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-diagnostic/final-first-1.json
+  standard output kept in: $WORK/logs/C_first_r1_final.stdout
+  exit status: 0
+  end: 2026-11-22 20:49:43 -0800
+  uptime at end: 20:49  up 22:36, 1 user, load averages: 2.13 2.08 2.08
+
+C first r1 leveldb
+  quiet: load average (1 min) 1.89, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 45 s
+  start: 2026-11-22 20:50:28 -0800
+  uptime at start: 20:50  up 22:37, 1 user, load averages: 1.89 2.04 2.07
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-diagnostic/leveldb-first-1.json
+  standard output kept in: $WORK/logs/C_first_r1_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 20:51:08 -0800
+  uptime at end: 20:51  up 22:38, 1 user, load averages: 2.20 2.11 2.09
+
+C compacted r1 final
+  quiet: load average (1 min) 1.95, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 45 s
+  start: 2026-11-22 20:51:53 -0800
+  uptime at start: 20:51  up 22:39, 1 user, load averages: 1.95 2.06 2.07
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --cache_size=1073741824 --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-diagnostic/final-compacted-1.json --compact_before_reads
+  standard output kept in: $WORK/logs/C_compacted_r1_final.stdout
+  exit status: 0
+  end: 2026-11-22 20:52:26 -0800
+  uptime at end: 20:52  up 22:39, 1 user, load averages: 1.98 2.05 2.07
+
+C compacted r1 leveldb
+  quiet: load average (1 min) 1.98, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 20:52:26 -0800
+  uptime at start: 20:52  up 22:39, 1 user, load averages: 1.98 2.05 2.07
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-diagnostic/leveldb-compacted-1.json --compact_before_reads
+  standard output kept in: $WORK/logs/C_compacted_r1_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 20:53:04 -0800
+  uptime at end: 20:53  up 22:40, 1 user, load averages: 2.16 2.09 2.08
+
+C first r2 leveldb
+  quiet: load average (1 min) 1.98, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 15 s
+  start: 2026-11-22 20:53:19 -0800
+  uptime at start: 20:53  up 22:40, 1 user, load averages: 1.98 2.05 2.07
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-diagnostic/leveldb-first-2.json
+  standard output kept in: $WORK/logs/C_first_r2_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 20:53:59 -0800
+  uptime at end: 20:53  up 22:41, 1 user, load averages: 2.04 2.06 2.07
+
+C first r2 final
+  quiet: load average (1 min) 1.95, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 15 s
+  start: 2026-11-22 20:54:14 -0800
+  uptime at start: 20:54  up 22:41, 1 user, load averages: 1.95 2.04 2.06
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --cache_size=1073741824 --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-diagnostic/final-first-2.json
+  standard output kept in: $WORK/logs/C_first_r2_final.stdout
+  exit status: 0
+  end: 2026-11-22 20:55:00 -0800
+  uptime at end: 20:55  up 22:42, 1 user, load averages: 2.30 2.12 2.09
+
+C compacted r2 leveldb
+  quiet: load average (1 min) 1.95, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 60 s
+  start: 2026-11-22 20:56:00 -0800
+  uptime at start: 20:56  up 22:43, 1 user, load averages: 1.95 2.05 2.07
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-diagnostic/leveldb-compacted-2.json --compact_before_reads
+  standard output kept in: $WORK/logs/C_compacted_r2_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 20:56:38 -0800
+  uptime at end: 20:56  up 22:43, 1 user, load averages: 2.04 2.07 2.07
+
+C compacted r2 final
+  quiet: load average (1 min) 1.99, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 30 s
+  start: 2026-11-22 20:57:08 -0800
+  uptime at start: 20:57  up 22:44, 1 user, load averages: 1.99 2.06 2.07
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --cache_size=1073741824 --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-diagnostic/final-compacted-2.json --compact_before_reads
+  standard output kept in: $WORK/logs/C_compacted_r2_final.stdout
+  exit status: 0
+  end: 2026-11-22 20:57:42 -0800
+  uptime at end: 20:57  up 22:44, 1 user, load averages: 2.58 2.21 2.12
+
+C first r3 final
+  quiet: load average (1 min) 1.92, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 45 s
+  start: 2026-11-22 20:58:27 -0800
+  uptime at start: 20:58  up 22:45, 1 user, load averages: 1.92 2.09 2.08
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --cache_size=1073741824 --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-diagnostic/final-first-3.json
+  standard output kept in: $WORK/logs/C_first_r3_final.stdout
+  exit status: 0
+  end: 2026-11-22 20:59:13 -0800
+  uptime at end: 20:59  up 22:46, 1 user, load averages: 2.35 2.17 2.11
+
+C first r3 leveldb
+  quiet: load average (1 min) 1.96, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 30 s
+  start: 2026-11-22 20:59:44 -0800
+  uptime at start: 20:59  up 22:46, 1 user, load averages: 1.96 2.09 2.08
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-diagnostic/leveldb-first-3.json
+  standard output kept in: $WORK/logs/C_first_r3_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 21:00:23 -0800
+  uptime at end: 21:00  up 22:47, 1 user, load averages: 2.22 2.14 2.10
+
+C compacted r3 final
+  quiet: load average (1 min) 1.93, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 30 s
+  start: 2026-11-22 21:00:53 -0800
+  uptime at start: 21:00  up 22:48, 1 user, load averages: 1.93 2.08 2.07
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=shale --cache_size=1073741824 --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-diagnostic/final-compacted-3.json --compact_before_reads
+  standard output kept in: $WORK/logs/C_compacted_r3_final.stdout
+  exit status: 0
+  end: 2026-11-22 21:01:32 -0800
+  uptime at end: 21:01  up 22:48, 1 user, load averages: 2.11 2.11 2.08
+
+C compacted r3 leveldb
+  quiet: load average (1 min) 1.78, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 30 s
+  start: 2026-11-22 21:02:02 -0800
+  uptime at start: 21:02  up 22:49, 1 user, load averages: 1.78 2.03 2.06
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/final/build/tools/shale_bench --engine=leveldb --benchmarks=overwrite,readrandom,readmissing,readseq,seekrandom --num=1000000 --repeat=3 --db=$DB --json=docs/benchmarks/2026-11-m2-diagnostic/leveldb-compacted-3.json --compact_before_reads
+  standard output kept in: $WORK/logs/C_compacted_r3_leveldb.stdout
+  exit status: 0
+  end: 2026-11-22 21:02:44 -0800
+  uptime at end: 21:02  up 22:49, 1 user, load averages: 2.25 2.12 2.09
+
+count-v011-first
+  quiet: load average (1 min) 1.88, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 30 s
+  start: 2026-11-22 21:03:14 -0800
+  uptime at start: 21:03  up 22:50, 1 user, load averages: 1.88 2.04 2.06
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-v011 count-v011-first 1000000 fillrandom,overwrite,readrandom,readmissing,readseq,seekrandom 1 1 1
+  standard output kept in: $WORK/logs/count-v011-first.stdout
+  exit status: 0
+  end: 2026-11-22 21:03:37 -0800
+  uptime at end: 21:03  up 22:50, 1 user, load averages: 1.90 2.04 2.06
+
+count-v011-compacted
+  quiet: load average (1 min) 1.90, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 21:03:37 -0800
+  uptime at start: 21:03  up 22:50, 1 user, load averages: 1.90 2.04 2.06
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-v011 count-v011-compacted 1000000 fillrandom,overwrite,readrandom,readmissing,readseq,seekrandom 1 1 1 1
+  standard output kept in: $WORK/logs/count-v011-compacted.stdout
+  exit status: 0
+  end: 2026-11-22 21:04:02 -0800
+  uptime at end: 21:04  up 22:51, 1 user, load averages: 2.16 2.08 2.07
+
+prof-v011-first-readrandom
+  quiet: load average (1 min) 1.99, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 30 s
+  start: 2026-11-22 21:04:32 -0800
+  uptime at start: 21:04  up 22:51, 1 user, load averages: 1.99 2.06 2.06
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-v011 prof-v011-first-readrandom 1000000 fillrandom,overwrite,readrandom MARK loop readrandom 4 3
+  standard output kept in: $WORK/logs/prof-v011-first-readrandom.stdout
+  exit status: 0
+  end: 2026-11-22 21:04:55 -0800
+  uptime at end: 21:04  up 22:52, 1 user, load averages: 2.18 2.10 2.08
+
+prof-v011-first-readseq
+  quiet: load average (1 min) 1.87, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 106 s
+  start: 2026-11-22 21:06:41 -0800
+  uptime at start: 21:06  up 22:53, 1 user, load averages: 1.87 2.07 2.07
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-v011 prof-v011-first-readseq 1000000 fillrandom,overwrite,readseq MARK loop readseq 4 40
+  standard output kept in: $WORK/logs/prof-v011-first-readseq.stdout
+  exit status: 0
+  end: 2026-11-22 21:07:04 -0800
+  uptime at end: 21:07  up 22:54, 1 user, load averages: 1.98 2.08 2.08
+
+prof-v011-first-seekrandom
+  quiet: load average (1 min) 1.98, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 21:07:04 -0800
+  uptime at start: 21:07  up 22:54, 1 user, load averages: 1.98 2.08 2.08
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-v011 prof-v011-first-seekrandom 1000000 fillrandom,overwrite,seekrandom MARK loop seekrandom 4 2
+  standard output kept in: $WORK/logs/prof-v011-first-seekrandom.stdout
+  exit status: 0
+  end: 2026-11-22 21:07:30 -0800
+  uptime at end: 21:07  up 22:54, 1 user, load averages: 2.05 2.09 2.08
+
+prof-v011-compacted-readrandom
+  quiet: load average (1 min) 1.95, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 15 s
+  start: 2026-11-22 21:07:45 -0800
+  uptime at start: 21:07  up 22:55, 1 user, load averages: 1.95 2.07 2.07
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-v011 prof-v011-compacted-readrandom 1000000 fillrandom,overwrite,readrandom MARK loop readrandom 4 3 1
+  standard output kept in: $WORK/logs/prof-v011-compacted-readrandom.stdout
+  exit status: 0
+  end: 2026-11-22 21:08:11 -0800
+  uptime at end: 21:08  up 22:55, 1 user, load averages: 2.04 2.08 2.07
+
+prof-v011-compacted-readseq
+  quiet: load average (1 min) 1.81, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 16 s
+  start: 2026-11-22 21:08:27 -0800
+  uptime at start: 21:08  up 22:55, 1 user, load averages: 1.81 2.02 2.06
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-v011 prof-v011-compacted-readseq 1000000 fillrandom,overwrite,readseq MARK loop readseq 4 40 1
+  standard output kept in: $WORK/logs/prof-v011-compacted-readseq.stdout
+  exit status: 0
+  end: 2026-11-22 21:08:52 -0800
+  uptime at end: 21:08  up 22:56, 1 user, load averages: 1.87 2.02 2.05
+
+prof-v011-compacted-seekrandom
+  quiet: load average (1 min) 1.87, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 21:08:52 -0800
+  uptime at start: 21:08  up 22:56, 1 user, load averages: 1.87 2.02 2.05
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-v011 prof-v011-compacted-seekrandom 1000000 fillrandom,overwrite,seekrandom MARK loop seekrandom 4 2 1
+  standard output kept in: $WORK/logs/prof-v011-compacted-seekrandom.stdout
+  exit status: 0
+  end: 2026-11-22 21:09:17 -0800
+  uptime at end: 21:09  up 22:56, 1 user, load averages: 1.92 2.02 2.05
+
+count-final-first
+  quiet: load average (1 min) 1.92, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 21:09:17 -0800
+  uptime at start: 21:09  up 22:56, 1 user, load averages: 1.92 2.02 2.05
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-final count-final-first 1000000 fillrandom,overwrite,readrandom,readmissing,readseq,seekrandom 1 1 1
+  standard output kept in: $WORK/logs/count-final-first.stdout
+  exit status: 0
+  end: 2026-11-22 21:09:45 -0800
+  uptime at end: 21:09  up 22:57, 1 user, load averages: 1.94 2.02 2.05
+
+count-final-compacted
+  quiet: load average (1 min) 1.94, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 21:09:46 -0800
+  uptime at start: 21:09  up 22:57, 1 user, load averages: 1.94 2.02 2.05
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-final count-final-compacted 1000000 fillrandom,overwrite,readrandom,readmissing,readseq,seekrandom 1 1 1 1
+  standard output kept in: $WORK/logs/count-final-compacted.stdout
+  exit status: 0
+  end: 2026-11-22 21:10:08 -0800
+  uptime at end: 21:10  up 22:57, 1 user, load averages: 2.29 2.09 2.07
+
+prof-final-first-readrandom
+  quiet: load average (1 min) 1.78, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 45 s
+  start: 2026-11-22 21:10:53 -0800
+  uptime at start: 21:10  up 22:58, 1 user, load averages: 1.78 2.00 2.04
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-final prof-final-first-readrandom 1000000 fillrandom,overwrite,readrandom MARK loop readrandom 4 3
+  standard output kept in: $WORK/logs/prof-final-first-readrandom.stdout
+  exit status: 0
+  end: 2026-11-22 21:11:17 -0800
+  uptime at end: 21:11  up 22:58, 1 user, load averages: 1.67 1.95 2.02
+
+prof-final-first-readseq
+  quiet: load average (1 min) 1.67, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 21:11:17 -0800
+  uptime at start: 21:11  up 22:58, 1 user, load averages: 1.67 1.95 2.02
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-final prof-final-first-readseq 1000000 fillrandom,overwrite,readseq MARK loop readseq 4 40
+  standard output kept in: $WORK/logs/prof-final-first-readseq.stdout
+  exit status: 0
+  end: 2026-11-22 21:11:39 -0800
+  uptime at end: 21:11  up 22:58, 1 user, load averages: 1.98 2.00 2.04
+
+prof-final-first-seekrandom
+  quiet: load average (1 min) 1.98, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 21:11:39 -0800
+  uptime at start: 21:11  up 22:58, 1 user, load averages: 1.98 2.00 2.04
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-final prof-final-first-seekrandom 1000000 fillrandom,overwrite,seekrandom MARK loop seekrandom 4 2
+  standard output kept in: $WORK/logs/prof-final-first-seekrandom.stdout
+  exit status: 0
+  end: 2026-11-22 21:12:14 -0800
+  uptime at end: 21:12  up 22:59, 1 user, load averages: 2.03 2.01 2.04
+
+prof-final-compacted-readrandom
+  quiet: load average (1 min) 1.93, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 75 s
+  start: 2026-11-22 21:13:29 -0800
+  uptime at start: 21:13  up 23 hrs, 1 user, load averages: 1.93 2.00 2.03
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-final prof-final-compacted-readrandom 1000000 fillrandom,overwrite,readrandom MARK loop readrandom 4 3 1
+  standard output kept in: $WORK/logs/prof-final-compacted-readrandom.stdout
+  exit status: 0
+  end: 2026-11-22 21:13:53 -0800
+  uptime at end: 21:13  up 23:01, 1 user, load averages: 1.67 1.94 2.01
+
+prof-final-compacted-readseq
+  quiet: load average (1 min) 1.67, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 21:13:53 -0800
+  uptime at start: 21:13  up 23:01, 1 user, load averages: 1.67 1.94 2.01
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-final prof-final-compacted-readseq 1000000 fillrandom,overwrite,readseq MARK loop readseq 4 40 1
+  standard output kept in: $WORK/logs/prof-final-compacted-readseq.stdout
+  exit status: 0
+  end: 2026-11-22 21:14:13 -0800
+  uptime at end: 21:14  up 23:01, 1 user, load averages: 1.98 1.99 2.02
+
+prof-final-compacted-seekrandom
+  quiet: load average (1 min) 1.98, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 21:14:14 -0800
+  uptime at start: 21:14  up 23:01, 1 user, load averages: 1.98 1.99 2.02
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-final prof-final-compacted-seekrandom 1000000 fillrandom,overwrite,seekrandom MARK loop seekrandom 4 2 1
+  standard output kept in: $WORK/logs/prof-final-compacted-seekrandom.stdout
+  exit status: 0
+  end: 2026-11-22 21:14:36 -0800
+  uptime at end: 21:14  up 23:01, 1 user, load averages: 2.60 2.12 2.07
+
+
+0.1 Probe runs added after block D, which the protocol does not list: the same counting probe on E and on E+F, in both
+states, to see which step changed the calls of the first pass. Made through `measure.sh` after the same check.
+
+count-e-first
+  quiet: load average (1 min) 1.93, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 21:15:52 -0800
+  uptime at start: 21:15  up 23:03, 1 user, load averages: 1.93 2.00 2.02
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-e count-e-first 1000000 fillrandom,overwrite,readrandom,readmissing,readseq,seekrandom 1 1 1
+  standard output kept in: $WORK/logs/count-e-first.stdout
+  exit status: 0
+  end: 2026-11-22 21:16:21 -0800
+  uptime at end: 21:16  up 23:03, 1 user, load averages: 2.11 2.05 2.04
+
+count-e-compacted
+  quiet: load average (1 min) 1.93, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 15 s
+  start: 2026-11-22 21:16:36 -0800
+  uptime at start: 21:16  up 23:03, 1 user, load averages: 1.93 2.01 2.02
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-e count-e-compacted 1000000 fillrandom,overwrite,readrandom,readmissing,readseq,seekrandom 1 1 1 1
+  standard output kept in: $WORK/logs/count-e-compacted.stdout
+  exit status: 0
+  end: 2026-11-22 21:16:59 -0800
+  uptime at end: 21:16  up 23:04, 1 user, load averages: 2.18 2.06 2.04
+
+count-ef-first
+  quiet: load average (1 min) 1.84, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 121 s
+  start: 2026-11-22 21:19:00 -0800
+  uptime at start: 21:19  up 23:06, 1 user, load averages: 1.84 2.02 2.03
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-ef count-ef-first 1000000 fillrandom,overwrite,readrandom,readmissing,readseq,seekrandom 1 1 1
+  standard output kept in: $WORK/logs/count-ef-first.stdout
+  exit status: 0
+  end: 2026-11-22 21:19:28 -0800
+  uptime at end: 21:19  up 23:06, 1 user, load averages: 1.83 2.00 2.02
+
+count-ef-compacted
+  quiet: load average (1 min) 1.83, no process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*, waited 0 s
+  start: 2026-11-22 21:19:28 -0800
+  uptime at start: 21:19  up 23:06, 1 user, load averages: 1.83 2.00 2.02
+  power at start: Now drawing from 'AC Power'
+  command: caffeinate -ims $WORK/probe/profile.sh $WORK/probe/probe-ef count-ef-compacted 1000000 fillrandom,overwrite,readrandom,readmissing,readseq,seekrandom 1 1 1 1
+  standard output kept in: $WORK/logs/count-ef-compacted.stdout
+  exit status: 0
+  end: 2026-11-22 21:19:48 -0800
+  uptime at end: 21:19  up 23:07, 1 user, load averages: 2.07 2.05 2.04
+
+
+1. System calls around each read benchmark (probe, 1,000,000 keys; one run of each read benchmark)
+------------------------------------------------------------
+Each probe run is `fillrandom`, `overwrite`, then the four reads, on a new database, with the counting library loaded
+(`pread`, `read`, `write`, `mmap`, `munmap`, `fsync`, `fcntl(F_FULLFSYNC)`). A SNAP line counts the calls since the SNAP line
+before it; 'after 1 x X' counts the run of X. "Not compacted" is the first pass of the tables; "compacted" is the same
+with the probe compacting the database between `overwrite` and the first read. The builds are v011 (v0.1.1), e (E), ef (E+F)
+and final (0.1.2). The engine's own counters after `overwrite` follow each build's SNAP lines.
+
+Not compacted:
+
+  shale, build v011:
+    SNAP before overwrite             pread=88629 (371156972 B) read=0 write=1007785 (591018148 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=511 fsync=0
+    == shale fillrandom: 206834 ops/s, 4.835 s, engine 4.688 s, wa 5.09
+    SNAP before readrandom            pread=139750 (586019573 B) read=6 write=2012658 (1007542045 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=837 fsync=0
+    == shale overwrite: 188027 ops/s, 5.318 s, engine 5.185 s, wa 6.13
+    SNAP after 1 x readrandom         pread=947761 (3891085943 B) read=0 write=1734 (100077398 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=124 fsync=0
+    == shale readrandom: 332089 ops/s, 3.011 s, engine 2.898 s, wa -
+    SNAP after 1 x readmissing        pread=9012 (37009959 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readmissing: 1467786 ops/s, 0.681 s, engine 0.657 s, wa -
+    SNAP after 1 x readseq            pread=31285 (128357824 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readseq: 4377137 ops/s, 0.228 s, engine 0.228 s, wa -
+    SNAP after 1 x seekrandom         pread=1415887 (5813984358 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale seekrandom: 174422 ops/s, 5.733 s, engine 5.704 s, wa -
+    Level 0: 5 files, 16311255 bytes
+    Level 1: 7 files, 14623095 bytes
+    Level 2: 52 files, 108562082 bytes
+    Level 3: 4 files, 12934177 bytes
+    Level 4: 0 files, 0 bytes
+    Level 5: 0 files, 0 bytes
+    Level 6: 0 files, 0 bytes
+    Counters: flushes=35 compactions=38 trivial_moves=3 tombstones_dropped=0 shadowed_dropped=663866 user_bytes_written=116000000 wal_bytes_written=138028602 flush_bytes_written=114158760 compaction_bytes_read=536381130 compaction_bytes_written=458447945 write_groups=1000000 wal_syncs=0 write_slowdowns=91 write_stops=0 bg_errors=0
+
+  shale, build e:
+    SNAP before overwrite             pread=88629 (371156972 B) read=0 write=1007785 (591018147 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=511 fsync=0
+    == shale fillrandom: 204184 ops/s, 4.898 s, engine 4.743 s, wa 5.09
+    SNAP before readrandom            pread=174489 (730522287 B) read=6 write=2014990 (1143985853 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=996 fsync=0
+    == shale overwrite: 167152 ops/s, 5.983 s, engine 5.844 s, wa 7.39
+    SNAP after 1 x readrandom         pread=954943 (3922310422 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readrandom: 296877 ops/s, 3.368 s, engine 3.256 s, wa -
+    SNAP after 1 x readmissing        pread=25390 (104678205 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readmissing: 1171462 ops/s, 0.854 s, engine 0.830 s, wa -
+    SNAP after 1 x readseq            pread=33904 (139180478 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readseq: 5005004 ops/s, 0.200 s, engine 0.200 s, wa -
+    SNAP after 1 x seekrandom         pread=3139624 (12940294898 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale seekrandom: 95385 ops/s, 10.484 s, engine 10.456 s, wa -
+    Level 0: 3 files, 9789856 bytes
+    Level 1: 5 files, 9132298 bytes
+    Level 2: 50 files, 103221382 bytes
+    Level 3: 8 files, 20022453 bytes
+    Level 4: 0 files, 0 bytes
+    Level 5: 0 files, 0 bytes
+    Level 6: 0 files, 0 bytes
+    Counters: flushes=35 compactions=50 trivial_moves=4 tombstones_dropped=0 shadowed_dropped=751677 user_bytes_written=116000000 wal_bytes_written=138028602 flush_bytes_written=114158760 compaction_bytes_read=693788325 compaction_bytes_written=605590520 write_groups=1000000 wal_syncs=0 write_slowdowns=0 write_stops=0 bg_errors=0
+
+  shale, build ef:
+    SNAP before overwrite             pread=3073 (377166554 B) read=0 write=1007785 (591018147 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=511 fsync=0
+    == shale fillrandom: 204621 ops/s, 4.887 s, engine 4.730 s, wa 5.09
+    SNAP before readrandom            pread=6058 (743751264 B) read=6 write=2014990 (1143985853 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=996 fsync=0
+    == shale overwrite: 210283 ops/s, 4.755 s, engine 4.625 s, wa 7.39
+    SNAP after 1 x readrandom         pread=954937 (3922281953 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readrandom: 284365 ops/s, 3.517 s, engine 3.406 s, wa -
+    SNAP after 1 x readmissing        pread=25385 (104657640 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readmissing: 1173004 ops/s, 0.853 s, engine 0.829 s, wa -
+    SNAP after 1 x readseq            pread=932 (142106342 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readseq: 5292841 ops/s, 0.189 s, engine 0.189 s, wa -
+    SNAP after 1 x seekrandom         pread=3139619 (12940251188 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale seekrandom: 94618 ops/s, 10.569 s, engine 10.540 s, wa -
+    Level 0: 3 files, 9789856 bytes
+    Level 1: 5 files, 9132298 bytes
+    Level 2: 50 files, 103221382 bytes
+    Level 3: 8 files, 20022453 bytes
+    Level 4: 0 files, 0 bytes
+    Level 5: 0 files, 0 bytes
+    Level 6: 0 files, 0 bytes
+    Counters: flushes=35 compactions=50 trivial_moves=4 tombstones_dropped=0 shadowed_dropped=751677 user_bytes_written=116000000 wal_bytes_written=138028602 flush_bytes_written=114158760 compaction_bytes_read=693788325 compaction_bytes_written=605590520 write_groups=1000000 wal_syncs=0 write_slowdowns=0 write_stops=0 bg_errors=0
+
+  shale, build final:
+    SNAP before overwrite             pread=3073 (377166554 B) read=0 write=1007785 (591018147 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=511 fsync=0
+    == shale fillrandom: 203608 ops/s, 4.911 s, engine 4.759 s, wa 5.09
+    SNAP before readrandom            pread=6058 (743751264 B) read=6 write=2014990 (1143985853 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=996 fsync=0
+    == shale overwrite: 165440 ops/s, 6.045 s, engine 5.910 s, wa 7.39
+    SNAP after 1 x readrandom         pread=954947 (3922322219 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readrandom: 321387 ops/s, 3.112 s, engine 3.003 s, wa -
+    SNAP after 1 x readmissing        pread=25380 (104636587 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readmissing: 1210664 ops/s, 0.826 s, engine 0.803 s, wa -
+    SNAP after 1 x readseq            pread=932 (142106342 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readseq: 5713017 ops/s, 0.175 s, engine 0.175 s, wa -
+    SNAP after 1 x seekrandom         pread=3139474 (12939682551 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale seekrandom: 101221 ops/s, 9.879 s, engine 9.855 s, wa -
+    Level 0: 3 files, 9789856 bytes
+    Level 1: 5 files, 9132298 bytes
+    Level 2: 50 files, 103221382 bytes
+    Level 3: 8 files, 20022453 bytes
+    Level 4: 0 files, 0 bytes
+    Level 5: 0 files, 0 bytes
+    Level 6: 0 files, 0 bytes
+    Counters: flushes=35 compactions=50 trivial_moves=4 tombstones_dropped=0 shadowed_dropped=751677 user_bytes_written=116000000 wal_bytes_written=138028602 flush_bytes_written=114158760 compaction_bytes_read=693788325 compaction_bytes_written=605590520 write_groups=1000000 wal_syncs=0 write_slowdowns=0 write_stops=0 bg_errors=0
+
+Compacted before the reads:
+
+  shale, build v011:
+    SNAP before overwrite             pread=88629 (371156972 B) read=0 write=1007785 (591018148 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=511 fsync=0
+    == shale fillrandom: 206552 ops/s, 4.841 s, engine 4.698 s, wa 5.09
+    SNAP before readrandom            pread=135553 (568581441 B) read=6 write=2012392 (991883025 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=822 fsync=0
+    == shale overwrite: 192137 ops/s, 5.205 s, engine 5.075 s, wa 5.99
+    SNAP after 1 x readrandom         pread=926878 (3802027246 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readrandom: 403253 ops/s, 2.480 s, engine 2.370 s, wa -
+    SNAP after 1 x readmissing        pread=5458 (22388720 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readmissing: 4357185 ops/s, 0.230 s, engine 0.203 s, wa -
+    SNAP after 1 x readseq            pread=27716 (113690109 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readseq: 6175749 ops/s, 0.162 s, engine 0.162 s, wa -
+    SNAP after 1 x seekrandom         pread=953091 (3909557051 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale seekrandom: 311926 ops/s, 3.206 s, engine 3.177 s, wa -
+    Level 0: 5 files, 16311255 bytes
+    Level 1: 8 files, 16438258 bytes
+    Level 2: 52 files, 108562082 bytes
+    Level 3: 4 files, 12934177 bytes
+    Level 4: 0 files, 0 bytes
+    Level 5: 0 files, 0 bytes
+    Level 6: 0 files, 0 bytes
+    Counters: flushes=35 compactions=37 trivial_moves=3 tombstones_dropped=0 shadowed_dropped=648279 user_bytes_written=116000000 wal_bytes_written=138028602 flush_bytes_written=114158760 compaction_bytes_read=518907858 compaction_bytes_written=442789836 write_groups=1000000 wal_syncs=0 write_slowdowns=81 write_stops=0 bg_errors=0
+
+  shale, build e:
+    SNAP before overwrite             pread=88629 (371156972 B) read=0 write=1007785 (591018147 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=511 fsync=0
+    == shale fillrandom: 204762 ops/s, 4.884 s, engine 4.741 s, wa 5.09
+    SNAP before readrandom            pread=174489 (730522287 B) read=6 write=2014990 (1143985853 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=996 fsync=0
+    == shale overwrite: 167906 ops/s, 5.956 s, engine 5.819 s, wa 7.39
+    SNAP after 1 x readrandom         pread=926814 (3801764646 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readrandom: 382296 ops/s, 2.616 s, engine 2.506 s, wa -
+    SNAP after 1 x readmissing        pread=5428 (22265670 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readmissing: 4446233 ops/s, 0.225 s, engine 0.199 s, wa -
+    SNAP after 1 x readseq            pread=27711 (113669596 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readseq: 9692525 ops/s, 0.103 s, engine 0.103 s, wa -
+    SNAP after 1 x seekrandom         pread=953027 (3909293409 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale seekrandom: 337654 ops/s, 2.962 s, engine 2.933 s, wa -
+    Level 0: 3 files, 9789856 bytes
+    Level 1: 5 files, 9132298 bytes
+    Level 2: 50 files, 103221382 bytes
+    Level 3: 8 files, 20022453 bytes
+    Level 4: 0 files, 0 bytes
+    Level 5: 0 files, 0 bytes
+    Level 6: 0 files, 0 bytes
+    Counters: flushes=35 compactions=50 trivial_moves=4 tombstones_dropped=0 shadowed_dropped=751677 user_bytes_written=116000000 wal_bytes_written=138028602 flush_bytes_written=114158760 compaction_bytes_read=693788325 compaction_bytes_written=605590520 write_groups=1000000 wal_syncs=0 write_slowdowns=0 write_stops=0 bg_errors=0
+
+  shale, build ef:
+    SNAP before overwrite             pread=3073 (377166554 B) read=0 write=1007785 (591018147 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=511 fsync=0
+    == shale fillrandom: 244475 ops/s, 4.090 s, engine 3.949 s, wa 5.09
+    SNAP before readrandom            pread=6058 (743751264 B) read=6 write=2014990 (1143985853 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=996 fsync=0
+    == shale overwrite: 199750 ops/s, 5.006 s, engine 4.877 s, wa 7.39
+    SNAP after 1 x readrandom         pread=926814 (3801764646 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readrandom: 364039 ops/s, 2.747 s, engine 2.636 s, wa -
+    SNAP after 1 x readmissing        pread=5428 (22265670 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readmissing: 4291875 ops/s, 0.233 s, engine 0.206 s, wa -
+    SNAP after 1 x readseq            pread=765 (116243962 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readseq: 10343570 ops/s, 0.097 s, engine 0.097 s, wa -
+    SNAP after 1 x seekrandom         pread=953027 (3909293409 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale seekrandom: 329279 ops/s, 3.037 s, engine 3.008 s, wa -
+    Level 0: 3 files, 9789856 bytes
+    Level 1: 5 files, 9132298 bytes
+    Level 2: 50 files, 103221382 bytes
+    Level 3: 8 files, 20022453 bytes
+    Level 4: 0 files, 0 bytes
+    Level 5: 0 files, 0 bytes
+    Level 6: 0 files, 0 bytes
+    Counters: flushes=35 compactions=50 trivial_moves=4 tombstones_dropped=0 shadowed_dropped=751677 user_bytes_written=116000000 wal_bytes_written=138028602 flush_bytes_written=114158760 compaction_bytes_read=693788325 compaction_bytes_written=605590520 write_groups=1000000 wal_syncs=0 write_slowdowns=0 write_stops=0 bg_errors=0
+
+  shale, build final:
+    SNAP before overwrite             pread=3073 (377166554 B) read=0 write=1007785 (591018147 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=511 fsync=0
+    == shale fillrandom: 205234 ops/s, 4.872 s, engine 4.721 s, wa 5.09
+    SNAP before readrandom            pread=6058 (743751264 B) read=6 write=2014990 (1143985853 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=996 fsync=0
+    == shale overwrite: 169500 ops/s, 5.900 s, engine 5.758 s, wa 7.39
+    SNAP after 1 x readrandom         pread=926814 (3801764646 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readrandom: 418983 ops/s, 2.387 s, engine 2.280 s, wa -
+    SNAP after 1 x readmissing        pread=5428 (22265670 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readmissing: 4886622 ops/s, 0.205 s, engine 0.181 s, wa -
+    SNAP after 1 x readseq            pread=765 (116243962 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale readseq: 11822229 ops/s, 0.085 s, engine 0.085 s, wa -
+    SNAP after 1 x seekrandom         pread=953027 (3909293409 B) read=0 write=0 (0 B) pwrite=0 mmap=0 munmap=0 F_FULLFSYNC=0 fsync=0
+    == shale seekrandom: 374203 ops/s, 2.672 s, engine 2.649 s, wa -
+    Level 0: 3 files, 9789856 bytes
+    Level 1: 5 files, 9132298 bytes
+    Level 2: 50 files, 103221382 bytes
+    Level 3: 8 files, 20022453 bytes
+    Level 4: 0 files, 0 bytes
+    Level 5: 0 files, 0 bytes
+    Level 6: 0 files, 0 bytes
+    Counters: flushes=35 compactions=50 trivial_moves=4 tombstones_dropped=0 shadowed_dropped=751677 user_bytes_written=116000000 wal_bytes_written=138028602 flush_bytes_written=114158760 compaction_bytes_read=693788325 compaction_bytes_written=605590520 write_groups=1000000 wal_syncs=0 write_slowdowns=0 write_stops=0 bg_errors=0
+
+2. Where the time of the calling thread went (probe, sampled with `sample`)
+------------------------------------------------------------
+`profile.sh` ran the probe (`fillrandom`, `overwrite`, then one read benchmark in a loop, 1,000,000 keys), waited for the line
+`MARK loop <benchmark>`, and ran `sample <pid> 4` on it; `sample_parse.py` and `categories.py` classified the samples of the
+thread that calls the engine. The loops are 3 for `readrandom`, 40 for `readseq` and 2 for `seekrandom`, so that the 4
+seconds fall inside the timed loop. The command line of each run is in section 0. The share is of the samples of that thread
+in that run, by the function at the top of the stack, and is not a time. The profile of LevelDB was not taken again.
+
+Not compacted (first pass):
+
+  v011 readrandom
+    2791 samples; engine and harness code 39.5%; pread syscall 30.7%; crc32c 16.0%; malloc, free, memset 6.9%; memmove, memcmp 5.9%; clock reads (harness) 0.9%
+        self    858  30.7%  pread
+        self    447  16.0%  shale::crc32c::Extend(unsigned int, char const*, unsigned long)
+        self    186   6.7%  shale::MemTable::Get(shale::LookupKey const&, std::basic_string<char>*, shale::Status*) const
+        self    106   3.8%  shale::CompareInternalKey(std::basic_string_view<char>, std::basic_string_view<char>)
+        self    105   3.8%  _platform_memcmp
+        self     95   3.4%  mach_continuous_time
+        self     90   3.2%  shale::Block::Iter::ReadRestartKey(unsigned int, std::basic_string_view<char>*)
+        self     86   3.1%  shale::Block::Iter::Seek(std::basic_string_view<char>)
+        self     70   2.5%  shale::MemTable::KeyComparator::operator()(char const*, char const*) const
+        self     66   2.4%  shale::FindFile(std::vector<shale::FileMetaData> const&, std::basic_string_view<char>)
+        self     64   2.3%  _xzm_xzone_malloc_tiny
+        self     47   1.7%  std::__hash_table<std::__hash_value_type<shale::BlockCacheKey, std::__list_iterator<shale::ShardedLRUCache<sha
+
+  final readrandom
+    2807 samples; engine and harness code 42.8%; pread syscall 29.6%; crc32c 14.1%; memmove, memcmp 7.2%; malloc, free, memset 5.7%; clock reads (harness) 0.7%
+        self    830  29.6%  pread
+        self    395  14.1%  shale::crc32c::Extend(unsigned int, char const*, unsigned long)
+        self    155   5.5%  shale::MemTable::Get(shale::LookupKey const&, std::basic_string<char>*, shale::Status*) const
+        self    118   4.2%  shale::BlockIterator::ReadRestartKey(unsigned int, std::basic_string_view<char>*)
+        self    108   3.8%  shale::CompareInternalKey(std::basic_string_view<char>, std::basic_string_view<char>)
+        self     99   3.5%  _platform_memcmp
+        self     88   3.1%  mach_continuous_time
+        self     84   3.0%  shale::MemTable::KeyComparator::operator()(char const*, char const*) const
+        self     83   3.0%  shale::BlockIterator::Seek(std::basic_string_view<char>)
+        self     74   2.6%  shale::BloomFilterMayMatch(std::basic_string_view<char>, std::basic_string_view<char>)
+        self     68   2.4%  shale::BlockIterator::ParseNextEntry(bool)
+        self     62   2.2%  shale::ShardedLRUCache<unsigned long long, shale::Table>::Shard::Lookup(unsigned long long const&)
+
+  v011 readseq
+    2946 samples; engine and harness code 69.0%; pread syscall 11.7%; memmove, memcmp 9.6%; crc32c 6.4%; malloc, free, memset 3.3%
+        self    345  11.7%  pread
+        self    190   6.4%  shale::(anonymous namespace)::BoundedBlockIterator::Valid() const
+        self    187   6.3%  shale::crc32c::Extend(unsigned int, char const*, unsigned long)
+        self    175   5.9%  shale::(anonymous namespace)::TwoLevelIterator::key() const
+        self    172   5.8%  shale::Block::Iter::Valid() const
+        self    140   4.8%  shale::(anonymous namespace)::MergingIterator::Next()
+        self    135   4.6%  shale::(anonymous namespace)::NamedTableIterator::Valid() const
+        self    130   4.4%  _platform_memcmp
+        self    106   3.6%  shale::(anonymous namespace)::TwoLevelIterator::Valid() const
+        self    102   3.5%  shale::(anonymous namespace)::OrderedIterator::Valid() const
+        self     98   3.3%  _platform_memmove
+        self     86   2.9%  shale::(anonymous namespace)::OrderedIterator::key() const
+
+  final readseq
+    2935 samples; engine and harness code 62.2%; memmove, memcmp 19.0%; crc32c 10.6%; pread syscall 5.5%; malloc, free, memset 2.6%
+        self    526  17.9%  shale::(anonymous namespace)::MergingIterator::Next()
+        self    311  10.6%  shale::crc32c::Extend(unsigned int, char const*, unsigned long)
+        self    242   8.2%  _platform_memmove
+        self    236   8.0%  _platform_memcmp
+        self    173   5.9%  shale::BlockIterator::key() const
+        self    170   5.8%  shale::Table::Iter::Valid() const
+        self    160   5.5%  pread
+        self    149   5.1%  shale::CompareInternalKey(std::basic_string_view<char>, std::basic_string_view<char>)
+        self    117   4.0%  shale::BlockIterator::ParseNextEntry(bool)
+        self     99   3.4%  shale::Table::Iter::key() const
+        self     80   2.7%  shale::Table::Iter::Settle(shale::Table::Iter::Mode)
+        self     78   2.7%  shale::(anonymous namespace)::TwoLevelIterator::key() const
+
+  v011 seekrandom
+    2802 samples; engine and harness code 42.3%; pread syscall 21.9%; malloc, free, memset 16.9%; crc32c 10.8%; memmove, memcmp 7.0%; clock reads (harness) 1.2%
+        self    613  21.9%  pread
+        self    303  10.8%  shale::crc32c::Extend(unsigned int, char const*, unsigned long)
+        self    176   6.3%  _xzm_xzone_malloc_tiny
+        self    150   5.4%  _xzm_free_main
+        self    102   3.6%  shale::Block::Iter::Seek(std::basic_string_view<char>)
+        self     96   3.4%  shale::Block::Iter::ReadRestartKey(unsigned int, std::basic_string_view<char>*)
+        self     96   3.4%  shale::CompareInternalKey(std::basic_string_view<char>, std::basic_string_view<char>)
+        self     90   3.2%  <deduplicated_symbol>
+        self     90   3.2%  shale::MemTable::Cursor::Seek(std::basic_string_view<char>)
+        self     78   2.8%  _platform_memmove
+        self     77   2.7%  _platform_memcmp
+        self     73   2.6%  shale::FindFile(std::vector<shale::FileMetaData> const&, std::basic_string_view<char>)
+
+  final seekrandom
+    2834 samples; engine and harness code 40.1%; pread syscall 27.8%; crc32c 15.1%; memmove, memcmp 8.2%; malloc, free, memset 7.6%; clock reads (harness) 1.2%
+        self    787  27.8%  pread
+        self    428  15.1%  shale::crc32c::Extend(unsigned int, char const*, unsigned long)
+        self    151   5.3%  shale::BlockIterator::ReadRestartKey(unsigned int, std::basic_string_view<char>*)
+        self    139   4.9%  shale::BlockIterator::Seek(std::basic_string_view<char>)
+        self    131   4.6%  shale::CompareInternalKey(std::basic_string_view<char>, std::basic_string_view<char>)
+        self    113   4.0%  _platform_memmove
+        self    101   3.6%  shale::MemTable::Cursor::Seek(std::basic_string_view<char>)
+        self     78   2.8%  _platform_memcmp
+        self     71   2.5%  shale::BlockIterator::ParseNextEntry(bool)
+        self     70   2.5%  std::__hash_table<std::__hash_value_type<shale::BlockCacheKey, std::__list_iterator<shale::ShardedLRUCache<sha
+        self     63   2.2%  _xzm_free_main
+        self     59   2.1%  _xzm_xzone_malloc_tiny
+
+Compacted before the reads:
+
+  v011 readrandom
+    2757 samples; pread syscall 33.6%; engine and harness code 32.0%; crc32c 17.9%; malloc, free, memset 10.8%; memmove, memcmp 4.9%; clock reads (harness) 0.8%
+        self    927  33.6%  pread
+        self    494  17.9%  shale::crc32c::Extend(unsigned int, char const*, unsigned long)
+        self    126   4.6%  mach_continuous_time
+        self    122   4.4%  shale::Block::Iter::ReadRestartKey(unsigned int, std::basic_string_view<char>*)
+        self    115   4.2%  shale::CompareInternalKey(std::basic_string_view<char>, std::basic_string_view<char>)
+        self     99   3.6%  shale::Block::Iter::Seek(std::basic_string_view<char>)
+        self     90   3.3%  _xzm_xzone_malloc_tiny
+        self     84   3.0%  _xzm_free_main
+        self     74   2.7%  _platform_memcmp
+        self     65   2.4%  std::__hash_table<std::__hash_value_type<shale::BlockCacheKey, std::__list_iterator<shale::ShardedLRUCache<sha
+        self     38   1.4%  <deduplicated_symbol>
+        self     38   1.4%  shale::ShardedLRUCache<unsigned long long, shale::Table>::Shard::Lookup(unsigned long long const&)
+
+  final readrandom
+    2780 samples; pread syscall 34.6%; engine and harness code 34.0%; crc32c 19.2%; memmove, memcmp 6.4%; malloc, free, memset 5.7%; clock reads (harness) 0.1%
+        self    962  34.6%  pread
+        self    533  19.2%  shale::crc32c::Extend(unsigned int, char const*, unsigned long)
+        self    125   4.5%  shale::BlockIterator::ReadRestartKey(unsigned int, std::basic_string_view<char>*)
+        self    124   4.5%  mach_continuous_time
+        self    111   4.0%  shale::CompareInternalKey(std::basic_string_view<char>, std::basic_string_view<char>)
+        self     89   3.2%  shale::BlockIterator::Seek(std::basic_string_view<char>)
+        self     82   2.9%  _platform_memcmp
+        self     78   2.8%  shale::BlockIterator::ParseNextEntry(bool)
+        self     66   2.4%  std::__hash_table<std::__hash_value_type<shale::BlockCacheKey, std::__list_iterator<shale::ShardedLRUCache<sha
+        self     58   2.1%  shale::Table::ReadDataBlock(shale::TableReadOptions const&, std::basic_string_view<char>, shale::Readahead*, s
+        self     55   2.0%  _platform_memmove
+        self     39   1.4%  shale::FindFile(std::vector<shale::FileMetaData> const&, std::basic_string_view<char>)
+
+  v011 readseq
+    2925 samples; engine and harness code 65.7%; pread syscall 14.5%; crc32c 8.0%; memmove, memcmp 7.3%; malloc, free, memset 4.4%
+        self    424  14.5%  pread
+        self    235   8.0%  shale::crc32c::Extend(unsigned int, char const*, unsigned long)
+        self    175   6.0%  shale::(anonymous namespace)::BoundedBlockIterator::Valid() const
+        self    164   5.6%  shale::Block::Iter::Valid() const
+        self    128   4.4%  shale::Block::Iter::ParseNextEntry()
+        self    117   4.0%  shale::(anonymous namespace)::NamedTableIterator::Valid() const
+        self    113   3.9%  _platform_memmove
+        self    108   3.7%  shale::(anonymous namespace)::TwoLevelIterator::Valid() const
+        self    101   3.5%  shale::(anonymous namespace)::TwoLevelIterator::key() const
+        self     95   3.2%  shale::(anonymous namespace)::MergingIterator::Next()
+        self     66   2.3%  shale::(anonymous namespace)::OrderedIterator::key() const
+        self     63   2.2%  shale::(anonymous namespace)::OrderedIterator::Valid() const
+
+  final readseq
+    2390 samples; engine and harness code 50.8%; memmove, memcmp 18.5%; crc32c 16.6%; pread syscall 8.6%; malloc, free, memset 5.1%; clock reads (harness) 0.5%
+        self    396  16.6%  shale::crc32c::Extend(unsigned int, char const*, unsigned long)
+        self    307  12.8%  _platform_memmove
+        self    205   8.6%  pread
+        self    155   6.5%  shale::BlockIterator::ParseNextEntry(bool)
+        self    147   6.2%  shale::Table::Iter::Valid() const
+        self     99   4.1%  shale::BlockIterator::key() const
+        self     84   3.5%  shale::Table::Iter::Settle(shale::Table::Iter::Mode)
+        self     80   3.3%  shale::(anonymous namespace)::MergingIterator::Next()
+        self     73   3.1%  _platform_memcmp
+        self     63   2.6%  shale::(anonymous namespace)::DBIter::FindNextUserEntry(bool)
+        self     55   2.3%  ShaleProbe::Scan(std::basic_string_view<char>, unsigned long, unsigned long*)
+        self     48   2.0%  shale::(anonymous namespace)::TwoLevelIterator::key() const
+
+  v011 seekrandom
+    2795 samples; engine and harness code 34.2%; pread syscall 25.9%; malloc, free, memset 19.6%; crc32c 13.7%; memmove, memcmp 5.2%; clock reads (harness) 1.5%
+        self    723  25.9%  pread
+        self    383  13.7%  shale::crc32c::Extend(unsigned int, char const*, unsigned long)
+        self    200   7.2%  _xzm_xzone_malloc_tiny
+        self    156   5.6%  _xzm_free_main
+        self    113   4.0%  shale::CompareInternalKey(std::basic_string_view<char>, std::basic_string_view<char>)
+        self     96   3.4%  shale::Block::Iter::ReadRestartKey(unsigned int, std::basic_string_view<char>*)
+        self     77   2.8%  _platform_memmove
+        self     69   2.5%  <deduplicated_symbol>
+        self     69   2.5%  shale::Block::Iter::Seek(std::basic_string_view<char>)
+        self     56   2.0%  std::__hash_table<std::__hash_value_type<shale::BlockCacheKey, std::__list_iterator<shale::ShardedLRUCache<sha
+        self     44   1.6%  shale::FindFile(std::vector<shale::FileMetaData> const&, std::basic_string_view<char>)
+        self     43   1.5%  _platform_memcmp
+
+  final seekrandom
+    2772 samples; pread syscall 34.7%; engine and harness code 31.1%; crc32c 17.7%; malloc, free, memset 9.2%; memmove, memcmp 5.8%; clock reads (harness) 1.4%
+        self    963  34.7%  pread
+        self    489  17.6%  shale::crc32c::Extend(unsigned int, char const*, unsigned long)
+        self    107   3.9%  shale::BlockIterator::ReadRestartKey(unsigned int, std::basic_string_view<char>*)
+        self     98   3.5%  shale::CompareInternalKey(std::basic_string_view<char>, std::basic_string_view<char>)
+        self     87   3.1%  _xzm_xzone_malloc_tiny
+        self     69   2.5%  _xzm_free_main
+        self     66   2.4%  shale::BlockIterator::Seek(std::basic_string_view<char>)
+        self     64   2.3%  _platform_memmove
+        self     63   2.3%  std::__hash_table<std::__hash_value_type<shale::BlockCacheKey, std::__list_iterator<shale::ShardedLRUCache<sha
+        self     61   2.2%  _platform_memcmp
+        self     61   2.2%  shale::BlockIterator::ParseNextEntry(bool)
+        self     52   1.9%  shale::Table::ReadDataBlock(shale::TableReadOptions const&, std::basic_string_view<char>, shale::Readahead*, s
+
+3. Allocation counts (read_allocations_test, libc++ with Apple clang)
+------------------------------------------------------------
+From the change that made the counts, #24 (tests/db/read_allocations_test.cc, which counts the `operator new` calls of a thread
+through the public API). v0.1.1 and 2f95cb6 (E+F) were each a clean `git archive` export with the same test file and
+tests/testkit/alloc_counter copied in; this change is c7af18b (E+F+G). 16-byte user keys (the benchmark's), 100-byte values:
+
+  figure                       v0.1.1   E+F   E+F+G
+  Get, block cached                 6     8       1
+  Get, block read                   8    10       2
+  a data block read                 2     2       1
+  Get, block read and cached       11    13       5
+  a seek, blocks cached            39    21       9
+  a seek, blocks read              43    25      11
+  10 Next inside a block            0     0       0
+
+7-byte user keys (which fit the string's inline buffer):
+
+  v0.1.1: 3, 5, 2, 8, 27, 31, 0     E+F: 3, 5, 2, 8, 13, 17, 0     E+F+G: 1, 2, 1, 5, 8, 10, 0
+
+libstdc++ (GCC 13 and 14, Clang 17 and 18, Debug and Release, and the ASan build agree) for E+F+G with 16-byte keys: 1, 2, 1, 5,
+9, 11, 0. v0.1.1 and E+F were not counted with libstdc++. Where a figure of a count was changed by one cut of the change
+(libc++, 7-byte keys): block in one allocation, kGetRead 5 to 4 and kSeekRead 17 to 15; iterators on the stack, kGetCached 3
+to 1; fused database iterator, kSeekCached 13 to 8.
+
+4. The sources
+------------------------------------------------------------
+4.1 measure.sh and table.py: the texts of the appendix of docs/benchmarks/2026-11-m2-protocol.md, which are the files that the
+runs used (identical to the protocol's text).
+
+--- measure.sh ---
+#!/usr/bin/env bash
+# measure.sh <label> <argument>...
+# Waits for the machine to be quiet, then runs one command under caffeinate and appends the record of
+# the run to $EVIDENCE. $BENCH is the command (shale_bench, or a probe), $DB the database directory (made
+# empty before the run), $WORK the scratch directory. Paths under $WORK and $DB are written to the
+# record as $WORK and $DB. Standard output and standard error are kept in $WORK/logs (never in the
+# repository), and a non-empty standard error is named in the record. Exit status: the run's, or 3 if the machine was not
+# quiet within two hours of wall time.
+set -uo pipefail
+: "${BENCH:?}" "${DB:?}" "${EVIDENCE:?}" "${WORK:?}"
+label=$1; shift
+names='^(ninja|clang|clang\+\+|clang-.*|cmake|ctest|ld|ld64|shale_.*|fuzz_.*)$'
+busy='process named ninja, clang, cmake, ctest, ld, ld64, shale_* or fuzz_*'
+limit=7200 poll=15 begin=$(date +%s)
+while :; do
+  load=$(sysctl -n vm.loadavg | tr -d '{}' | awk '{print $1}')
+  procs=$(ps -axo comm= | awk -F/ '{print $NF}' | grep -E "$names" || true)
+  power=$(pmset -g batt | head -1)
+  waited=$(($(date +%s) - begin))
+  if awk -v l="$load" 'BEGIN{exit !(l < 2.0)}' && [ -z "$procs" ] && [[ "$power" == *"AC Power"* ]]; then break; fi
+  if [ "$waited" -ge "$limit" ]; then
+    echo "$label: not quiet after $waited s: load $load, processes '${procs//$'\n'/ }', $power" | tee -a "$EVIDENCE" >&2
+    exit 3
+  fi
+  caffeinate -ims sleep "$poll"
+done
+base="$WORK/logs/${label//[^A-Za-z0-9._-]/_}"
+errfile="$base.stderr" outfile="$base.stdout"
+for a in "$@"; do case "$a" in --json=*) mkdir -p "$(dirname "${a#--json=}")";; esac; done
+mkdir -p "$WORK/logs"
+shown() { local s=$*; s=${s//"$DB"/\$DB}; s=${s//"$WORK"/\$WORK}; echo "$s"; }
+rm -rf "$DB"; mkdir -p "$DB"
+{
+  echo "$label"
+  echo "  quiet: load average (1 min) $load, no $busy, waited $waited s"
+  echo "  start: $(date '+%Y-%m-%d %H:%M:%S %z')"
+  echo "  uptime at start: $(uptime)"
+  echo "  power at start: $power"
+  echo "  command: $(shown "caffeinate -ims $BENCH $*")"
+  echo "  standard output kept in: $(shown "$outfile")"
+} >> "$EVIDENCE"
+caffeinate -ims "$BENCH" "$@" > "$outfile.run" 2> "$errfile.run"
+status=$?
+{
+  echo "  exit status: $status"
+  if [ -s "$errfile.run" ]; then
+    echo "  standard error kept in: $(shown "$errfile")"
+    echo "  last line of standard error: $(shown "$(tail -n 1 "$errfile.run")")"
+  fi
+  echo "  end: $(date '+%Y-%m-%d %H:%M:%S %z')"
+  echo "  uptime at end: $(uptime)"
+  echo
+} >> "$EVIDENCE"
+cat "$outfile.run" >> "$outfile"; cat "$outfile.run"
+if [ -s "$errfile.run" ]; then cat "$errfile.run" >> "$errfile"; cat "$errfile.run" >&2; fi
+rm -f "$errfile.run" "$outfile.run"
+exit "$status"
+
+--- table.py ---
+#!/usr/bin/env python3
+"""table.py FILE... : Markdown rows from shale_bench JSON files.
+
+One file: each benchmark's median ops/s, with the lowest and highest of its runs in brackets (the main
+table). Several files (the rounds of one build and pass): the median of the files' medians, with the
+lowest and highest file in brackets (the figure to quote), and p99 the same way.
+"""
+import json
+import statistics
+import sys
+
+
+def main(paths):
+    docs = [json.load(open(p)) for p in paths]
+    names = [r["name"] for r in docs[0]["results"]]
+    print("| benchmark | ops/s | p99 (us) |")
+    print("| --- | --- | --- |")
+    for name in names:
+        rows = [next(r for r in d["results"] if r["name"] == name) for d in docs]
+        if len(docs) == 1:
+            ops = [run["ops_per_sec"] for run in rows[0]["runs"]]
+            p99 = [run["p99_us"] for run in rows[0]["runs"]]
+            mid_ops, mid_p99 = rows[0]["ops_per_sec"], rows[0]["p99_us"]
+        else:
+            ops = [r["ops_per_sec"] for r in rows]
+            p99 = [r["p99_us"] for r in rows]
+            mid_ops = statistics.median(ops)
+            mid_p99 = statistics.median(p99) if None not in p99 else None
+        cell = "n/a"
+        if None not in p99:
+            cell = f"{mid_p99:,.1f} [{min(p99):,.1f}, {max(p99):,.1f}]"
+        print(f"| {name} | {mid_ops:,.0f} [{min(ops):,.0f}, {max(ops):,.0f}] | {cell} |")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
+
+4.2 driver.sh: ran blocks A, B, W, C and D of the protocol in order, each run through measure.sh, a failed run once more and
+a second failure or a timeout stopping it. It ends by writing a marker file. (The scratch directory is written $WORK here.)
+
+--- driver.sh ---
+#!/usr/bin/env bash
+# Runs protocol sections 4 A, B, W, C and D in order, each run through measure.sh.
+# Run from the root of the repository checkout. Always ends: it writes $WORK/driver.done on exit.
+set -uo pipefail
+export WORK=$WORK DB=$WORK/db
+export EVIDENCE=${EVIDENCE:-$WORK/evidence-runs.txt} SCRATCH=$WORK/probe
+MEASURE=${MEASURE:-$WORK/measure.sh} NUM=${NUM:-1000000}
+log=$WORK/driver.log
+rm -f $WORK/driver.done
+trap 'echo "$(date +%H:%M:%S) driver exit" >> $log; touch $WORK/driver.done' EXIT
+say() { echo "$(date +%H:%M:%S) $*" >> $log; }
+ALL="v011 e ef final leveldb"
+order() { case $1 in 1) echo "v011 e ef final leveldb";; 2) echo "leveldb final ef e v011";; 3) echo "ef v011 leveldb e final";; esac; }
+bin() { echo "$WORK/$([ "$1" = leveldb ] && echo final || echo "$1")/build/tools/shale_bench"; }
+eng() { [ "$1" = leveldb ] && echo --engine=leveldb || echo --engine=shale; }
+# run <label> <build> <args...>: one run; a failure is run again once; a second failure or a timeout stops.
+run() {
+  local label=$1 build=$2; shift 2
+  for attempt in 1 2; do
+    say "start $label (attempt $attempt)"
+    local l=$label; [ $attempt = 2 ] && l="$label (rerun)"
+    BENCH=$(bin "$build") bash $MEASURE "$l" "$@"; local rc=$?
+    say "end $label rc=$rc"
+    [ $rc = 0 ] && return 0
+    [ $rc = 3 ] && { say "STOP: quiet check timed out"; exit 3; }
+  done
+  say "STOP: $label failed twice"; exit 1
+}
+R=${R:-docs/benchmarks}
+FULL=fillseq,fillrandom,fillsync,overwrite,readrandom,readmissing,readseq,seekrandom
+RD=overwrite,readrandom,readmissing,readseq,seekrandom
+say "A first pass"
+[ -n "${SKIP_AB:-}" ] || for b in $ALL; do run "A first $b" $b $(eng $b) --benchmarks=$FULL --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-$b.json; done
+say "A compacted pass"
+[ -n "${SKIP_AB:-}" ] || for b in $ALL; do run "A compacted $b" $b $(eng $b) --benchmarks=$FULL --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-$b-compacted.json --compact_before_reads; done
+say "B"
+for r in $([ -n "${SKIP_AB:-}" ] || echo 1 2 3); do
+  for b in $(order $r); do run "B first r$r $b" $b $(eng $b) --benchmarks=$RD --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-reads/$b-first-$r.json; done
+  for b in $(order $r); do run "B compacted r$r $b" $b $(eng $b) --benchmarks=$RD --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-reads/$b-compacted-$r.json --compact_before_reads; done
+done
+say "W"
+for r in 1 2 3; do
+  for b in $(order $r); do run "W r$r $b" $b $(eng $b) --benchmarks=fillseq,fillrandom,overwrite --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-writes/$b-$r.json; done
+done
+say "C"
+for r in 1 2 3; do
+  if [ $r = 2 ]; then co="leveldb final"; else co="final leveldb"; fi
+  for pass in first compacted; do
+    for b in $co; do
+      extra=(); [ $pass = compacted ] && extra=(--compact_before_reads)
+      cs=(); [ $b = final ] && cs=(--cache_size=1073741824)
+      run "C $pass r$r $b" $b $(eng $b) ${cs[@]+"${cs[@]}"} --benchmarks=$RD --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-diagnostic/$b-$pass-$r.json ${extra[@]+"${extra[@]}"}
+    done
+  done
+done
+say "D"
+probe() { # probe <build> <label> <args to profile.sh after the probe path>
+  local build=$1 label=$2; shift 2
+  for attempt in 1 2; do
+    local l=$label; [ $attempt = 2 ] && l="$label (rerun)"
+    say "start probe $label (attempt $attempt)"
+    BENCH=$WORK/probe/profile.sh bash $MEASURE "$l" "$WORK/probe/probe-$build" "$label" "$@"; local rc=$?
+    local san=${l//[^A-Za-z0-9._-]/_}
+    if [ $rc = 3 ]; then say "STOP: quiet check timed out"; exit 3; fi
+    if [ $rc = 0 ] && grep -q "^$label: probe exit 0" "$WORK/logs/$san.stdout" && grep -q '^interpose:' "$SCRATCH/prof-$label.out"; then say "end probe $label ok"; return 0; fi
+    say "end probe $label FAILED (rc=$rc)"
+  done
+  say "STOP: probe $label failed twice"; exit 1
+}
+for b in v011 final; do
+  for state in first compacted; do
+    c=""; [ $state = compacted ] && c=1
+    probe $b "count-$b-$state" $NUM fillrandom,overwrite,readrandom,readmissing,readseq,seekrandom 1 1 1 $c
+  done
+  for state in first compacted; do
+    c=""; [ $state = compacted ] && c=1
+    for bench in readrandom:3 readseq:40 seekrandom:2; do
+      n=${bench%%:*}; loops=${bench##*:}
+      probe $b "prof-$b-$state-$n" $NUM fillrandom,overwrite,$n "MARK loop $n" 4 $loops $c
+    done
+  done
+done
+say "ALL DONE"
+
+4.3 analyze.py: applies the reporting rules of section 6 of the protocol to the JSON files (medians of rounds, moved,
+interleave, level with, two levels). It is not in the protocol's appendix, which lists the two scripts that make the runs and
+the tables; the rules are the protocol's.
+
+--- analyze.py ---
+#!/usr/bin/env python3
+"""analyze.py ROOT: applies the reporting rules of the 2026-11 protocol (section 6) to the result files.
+
+ROOT is the docs/benchmarks directory. Prints, for every row: the medians, the ratios, and the answer
+of each rule. Reads ops/s only.
+"""
+import json
+import statistics as st
+import sys
+
+ROOT = sys.argv[1]
+BUILDS = ["v011", "e", "ef", "final", "leveldb"]
+ORDER = ["v011", "e", "ef", "final"]
+READS = ["readrandom", "readmissing", "readseq", "seekrandom"]
+WRITES = ["fillseq", "fillrandom", "overwrite"]
+
+
+def load(path):
+    return {r["name"]: r for r in json.load(open(path))["results"]}
+
+
+def ops(path, row):
+    return load(path)[row]["ops_per_sec"]
+
+
+def rounds(kind, build, pass_, row):
+    if kind == "reads":
+        return [ops(f"{ROOT}/2026-11-m2-reads/{build}-{pass_}-{r}.json", row) for r in (1, 2, 3)]
+    if kind == "writes":
+        return [ops(f"{ROOT}/2026-11-m2-writes/{build}-{r}.json", row) for r in (1, 2, 3)]
+    if kind == "diag":
+        return [ops(f"{ROOT}/2026-11-m2-diagnostic/{build}-{pass_}-{r}.json", row) for r in (1, 2, 3)]
+
+
+def interleave(a, b):
+    return not (min(a) > max(b) or min(b) > max(a))
+
+
+def moved(new, old):
+    sep = min(new) > max(old) or max(new) < min(old)
+    size = st.median(new) / st.median(old) - 1
+    return sep and abs(size) >= 0.03, sep, size
+
+
+def fmt(v):
+    return f"{st.median(v):,.0f} [{min(v):,.0f}, {max(v):,.0f}]"
+
+
+def table(kind, rows, passes):
+    for pass_ in passes:
+        print(f"\n## {kind} {pass_}")
+        for row in rows:
+            data = {b: rounds(kind, b, pass_, row) for b in BUILDS}
+            print(f"\n{row}")
+            for b in BUILDS:
+                print(f"  {b:8s} {fmt(data[b])}   rounds {[round(x) for x in data[b]]}")
+            f, l, v = data["final"], data["leveldb"], data["v011"]
+            print(f"  final/v011 {st.median(f)/st.median(v):.3f}  moved={moved(f, v)}")
+            print(f"  final/leveldb {st.median(f)/st.median(l):.3f}  interleave={interleave(f, l)}"
+                  f"  level_with={interleave(f, l) and 0.95 <= st.median(f)/st.median(l) <= 1.05}")
+            print(f"  v011/leveldb {st.median(v)/st.median(l):.3f}  interleave={interleave(v, l)}"
+                  f"  level_with={interleave(v, l) and 0.95 <= st.median(v)/st.median(l) <= 1.05}")
+            for a, b in zip(ORDER, ORDER[1:]):
+                m = moved(data[b], data[a])
+                print(f"  step {a}->{b}: ratio {st.median(data[b])/st.median(data[a]):.3f} moved={m[0]} separated={m[1]}")
+
+
+def main_table():
+    for suffix in ("", "-compacted"):
+        print(f"\n## A{suffix or ' first'}")
+        names = list(load(f"{ROOT}/2026-11-m2-final{suffix}.json"))
+        for row in names:
+            vals = {}
+            for b in BUILDS:
+                r = load(f"{ROOT}/2026-11-m2-{b}{suffix}.json")[row]
+                vals[b] = (r["ops_per_sec"], min(x["ops_per_sec"] for x in r["runs"]), max(x["ops_per_sec"] for x in r["runs"]))
+            line = "  ".join(f"{b} {vals[b][0]:,.0f} [{vals[b][1]:,.0f}, {vals[b][2]:,.0f}]" for b in BUILDS)
+            print(f"{row:12s} {line}  final/v011 {vals['final'][0]/vals['v011'][0]:.3f} final/leveldb {vals['final'][0]/vals['leveldb'][0]:.3f}")
+
+
+def levels():
+    print("\n## two levels (first pass: the run of A and the three rounds of B)")
+    for b in BUILDS:
+        for row in READS:
+            meds, spreads = [], []
+            paths = [f"{ROOT}/2026-11-m2-{b}.json"] + [f"{ROOT}/2026-11-m2-reads/{b}-first-{r}.json" for r in (1, 2, 3)]
+            for p in paths:
+                r = load(p)[row]
+                meds.append(r["ops_per_sec"])
+                o = [x["ops_per_sec"] for x in r["runs"]]
+                spreads.append(max(o) / min(o) - 1)
+            s = sorted(meds)
+            gap = max((s[i + 1] / s[i] - 1, i) for i in range(len(s) - 1))
+            two = max(spreads) <= 0.02 and gap[0] > 0.10
+            print(f"  {b:8s} {row:12s} runs {[round(x) for x in meds]} max repeat spread {max(spreads)*100:.1f}% biggest gap {gap[0]*100:.1f}% two_levels={two}")
+
+
+main_table()
+table("reads", READS, ["first", "compacted"])
+table("writes", WRITES, [None])
+print("\n## diagnostic (C): final with 1 GiB cache against leveldb as configured, and against final's own rounds in B")
+for pass_ in ("first", "compacted"):
+    for row in ["readrandom", "seekrandom"]:
+        f, l = rounds("diag", "final", pass_, row), rounds("diag", "leveldb", pass_, row)
+        fb = rounds("reads", "final", pass_, row)
+        print(f"{pass_} {row}: final+1GiB {fmt(f)} leveldb {fmt(l)} ratio {st.median(f)/st.median(l):.3f} interleave={interleave(f, l)} | final 8MiB (B) {fmt(fb)} cache gain {st.median(f)/st.median(fb):.3f}")
+levels()
+
+4.4 The probe. probe.cc, interpose.c, profile.sh and sample_parse.py are the texts of sections 6 and 7.5 of
+docs/benchmarks/2026-10-m2-evidence.txt, extracted by line range and unchanged (an empty diff). categories.py is the same text
+except that the line `"sp", "$SCRATCH/sample_parse.py")` has `$SCRATCH` replaced by the path of the probe directory, as the
+text of 2026-10 says to ($SCRATCH is the scratch directory the probe was built in):
+
+  7c7
+  <     "sp", "$SCRATCH/sample_parse.py")
+  ---
+  >     "sp", "$WORK/probe/sample_parse.py")
+
+The probes were built with the one command below for each build (`<n>` is v011, e, ef or final; the same command, differing
+only in the build directory), and interpose.dylib with `cc -dynamiclib -O2 -o interpose.dylib interpose.c`:
+
+--- build-probe.sh ---
+#!/usr/bin/env bash
+# build-probe.sh <name>: the one compile command for both probes.
+set -euo pipefail
+n=$1; B=$WORK/$n/build
+c++ -O2 -g -std=c++20 -I"$WORK/$n/include" -I"$WORK/$n/tools" -I"$(brew --prefix leveldb)/include" \
+  "$WORK/probe/probe.cc" -o "$WORK/probe/probe-$n" \
+  "$B/tools/libshale_bench_support.a" "$B/tools/libshale_bench_leveldb.a" \
+  "$B/src/libshale_db.a" "$B/src/libshale_io.a" "$B/src/libshale_core.a" "$B/src/libshale_util.a" \
+  -L"$(brew --prefix leveldb)/lib" -lleveldb
+
+Every profile.sh invocation is the command line in section 0 (`$WORK/probe/profile.sh <probe> <label> <keys> <benchmarks>
+<mark-or-delay> <seconds> <loops> [compact]`, run through measure.sh, with SCRATCH=$WORK/probe set in the environment). A
+probe run counted as a success only if the standard output had `<label>: probe exit 0` and the probe's own output file had the
+`interpose:` lines, as the protocol says; all 20 did.
