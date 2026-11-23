@@ -1,0 +1,621 @@
+{
+  "tool": "shale_bench",
+  "engine": "leveldb",
+  "config": {
+    "benchmarks": [
+      "readrandom",
+      "readmissing",
+      "readseq",
+      "seekrandom"
+    ],
+    "num": 1000000,
+    "sync_num": 10000,
+    "value_size": 100,
+    "repeat": 3,
+    "seed": 301,
+    "db": "db",
+    "compact_before_reads": true,
+    "cache_size": 8388608,
+    "diagnostic": false,
+    "settle_poll_ms": 10,
+    "settle_cap_ms": 300000,
+    "existing_db": "overwrite"
+  },
+  "machine": {
+    "uname": "Darwin 27.2.0 arm64",
+    "cpu": "Apple M2",
+    "logical_cores": 8,
+    "clock_nominal_period_ns": 1,
+    "clock_smallest_step_ns": 41
+  },
+  "build": {
+    "compiler_id": "AppleClang",
+    "compiler_version": "21.0.0.21000334",
+    "build_type": "Release",
+    "sanitizer": "",
+    "coverage": false,
+    "flaw": ""
+  },
+  "megabyte_bytes": 1048576,
+  "existing_db_open": {
+    "opened": {
+      "background_busy": false,
+      "highest_score": 0.872399712,
+      "files_per_level": [
+        0,
+        7,
+        35,
+        67,
+        0,
+        0,
+        0
+      ],
+      "bytes_per_level": [
+        0,
+        9147774,
+        69793874,
+        116452565,
+        0,
+        0,
+        0
+      ],
+      "counters": {
+        "time_sec": 0,
+        "read_mb": 0,
+        "write_mb": 0
+      },
+      "write_amplification": "n/a"
+    },
+    "settle_seconds": 0.000091166,
+    "settled": {
+      "background_busy": false,
+      "highest_score": 0.872399712,
+      "files_per_level": [
+        0,
+        7,
+        35,
+        67,
+        0,
+        0,
+        0
+      ],
+      "bytes_per_level": [
+        0,
+        9147774,
+        69793874,
+        116452565,
+        0,
+        0,
+        0
+      ],
+      "counters": {
+        "time_sec": 0,
+        "read_mb": 0,
+        "write_mb": 0
+      },
+      "write_amplification": "n/a"
+    }
+  },
+  "results": [
+    {
+      "name": "readrandom",
+      "kind": "read",
+      "source": "overwrite",
+      "entries": 1000000,
+      "compact_seconds": 1.711715500,
+      "ops_per_sec": 537279.339462591,
+      "mb_per_sec": 59.437182787,
+      "p50_us": 1.750000000,
+      "p99_us": 2.042000000,
+      "p999_us": 2.583000000,
+      "write_amplification": null,
+      "spread_percent": 0.872430678,
+      "settle_seconds": 0.000077000,
+      "settled_ops_per_sec": null,
+      "settled_write_amplification": null,
+      "compact_settle_seconds": 0.000066250,
+      "tree": {
+        "background_busy": false,
+        "highest_score": 0.111055734,
+        "files_per_level": [
+          0,
+          0,
+          0,
+          55,
+          0,
+          0,
+          0
+        ],
+        "bytes_per_level": [
+          0,
+          0,
+          0,
+          116450377,
+          0,
+          0,
+          0
+        ],
+        "counters": {
+          "time_sec": 1,
+          "read_mb": 309,
+          "write_mb": 234
+        },
+        "write_amplification": "n/a"
+      },
+      "after": {
+        "background_busy": false,
+        "highest_score": 0.111055734,
+        "files_per_level": [
+          0,
+          0,
+          0,
+          55,
+          0,
+          0,
+          0
+        ],
+        "bytes_per_level": [
+          0,
+          0,
+          0,
+          116450377,
+          0,
+          0,
+          0
+        ],
+        "counters": {
+          "time_sec": 1,
+          "read_mb": 309,
+          "write_mb": 234
+        },
+        "write_amplification": "n/a"
+      },
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 1.876212959,
+          "engine_seconds": 1.785358893,
+          "ops_per_sec": 532988.536937187,
+          "mb_per_sec": 58.962507519,
+          "p50_us": 1.750000000,
+          "p99_us": 2.375000000,
+          "p999_us": 3.708000000,
+          "average_us": 1.785358893,
+          "write_amplification": null,
+          "found": 1000000,
+          "settle_seconds": null,
+          "settled_ops_per_sec": null,
+          "returned": null,
+          "settled": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 1.861229209,
+          "engine_seconds": 1.775057933,
+          "ops_per_sec": 537279.339462591,
+          "mb_per_sec": 59.437182787,
+          "p50_us": 1.750000000,
+          "p99_us": 2.041000000,
+          "p999_us": 2.542000000,
+          "average_us": 1.775057933,
+          "write_amplification": null,
+          "found": 1000000,
+          "settle_seconds": null,
+          "settled_ops_per_sec": null,
+          "returned": null,
+          "settled": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 1.859856375,
+          "engine_seconds": 1.774217001,
+          "ops_per_sec": 537675.926723105,
+          "mb_per_sec": 59.481055736,
+          "p50_us": 1.750000000,
+          "p99_us": 2.042000000,
+          "p999_us": 2.583000000,
+          "average_us": 1.774217001,
+          "write_amplification": null,
+          "found": 1000000,
+          "settle_seconds": null,
+          "settled_ops_per_sec": null,
+          "returned": null,
+          "settled": null
+        }
+      ]
+    },
+    {
+      "name": "readmissing",
+      "kind": "read",
+      "source": "overwrite",
+      "entries": 1000000,
+      "compact_seconds": null,
+      "ops_per_sec": 1596116.648194941,
+      "mb_per_sec": 0.000000000,
+      "p50_us": 0.500000000,
+      "p99_us": 1.917000000,
+      "p999_us": 11.125000000,
+      "write_amplification": null,
+      "spread_percent": 2.140318882,
+      "settle_seconds": 0.000059041,
+      "settled_ops_per_sec": null,
+      "settled_write_amplification": null,
+      "compact_settle_seconds": null,
+      "tree": {
+        "background_busy": false,
+        "highest_score": 0.111055734,
+        "files_per_level": [
+          0,
+          0,
+          0,
+          55,
+          0,
+          0,
+          0
+        ],
+        "bytes_per_level": [
+          0,
+          0,
+          0,
+          116450377,
+          0,
+          0,
+          0
+        ],
+        "counters": {
+          "time_sec": 1,
+          "read_mb": 309,
+          "write_mb": 234
+        },
+        "write_amplification": "n/a"
+      },
+      "after": {
+        "background_busy": false,
+        "highest_score": 0.111055734,
+        "files_per_level": [
+          0,
+          0,
+          0,
+          55,
+          0,
+          0,
+          0
+        ],
+        "bytes_per_level": [
+          0,
+          0,
+          0,
+          116450377,
+          0,
+          0,
+          0
+        ],
+        "counters": {
+          "time_sec": 1,
+          "read_mb": 309,
+          "write_mb": 234
+        },
+        "write_amplification": "n/a"
+      },
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 0,
+          "seconds": 0.617784667,
+          "engine_seconds": 0.591190088,
+          "ops_per_sec": 1618686.984991163,
+          "mb_per_sec": 0.000000000,
+          "p50_us": 0.541000000,
+          "p99_us": 1.875000000,
+          "p999_us": 10.917000000,
+          "average_us": 0.591190088,
+          "write_amplification": null,
+          "found": 0,
+          "settle_seconds": null,
+          "settled_ops_per_sec": null,
+          "returned": null,
+          "settled": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 0,
+          "seconds": 0.626520625,
+          "engine_seconds": 0.599962937,
+          "ops_per_sec": 1596116.648194941,
+          "mb_per_sec": 0.000000000,
+          "p50_us": 0.500000000,
+          "p99_us": 1.917000000,
+          "p999_us": 11.125000000,
+          "average_us": 0.599962937,
+          "write_amplification": null,
+          "found": 0,
+          "settle_seconds": null,
+          "settled_ops_per_sec": null,
+          "returned": null,
+          "settled": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 0,
+          "seconds": 0.631103959,
+          "engine_seconds": 0.604437632,
+          "ops_per_sec": 1584524.998994658,
+          "mb_per_sec": 0.000000000,
+          "p50_us": 0.500000000,
+          "p99_us": 1.958000000,
+          "p999_us": 11.125000000,
+          "average_us": 0.604437632,
+          "write_amplification": null,
+          "found": 0,
+          "settle_seconds": null,
+          "settled_ops_per_sec": null,
+          "returned": null,
+          "settled": null
+        }
+      ]
+    },
+    {
+      "name": "readseq",
+      "kind": "read",
+      "source": "overwrite",
+      "entries": 1000000,
+      "compact_seconds": null,
+      "ops_per_sec": 13576088.825742576,
+      "mb_per_sec": 1501.871398722,
+      "p50_us": null,
+      "p99_us": null,
+      "p999_us": null,
+      "write_amplification": null,
+      "spread_percent": 0.440085626,
+      "settle_seconds": 0.000062958,
+      "settled_ops_per_sec": null,
+      "settled_write_amplification": null,
+      "compact_settle_seconds": null,
+      "tree": {
+        "background_busy": false,
+        "highest_score": 0.111055734,
+        "files_per_level": [
+          0,
+          0,
+          0,
+          55,
+          0,
+          0,
+          0
+        ],
+        "bytes_per_level": [
+          0,
+          0,
+          0,
+          116450377,
+          0,
+          0,
+          0
+        ],
+        "counters": {
+          "time_sec": 1,
+          "read_mb": 309,
+          "write_mb": 234
+        },
+        "write_amplification": "n/a"
+      },
+      "after": {
+        "background_busy": false,
+        "highest_score": 0.111055734,
+        "files_per_level": [
+          0,
+          0,
+          0,
+          55,
+          0,
+          0,
+          0
+        ],
+        "bytes_per_level": [
+          0,
+          0,
+          0,
+          116450377,
+          0,
+          0,
+          0
+        ],
+        "counters": {
+          "time_sec": 1,
+          "read_mb": 309,
+          "write_mb": 234
+        },
+        "write_amplification": "n/a"
+      },
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 0.073935625,
+          "engine_seconds": 0.073935625,
+          "ops_per_sec": 13525279.592889084,
+          "mb_per_sec": 1496.250565314,
+          "p50_us": null,
+          "p99_us": null,
+          "p999_us": null,
+          "average_us": null,
+          "write_amplification": null,
+          "found": 1000000,
+          "settle_seconds": null,
+          "settled_ops_per_sec": null,
+          "returned": null,
+          "settled": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 0.073658917,
+          "engine_seconds": 0.073658917,
+          "ops_per_sec": 13576088.825742576,
+          "mb_per_sec": 1501.871398722,
+          "p50_us": null,
+          "p99_us": null,
+          "p999_us": null,
+          "average_us": null,
+          "write_amplification": null,
+          "found": 1000000,
+          "settle_seconds": null,
+          "settled_ops_per_sec": null,
+          "returned": null,
+          "settled": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 0.073610459,
+          "engine_seconds": 0.073610459,
+          "ops_per_sec": 13585026.008328518,
+          "mb_per_sec": 1502.860085455,
+          "p50_us": null,
+          "p99_us": null,
+          "p999_us": null,
+          "average_us": null,
+          "write_amplification": null,
+          "found": 1000000,
+          "settle_seconds": null,
+          "settled_ops_per_sec": null,
+          "returned": null,
+          "settled": null
+        }
+      ]
+    },
+    {
+      "name": "seekrandom",
+      "kind": "read",
+      "source": "overwrite",
+      "entries": 1000000,
+      "compact_seconds": null,
+      "ops_per_sec": 454165.400680612,
+      "mb_per_sec": 50.242601851,
+      "p50_us": 2.125000000,
+      "p99_us": 3.209000000,
+      "p999_us": 3.417000000,
+      "write_amplification": null,
+      "spread_percent": 0.120547232,
+      "settle_seconds": 0.000058666,
+      "settled_ops_per_sec": null,
+      "settled_write_amplification": null,
+      "compact_settle_seconds": null,
+      "tree": {
+        "background_busy": false,
+        "highest_score": 0.111055734,
+        "files_per_level": [
+          0,
+          0,
+          0,
+          55,
+          0,
+          0,
+          0
+        ],
+        "bytes_per_level": [
+          0,
+          0,
+          0,
+          116450377,
+          0,
+          0,
+          0
+        ],
+        "counters": {
+          "time_sec": 1,
+          "read_mb": 309,
+          "write_mb": 234
+        },
+        "write_amplification": "n/a"
+      },
+      "after": {
+        "background_busy": false,
+        "highest_score": 0.111055734,
+        "files_per_level": [
+          0,
+          0,
+          0,
+          55,
+          0,
+          0,
+          0
+        ],
+        "bytes_per_level": [
+          0,
+          0,
+          0,
+          116450377,
+          0,
+          0,
+          0
+        ],
+        "counters": {
+          "time_sec": 1,
+          "read_mb": 309,
+          "write_mb": 234
+        },
+        "write_amplification": "n/a"
+      },
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 2.202351792,
+          "engine_seconds": 2.174668649,
+          "ops_per_sec": 454060.065986043,
+          "mb_per_sec": 50.230949072,
+          "p50_us": 2.125000000,
+          "p99_us": 3.209000000,
+          "p999_us": 3.417000000,
+          "average_us": 2.174668649,
+          "write_amplification": null,
+          "found": 1000000,
+          "settle_seconds": null,
+          "settled_ops_per_sec": null,
+          "returned": null,
+          "settled": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 2.201841000,
+          "engine_seconds": 2.174412287,
+          "ops_per_sec": 454165.400680612,
+          "mb_per_sec": 50.242601851,
+          "p50_us": 2.125000000,
+          "p99_us": 3.209000000,
+          "p999_us": 3.417000000,
+          "average_us": 2.174412287,
+          "write_amplification": null,
+          "found": 1000000,
+          "settle_seconds": null,
+          "settled_ops_per_sec": null,
+          "returned": null,
+          "settled": null
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 2.199699500,
+          "engine_seconds": 2.172209016,
+          "ops_per_sec": 454607.549803962,
+          "mb_per_sec": 50.291515138,
+          "p50_us": 2.125000000,
+          "p99_us": 3.208000000,
+          "p999_us": 3.416000000,
+          "average_us": 2.172209016,
+          "write_amplification": null,
+          "found": 1000000,
+          "settle_seconds": null,
+          "settled_ops_per_sec": null,
+          "returned": null,
+          "settled": null
+        }
+      ]
+    }
+  ]
+}

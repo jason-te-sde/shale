@@ -1,0 +1,277 @@
+{
+  "tool": "shale_bench",
+  "engine": "shale",
+  "config": {
+    "benchmarks": [
+      "fillrandom",
+      "overwrite"
+    ],
+    "num": 1000000,
+    "sync_num": 10000,
+    "value_size": 100,
+    "repeat": 1,
+    "seed": 301,
+    "db": "master-shale-made",
+    "compact_before_reads": false,
+    "cache_size": 8388608,
+    "diagnostic": false,
+    "settle_poll_ms": 10,
+    "settle_cap_ms": 300000,
+    "existing_db": null
+  },
+  "machine": {
+    "uname": "Darwin 27.2.0 arm64",
+    "cpu": "Apple M2",
+    "logical_cores": 8,
+    "clock_nominal_period_ns": 1,
+    "clock_smallest_step_ns": 41
+  },
+  "build": {
+    "compiler_id": "AppleClang",
+    "compiler_version": "21.0.0.21000334",
+    "build_type": "Release",
+    "sanitizer": "",
+    "coverage": false,
+    "flaw": ""
+  },
+  "megabyte_bytes": 1048576,
+  "existing_db_open": null,
+  "results": [
+    {
+      "name": "fillrandom",
+      "kind": "write",
+      "source": "fillrandom",
+      "entries": 632460,
+      "compact_seconds": null,
+      "ops_per_sec": 246921.818595244,
+      "mb_per_sec": 27.316027600,
+      "p50_us": 2.417000000,
+      "p99_us": 5.667000000,
+      "p999_us": 149.291000000,
+      "write_amplification": "5.09",
+      "spread_percent": 0.000000000,
+      "settle_seconds": 0.006863250,
+      "settled_ops_per_sec": 246504.071553969,
+      "settled_write_amplification": "5.09",
+      "compact_settle_seconds": null,
+      "tree": null,
+      "after": null,
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 4.049864875,
+          "engine_seconds": 3.910731886,
+          "ops_per_sec": 246921.818595244,
+          "mb_per_sec": 27.316027600,
+          "p50_us": 2.417000000,
+          "p99_us": 5.667000000,
+          "p999_us": 149.291000000,
+          "average_us": 3.910731886,
+          "write_amplification": "5.09",
+          "found": null,
+          "settle_seconds": 0.006863250,
+          "settled_ops_per_sec": 246504.071553969,
+          "returned": {
+            "background_busy": false,
+            "highest_score": 0.937245369,
+            "files_per_level": [
+              3,
+              5,
+              31,
+              0,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              9789401,
+              9827730,
+              63797583,
+              0,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "flushes": 35,
+              "compactions": 37,
+              "trivial_moves": 10,
+              "tombstones_dropped": 0,
+              "shadowed_dropped": 257588,
+              "user_bytes_written": 116000000,
+              "wal_bytes_written": 138028602,
+              "flush_bytes_written": 114157885,
+              "compaction_bytes_read": 369543249,
+              "compaction_bytes_written": 338800078,
+              "write_groups": 1000000,
+              "wal_syncs": 0,
+              "write_slowdowns": 0,
+              "write_stops": 0,
+              "bg_errors": 0
+            },
+            "write_amplification": "5.09"
+          },
+          "settled": {
+            "background_busy": false,
+            "highest_score": 0.937245369,
+            "files_per_level": [
+              3,
+              5,
+              31,
+              0,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              9789401,
+              9827730,
+              63797583,
+              0,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "flushes": 35,
+              "compactions": 37,
+              "trivial_moves": 10,
+              "tombstones_dropped": 0,
+              "shadowed_dropped": 257588,
+              "user_bytes_written": 116000000,
+              "wal_bytes_written": 138028602,
+              "flush_bytes_written": 114157885,
+              "compaction_bytes_read": 369543249,
+              "compaction_bytes_written": 338800078,
+              "write_groups": 1000000,
+              "wal_syncs": 0,
+              "write_slowdowns": 0,
+              "write_stops": 0,
+              "bg_errors": 0
+            },
+            "write_amplification": "5.09"
+          }
+        }
+      ]
+    },
+    {
+      "name": "overwrite",
+      "kind": "write",
+      "source": "overwrite",
+      "entries": 1000000,
+      "compact_seconds": null,
+      "ops_per_sec": 212738.503271380,
+      "mb_per_sec": 23.534456615,
+      "p50_us": 2.625000000,
+      "p99_us": 6.250000000,
+      "p999_us": 275.916000000,
+      "write_amplification": "7.39",
+      "spread_percent": 0.000000000,
+      "settle_seconds": 0.006885334,
+      "settled_ops_per_sec": 212427.344869289,
+      "settled_write_amplification": "7.39",
+      "compact_settle_seconds": null,
+      "tree": null,
+      "after": null,
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 4.700606541,
+          "engine_seconds": 4.569362271,
+          "ops_per_sec": 212738.503271380,
+          "mb_per_sec": 23.534456615,
+          "p50_us": 2.625000000,
+          "p99_us": 6.250000000,
+          "p999_us": 275.916000000,
+          "average_us": 4.569362271,
+          "write_amplification": "7.39",
+          "found": null,
+          "settle_seconds": 0.006885334,
+          "settled_ops_per_sec": 212427.344869289,
+          "returned": {
+            "background_busy": false,
+            "highest_score": 0.984395809,
+            "files_per_level": [
+              3,
+              5,
+              50,
+              8,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              9789856,
+              9132298,
+              103221382,
+              20022453,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "flushes": 35,
+              "compactions": 50,
+              "trivial_moves": 4,
+              "tombstones_dropped": 0,
+              "shadowed_dropped": 751677,
+              "user_bytes_written": 116000000,
+              "wal_bytes_written": 138028602,
+              "flush_bytes_written": 114158760,
+              "compaction_bytes_read": 693788325,
+              "compaction_bytes_written": 605590520,
+              "write_groups": 1000000,
+              "wal_syncs": 0,
+              "write_slowdowns": 0,
+              "write_stops": 0,
+              "bg_errors": 0
+            },
+            "write_amplification": "7.39"
+          },
+          "settled": {
+            "background_busy": false,
+            "highest_score": 0.984395809,
+            "files_per_level": [
+              3,
+              5,
+              50,
+              8,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              9789856,
+              9132298,
+              103221382,
+              20022453,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "flushes": 35,
+              "compactions": 50,
+              "trivial_moves": 4,
+              "tombstones_dropped": 0,
+              "shadowed_dropped": 751677,
+              "user_bytes_written": 116000000,
+              "wal_bytes_written": 138028602,
+              "flush_bytes_written": 114158760,
+              "compaction_bytes_read": 693788325,
+              "compaction_bytes_written": 605590520,
+              "write_groups": 1000000,
+              "wal_syncs": 0,
+              "write_slowdowns": 0,
+              "write_stops": 0,
+              "bg_errors": 0
+            },
+            "write_amplification": "7.39"
+          }
+        }
+      ]
+    }
+  ]
+}

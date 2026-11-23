@@ -1,0 +1,240 @@
+{
+  "tool": "shale_bench",
+  "engine": "shale",
+  "config": {
+    "benchmarks": [
+      "readseq"
+    ],
+    "num": 1000000,
+    "sync_num": 10000,
+    "value_size": 100,
+    "repeat": 1,
+    "seed": 301,
+    "db": "master-shale",
+    "compact_before_reads": false,
+    "cache_size": 8388608,
+    "diagnostic": false,
+    "settle_poll_ms": 10,
+    "settle_cap_ms": 300000,
+    "existing_db": "overwrite"
+  },
+  "machine": {
+    "uname": "Darwin 27.2.0 arm64",
+    "cpu": "Apple M2",
+    "logical_cores": 8,
+    "clock_nominal_period_ns": 1,
+    "clock_smallest_step_ns": 41
+  },
+  "build": {
+    "compiler_id": "AppleClang",
+    "compiler_version": "21.0.0.21000334",
+    "build_type": "Release",
+    "sanitizer": "",
+    "coverage": false,
+    "flaw": ""
+  },
+  "megabyte_bytes": 1048576,
+  "existing_db_open": {
+    "opened": {
+      "background_busy": true,
+      "highest_score": 1.000000000,
+      "files_per_level": [
+        4,
+        5,
+        50,
+        8,
+        0,
+        0,
+        0
+      ],
+      "bytes_per_level": [
+        12830922,
+        9132298,
+        103221382,
+        20022453,
+        0,
+        0,
+        0
+      ],
+      "counters": {
+        "flushes": 1,
+        "compactions": 0,
+        "trivial_moves": 0,
+        "tombstones_dropped": 0,
+        "shadowed_dropped": 0,
+        "user_bytes_written": 0,
+        "wal_bytes_written": 0,
+        "flush_bytes_written": 3041066,
+        "compaction_bytes_read": 0,
+        "compaction_bytes_written": 0,
+        "write_groups": 0,
+        "wal_syncs": 0,
+        "write_slowdowns": 0,
+        "write_stops": 0,
+        "bg_errors": 0
+      },
+      "write_amplification": "0.00"
+    },
+    "settle_seconds": 0.378262167,
+    "settled": {
+      "background_busy": false,
+      "highest_score": 0.988778534,
+      "files_per_level": [
+        0,
+        4,
+        49,
+        9,
+        0,
+        0,
+        0
+      ],
+      "bytes_per_level": [
+        0,
+        8472980,
+        103680944,
+        21085219,
+        0,
+        0,
+        0
+      ],
+      "counters": {
+        "flushes": 1,
+        "compactions": 8,
+        "trivial_moves": 0,
+        "tombstones_dropped": 0,
+        "shadowed_dropped": 102010,
+        "user_bytes_written": 0,
+        "wal_bytes_written": 0,
+        "flush_bytes_written": 3041066,
+        "compaction_bytes_read": 89067184,
+        "compaction_bytes_written": 77099272,
+        "write_groups": 0,
+        "wal_syncs": 0,
+        "write_slowdowns": 0,
+        "write_stops": 0,
+        "bg_errors": 0
+      },
+      "write_amplification": "0.00"
+    }
+  },
+  "results": [
+    {
+      "name": "readseq",
+      "kind": "read",
+      "source": "overwrite",
+      "entries": 1000000,
+      "compact_seconds": null,
+      "ops_per_sec": 9034086.738525299,
+      "mb_per_sec": 999.406873387,
+      "p50_us": null,
+      "p99_us": null,
+      "p999_us": null,
+      "write_amplification": null,
+      "spread_percent": 0.000000000,
+      "settle_seconds": 0.000006916,
+      "settled_ops_per_sec": null,
+      "settled_write_amplification": null,
+      "compact_settle_seconds": null,
+      "tree": {
+        "background_busy": false,
+        "highest_score": 0.988778534,
+        "files_per_level": [
+          0,
+          4,
+          49,
+          9,
+          0,
+          0,
+          0
+        ],
+        "bytes_per_level": [
+          0,
+          8472980,
+          103680944,
+          21085219,
+          0,
+          0,
+          0
+        ],
+        "counters": {
+          "flushes": 1,
+          "compactions": 8,
+          "trivial_moves": 0,
+          "tombstones_dropped": 0,
+          "shadowed_dropped": 102010,
+          "user_bytes_written": 0,
+          "wal_bytes_written": 0,
+          "flush_bytes_written": 3041066,
+          "compaction_bytes_read": 89067184,
+          "compaction_bytes_written": 77099272,
+          "write_groups": 0,
+          "wal_syncs": 0,
+          "write_slowdowns": 0,
+          "write_stops": 0,
+          "bg_errors": 0
+        },
+        "write_amplification": "0.00"
+      },
+      "after": {
+        "background_busy": false,
+        "highest_score": 0.988778534,
+        "files_per_level": [
+          0,
+          4,
+          49,
+          9,
+          0,
+          0,
+          0
+        ],
+        "bytes_per_level": [
+          0,
+          8472980,
+          103680944,
+          21085219,
+          0,
+          0,
+          0
+        ],
+        "counters": {
+          "flushes": 1,
+          "compactions": 8,
+          "trivial_moves": 0,
+          "tombstones_dropped": 0,
+          "shadowed_dropped": 102010,
+          "user_bytes_written": 0,
+          "wal_bytes_written": 0,
+          "flush_bytes_written": 3041066,
+          "compaction_bytes_read": 89067184,
+          "compaction_bytes_written": 77099272,
+          "write_groups": 0,
+          "wal_syncs": 0,
+          "write_slowdowns": 0,
+          "write_stops": 0,
+          "bg_errors": 0
+        },
+        "write_amplification": "0.00"
+      },
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 0.110691875,
+          "engine_seconds": 0.110691875,
+          "ops_per_sec": 9034086.738525299,
+          "mb_per_sec": 999.406873387,
+          "p50_us": null,
+          "p99_us": null,
+          "p999_us": null,
+          "average_us": null,
+          "write_amplification": null,
+          "found": 1000000,
+          "settle_seconds": null,
+          "settled_ops_per_sec": null,
+          "returned": null,
+          "settled": null
+        }
+      ]
+    }
+  ]
+}

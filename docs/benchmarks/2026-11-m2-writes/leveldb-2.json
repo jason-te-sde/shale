@@ -1,0 +1,756 @@
+{
+  "tool": "shale_bench",
+  "engine": "leveldb",
+  "config": {
+    "benchmarks": [
+      "fillseq",
+      "fillrandom",
+      "overwrite"
+    ],
+    "num": 1000000,
+    "sync_num": 10000,
+    "value_size": 100,
+    "repeat": 3,
+    "seed": 301,
+    "db": "db",
+    "compact_before_reads": false,
+    "cache_size": 8388608,
+    "diagnostic": false,
+    "settle_poll_ms": 10,
+    "settle_cap_ms": 300000,
+    "existing_db": null
+  },
+  "machine": {
+    "uname": "Darwin 27.2.0 arm64",
+    "cpu": "Apple M2",
+    "logical_cores": 8,
+    "clock_nominal_period_ns": 1,
+    "clock_smallest_step_ns": 41
+  },
+  "build": {
+    "compiler_id": "AppleClang",
+    "compiler_version": "21.0.0.21000334",
+    "build_type": "Release",
+    "sanitizer": "",
+    "coverage": false,
+    "flaw": ""
+  },
+  "megabyte_bytes": 1048576,
+  "existing_db_open": null,
+  "results": [
+    {
+      "name": "fillseq",
+      "kind": "write",
+      "source": "fillseq",
+      "entries": 1000000,
+      "compact_seconds": null,
+      "ops_per_sec": 368327.138186892,
+      "mb_per_sec": 40.746639280,
+      "p50_us": 2.125000000,
+      "p99_us": 5.583000000,
+      "p999_us": 14.750000000,
+      "write_amplification": "n/a",
+      "spread_percent": 2.691668004,
+      "settle_seconds": 0.006119875,
+      "settled_ops_per_sec": 367498.753350516,
+      "settled_write_amplification": "n/a",
+      "compact_settle_seconds": null,
+      "tree": null,
+      "after": null,
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 2.670088917,
+          "engine_seconds": 2.605260708,
+          "ops_per_sec": 374519.362869592,
+          "mb_per_sec": 41.431661694,
+          "p50_us": 2.125000000,
+          "p99_us": 5.583000000,
+          "p999_us": 15.166000000,
+          "average_us": 2.605260708,
+          "write_amplification": "n/a",
+          "found": null,
+          "settle_seconds": 0.005623666,
+          "settled_ops_per_sec": 373732.218607278,
+          "returned": {
+            "background_busy": false,
+            "highest_score": 0.971635866,
+            "files_per_level": [
+              0,
+              0,
+              31,
+              4,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              0,
+              0,
+              101883405,
+              13146246,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 0,
+              "read_mb": 0,
+              "write_mb": 110
+            },
+            "write_amplification": "n/a"
+          },
+          "settled": {
+            "background_busy": false,
+            "highest_score": 0.971635866,
+            "files_per_level": [
+              0,
+              0,
+              31,
+              4,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              0,
+              0,
+              101883405,
+              13146246,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 0,
+              "read_mb": 0,
+              "write_mb": 110
+            },
+            "write_amplification": "n/a"
+          }
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 2.714977791,
+          "engine_seconds": 2.651972953,
+          "ops_per_sec": 368327.138186892,
+          "mb_per_sec": 40.746639280,
+          "p50_us": 2.125000000,
+          "p99_us": 5.792000000,
+          "p999_us": 14.750000000,
+          "average_us": 2.651972953,
+          "write_amplification": "n/a",
+          "found": null,
+          "settle_seconds": 0.006119875,
+          "settled_ops_per_sec": 367498.753350516,
+          "returned": {
+            "background_busy": false,
+            "highest_score": 0.971635866,
+            "files_per_level": [
+              0,
+              0,
+              31,
+              4,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              0,
+              0,
+              101883405,
+              13146246,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 0,
+              "read_mb": 0,
+              "write_mb": 110
+            },
+            "write_amplification": "n/a"
+          },
+          "settled": {
+            "background_busy": false,
+            "highest_score": 0.971635866,
+            "files_per_level": [
+              0,
+              0,
+              31,
+              4,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              0,
+              0,
+              101883405,
+              13146246,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 0,
+              "read_mb": 0,
+              "write_mb": 110
+            },
+            "write_amplification": "n/a"
+          }
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 2.742692500,
+          "engine_seconds": 2.681982085,
+          "ops_per_sec": 364605.219141409,
+          "mb_per_sec": 40.334897442,
+          "p50_us": 2.167000000,
+          "p99_us": 5.375000000,
+          "p999_us": 11.917000000,
+          "average_us": 2.681982085,
+          "write_amplification": "n/a",
+          "found": null,
+          "settle_seconds": 0.006339500,
+          "settled_ops_per_sec": 363764.408708229,
+          "returned": {
+            "background_busy": false,
+            "highest_score": 0.971635866,
+            "files_per_level": [
+              0,
+              0,
+              31,
+              4,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              0,
+              0,
+              101883405,
+              13146246,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 0,
+              "read_mb": 0,
+              "write_mb": 110
+            },
+            "write_amplification": "n/a"
+          },
+          "settled": {
+            "background_busy": false,
+            "highest_score": 0.971635866,
+            "files_per_level": [
+              0,
+              0,
+              31,
+              4,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              0,
+              0,
+              101883405,
+              13146246,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 0,
+              "read_mb": 0,
+              "write_mb": 110
+            },
+            "write_amplification": "n/a"
+          }
+        }
+      ]
+    },
+    {
+      "name": "fillrandom",
+      "kind": "write",
+      "source": "fillrandom",
+      "entries": 632460,
+      "compact_seconds": null,
+      "ops_per_sec": 260093.708512006,
+      "mb_per_sec": 28.773184001,
+      "p50_us": 2.500000000,
+      "p99_us": 6.500000000,
+      "p999_us": 25.042000000,
+      "write_amplification": "n/a",
+      "spread_percent": 4.105773366,
+      "settle_seconds": 0.173206459,
+      "settled_ops_per_sec": 248152.951056607,
+      "settled_write_amplification": "n/a",
+      "compact_settle_seconds": null,
+      "tree": null,
+      "after": null,
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 3.818198875,
+          "engine_seconds": 3.697506662,
+          "ops_per_sec": 261903.591912823,
+          "mb_per_sec": 28.973404562,
+          "p50_us": 2.500000000,
+          "p99_us": 6.250000000,
+          "p999_us": 22.791000000,
+          "average_us": 3.697506662,
+          "write_amplification": "n/a",
+          "found": null,
+          "settle_seconds": 0.169824292,
+          "settled_ops_per_sec": 250750.800114397,
+          "returned": {
+            "background_busy": true,
+            "highest_score": 1.932892799,
+            "files_per_level": [
+              1,
+              11,
+              31,
+              0,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              3314558,
+              20267850,
+              62080038,
+              0,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 2,
+              "read_mb": 361,
+              "write_mb": 442
+            },
+            "write_amplification": "n/a"
+          },
+          "settled": {
+            "background_busy": false,
+            "highest_score": 0.907697582,
+            "files_per_level": [
+              1,
+              5,
+              34,
+              0,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              3314558,
+              9517899,
+              67661557,
+              0,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 2,
+              "read_mb": 400,
+              "write_mb": 476
+            },
+            "write_amplification": "n/a"
+          }
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 3.980499791,
+          "engine_seconds": 3.863085061,
+          "ops_per_sec": 251224.733703296,
+          "mb_per_sec": 27.792042837,
+          "p50_us": 2.500000000,
+          "p99_us": 6.500000000,
+          "p999_us": 25.042000000,
+          "average_us": 3.863085061,
+          "write_amplification": "n/a",
+          "found": null,
+          "settle_seconds": 0.173206459,
+          "settled_ops_per_sec": 240748.849295734,
+          "returned": {
+            "background_busy": true,
+            "highest_score": 1.932892799,
+            "files_per_level": [
+              1,
+              11,
+              31,
+              0,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              3314558,
+              20267850,
+              62080038,
+              0,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 3,
+              "read_mb": 361,
+              "write_mb": 442
+            },
+            "write_amplification": "n/a"
+          },
+          "settled": {
+            "background_busy": false,
+            "highest_score": 0.907697582,
+            "files_per_level": [
+              1,
+              5,
+              34,
+              0,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              3314558,
+              9517899,
+              67661557,
+              0,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 3,
+              "read_mb": 400,
+              "write_mb": 476
+            },
+            "write_amplification": "n/a"
+          }
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 3.844768125,
+          "engine_seconds": 3.727943268,
+          "ops_per_sec": 260093.708512006,
+          "mb_per_sec": 28.773184001,
+          "p50_us": 2.500000000,
+          "p99_us": 6.500000000,
+          "p999_us": 28.083000000,
+          "average_us": 3.727943268,
+          "write_amplification": "n/a",
+          "found": null,
+          "settle_seconds": 0.185004625,
+          "settled_ops_per_sec": 248152.951056607,
+          "returned": {
+            "background_busy": true,
+            "highest_score": 1.932892799,
+            "files_per_level": [
+              1,
+              11,
+              31,
+              0,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              3314558,
+              20267850,
+              62080038,
+              0,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 2,
+              "read_mb": 361,
+              "write_mb": 442
+            },
+            "write_amplification": "n/a"
+          },
+          "settled": {
+            "background_busy": false,
+            "highest_score": 0.907697582,
+            "files_per_level": [
+              1,
+              5,
+              34,
+              0,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              3314558,
+              9517899,
+              67661557,
+              0,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 2,
+              "read_mb": 400,
+              "write_mb": 476
+            },
+            "write_amplification": "n/a"
+          }
+        }
+      ]
+    },
+    {
+      "name": "overwrite",
+      "kind": "write",
+      "source": "overwrite",
+      "entries": 1000000,
+      "compact_seconds": null,
+      "ops_per_sec": 260331.957088442,
+      "mb_per_sec": 28.799540541,
+      "p50_us": 2.500000000,
+      "p99_us": 6.792000000,
+      "p999_us": 28.000000000,
+      "write_amplification": "n/a",
+      "spread_percent": 0.718392295,
+      "settle_seconds": 0.122236542,
+      "settled_ops_per_sec": 252278.503253276,
+      "settled_write_amplification": "n/a",
+      "compact_settle_seconds": null,
+      "tree": null,
+      "after": null,
+      "runs": [
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 3.841636666,
+          "engine_seconds": 3.720875391,
+          "ops_per_sec": 260305.720436915,
+          "mb_per_sec": 28.796638079,
+          "p50_us": 2.500000000,
+          "p99_us": 6.750000000,
+          "p999_us": 26.792000000,
+          "average_us": 3.720875391,
+          "write_amplification": "n/a",
+          "found": null,
+          "settle_seconds": 0.122236542,
+          "settled_ops_per_sec": 252278.503253276,
+          "returned": {
+            "background_busy": true,
+            "highest_score": 1.482708549,
+            "files_per_level": [
+              2,
+              8,
+              32,
+              67,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              6629320,
+              15547326,
+              62937712,
+              116452565,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 2,
+              "read_mb": 354,
+              "write_mb": 434
+            },
+            "write_amplification": "n/a"
+          },
+          "settled": {
+            "background_busy": false,
+            "highest_score": 0.799687099,
+            "files_per_level": [
+              2,
+              4,
+              33,
+              67,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              6629320,
+              8385327,
+              66692534,
+              116452565,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 2,
+              "read_mb": 378,
+              "write_mb": 455
+            },
+            "write_amplification": "n/a"
+          }
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 3.814232750,
+          "engine_seconds": 3.693185446,
+          "ops_per_sec": 262175.925158212,
+          "mb_per_sec": 29.003531760,
+          "p50_us": 2.500000000,
+          "p99_us": 6.792000000,
+          "p999_us": 34.000000000,
+          "average_us": 3.693185446,
+          "write_amplification": "n/a",
+          "found": null,
+          "settle_seconds": 0.113566459,
+          "settled_ops_per_sec": 254595.499105107,
+          "returned": {
+            "background_busy": true,
+            "highest_score": 1.482708549,
+            "files_per_level": [
+              2,
+              8,
+              32,
+              67,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              6629320,
+              15547326,
+              62937712,
+              116452565,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 2,
+              "read_mb": 354,
+              "write_mb": 434
+            },
+            "write_amplification": "n/a"
+          },
+          "settled": {
+            "background_busy": false,
+            "highest_score": 0.799687099,
+            "files_per_level": [
+              2,
+              4,
+              33,
+              67,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              6629320,
+              8385327,
+              66692534,
+              116452565,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 2,
+              "read_mb": 378,
+              "write_mb": 455
+            },
+            "write_amplification": "n/a"
+          }
+        },
+        {
+          "operations": 1000000,
+          "bytes": 116000000,
+          "seconds": 3.841249500,
+          "engine_seconds": 3.718676797,
+          "ops_per_sec": 260331.957088442,
+          "mb_per_sec": 28.799540541,
+          "p50_us": 2.500000000,
+          "p99_us": 6.917000000,
+          "p999_us": 28.000000000,
+          "average_us": 3.718676797,
+          "write_amplification": "n/a",
+          "found": null,
+          "settle_seconds": 0.123800167,
+          "settled_ops_per_sec": 252203.650391247,
+          "returned": {
+            "background_busy": true,
+            "highest_score": 1.482708549,
+            "files_per_level": [
+              2,
+              8,
+              32,
+              67,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              6629320,
+              15547326,
+              62937712,
+              116452565,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 2,
+              "read_mb": 354,
+              "write_mb": 434
+            },
+            "write_amplification": "n/a"
+          },
+          "settled": {
+            "background_busy": false,
+            "highest_score": 0.799687099,
+            "files_per_level": [
+              2,
+              4,
+              33,
+              67,
+              0,
+              0,
+              0
+            ],
+            "bytes_per_level": [
+              6629320,
+              8385327,
+              66692534,
+              116452565,
+              0,
+              0,
+              0
+            ],
+            "counters": {
+              "time_sec": 2,
+              "read_mb": 378,
+              "write_mb": 455
+            },
+            "write_amplification": "n/a"
+          }
+        }
+      ]
+    }
+  ]
+}
