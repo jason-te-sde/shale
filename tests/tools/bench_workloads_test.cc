@@ -131,7 +131,8 @@ class FakeEngine final : public BenchEngine {
   std::string WriteAmplification() override { return "1.50"; }
 
   // Busy for the first `busy_looks` calls, and with a level due for the first `due_looks`. Its
-  // tables are one level 0 file a key, and it counts the calls.
+  // tables are one level 0 file a key, it counts the calls, and its write amplification moves with
+  // them, "1.51" at the first, so that a figure read apart from a state can be told from it.
   Status GetState(EngineState* state) override {
     looks++;
     puts_before_looks.push_back(puts.size());
@@ -143,7 +144,7 @@ class FakeEngine final : public BenchEngine {
     state->files_per_level = {data_.size(), 0, 0};
     state->bytes_per_level = {data_.size() * 40, 0, 0};
     state->counters = {{"looks", looks}};
-    state->write_amplification = WriteAmplification();
+    state->write_amplification = "1.5" + std::to_string(looks);
     return Status::OK();
   }
 
@@ -370,7 +371,8 @@ TEST(BenchWorkloadsTest, AWriteRunAccountsForItsOperationsBytesAndLatencies) {
   EXPECT_EQ(result.bytes, 60u * (16 + 24));
   EXPECT_TRUE(result.latency.has_value());
   EXPECT_FALSE(result.found.has_value());
-  EXPECT_EQ(result.write_amplification, "1.50") << "the engine's figure, as the engine gave it";
+  EXPECT_EQ(result.write_amplification, "1.51")
+      << "the engine's figure, as the state when the last write returned gave it";
 }
 
 TEST(BenchWorkloadsTest, AFailedPutEndsTheRunWithItsStatus) {
@@ -762,7 +764,24 @@ TEST(BenchWorkloadsTest, AWriteRunGivesTheStateWhenItsLastWriteReturnedAndOnceSe
   // The rate counting the wait: the same operations over the loop and the wait.
   EXPECT_DOUBLE_EQ(result.SettledOpsPerSecond(), 60 / (result.seconds + *result.settle_seconds));
   EXPECT_LT(result.SettledOpsPerSecond(), result.OpsPerSecond());
-  EXPECT_EQ(result.write_amplification, "1.50") << "the figure when the last write returned";
+  EXPECT_EQ(result.write_amplification, "1.51") << "the figure when the last write returned";
+}
+
+// The run's write amplification and its state when the last write returned are one reading of
+// the engine, so that the two cannot disagree when the background moves between two readings.
+TEST(BenchWorkloadsTest, AWriteRunsWriteAmplificationIsThatOfItsReturnedState) {
+  for (const Benchmark benchmark : {Benchmark::kFillSeq, Benchmark::kOverwrite}) {
+    FakeEngine engine;
+    engine.busy_looks = 2;
+    Populated populated;
+    RunResult result;
+    ASSERT_OK(RunWriteBenchmark(&engine, Options(), benchmark, &populated, &result));
+    ASSERT_TRUE(result.returned.has_value());
+    EXPECT_EQ(result.write_amplification, result.returned->write_amplification)
+        << BenchmarkName(benchmark);
+    EXPECT_NE(result.settled->write_amplification, result.returned->write_amplification)
+        << "the fake's figure moves from one reading to the next";
+  }
 }
 
 TEST(BenchWorkloadsTest, AWriteRunWhoseBackgroundDoesNotFinishFailsAndSaysSo) {

@@ -18,8 +18,15 @@
 
 namespace shale {
 
-/// What an engine's database is at one moment, as the engine's public interface gives it: its
-/// tables, level by level, what it has counted, and whether it has background work to do.
+/// What an engine's database is, as the engine's public interface gives it: its tables, level by
+/// level, what it has counted, and whether it has background work to do.
+///
+/// The figures come from more than one reading of the engine (shale: whether the background is
+/// busy, then "shale.stats", then "shale.write-amplification"; LevelDB: busy, then
+/// "leveldb.sstables", then "leveldb.stats"). A state that is idle is one moment, since nothing
+/// changes once the background is idle and nothing is written. A busy state is not: a flush or a
+/// compaction can land between two of its readings, so its tables, counters and write
+/// amplification can be a few microseconds apart.
 struct EngineState {
   /// Whether a background task, a flush or a compaction, is queued or running.
   bool background_busy = false;

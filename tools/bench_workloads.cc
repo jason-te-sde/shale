@@ -426,12 +426,13 @@ Status RunWriteBenchmark(BenchEngine* engine, const WorkloadOptions& options, Be
 
   Finish(begin, end, operations, bytes, engine_micros, result);
   result->latency = SummarizeLatencies(histogram);
-  result->write_amplification = engine->WriteAmplification();
-  // What the writes left the background, and how long it took to finish it.
+  // What the writes left the background, and how long it took to finish it. The run's write
+  // amplification is the one of that state, read with it, and not a second reading.
   EngineState returned;
   if (const Status s = engine->GetState(&returned); !s.ok()) {
     return s;
   }
+  result->write_amplification = returned.write_amplification;
   SettleResult settled;
   if (const Status s = Settle(engine, options.settle, &settled); !s.ok()) {
     return s;

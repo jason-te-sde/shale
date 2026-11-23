@@ -148,7 +148,8 @@ struct RunResult {
   double engine_seconds = 0;
   /// The latency of each call of the engine, if the benchmark times each: not readseq.
   std::optional<Latency> latency;
-  /// The engine's write amplification as it reported it, after a write benchmark.
+  /// The engine's write amplification as it reported it, after a write benchmark: the figure of
+  /// `returned`, read with it.
   std::optional<std::string> write_amplification;
   /// What the operations came to: the gets that found a key, the seeks that landed on an entry, the
   /// entries a scan visited. Nothing after a write.
