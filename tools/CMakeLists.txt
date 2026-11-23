@@ -79,8 +79,11 @@ set(SHALE_BENCH_HAS_LEVELDB "${SHALE_BENCH_HAS_LEVELDB}" PARENT_SCOPE)
 
 if(SHALE_BENCH_HAS_LEVELDB)
   message(STATUS "shale_bench: the LevelDB engine is built (found leveldb ${leveldb_VERSION})")
-  shale_add_library(shale_bench_leveldb SOURCES bench_leveldb.cc LIBS shale_bench_support leveldb::leveldb)
+  shale_add_library(shale_bench_leveldb SOURCES bench_leveldb.cc leveldb_task_env.cc
+                    LIBS shale_bench_support leveldb::leveldb)
   target_include_directories(shale_bench_leveldb PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+  # LevelDB is built without RTTI, and the Env that derives from its classes must be too.
+  set_source_files_properties(leveldb_task_env.cc PROPERTIES COMPILE_OPTIONS -fno-rtti)
   target_link_libraries(shale_bench PRIVATE shale_bench_leveldb)
   target_compile_definitions(shale_bench PRIVATE SHALE_BENCH_HAVE_LEVELDB=1)
 elseif(SHALE_BUILD_BENCH)

@@ -8,11 +8,16 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <string>
+#include <thread>
+#include <vector>
 
+#include "bench_workloads.h"
 #include "shale/env.h"
 #include "shale/options.h"
 #include "shale/scheduler.h"
@@ -191,12 +196,176 @@ TEST_F(BenchEngineTest, CallsOnAnEngineThatIsNotOpenFailInsteadOfCrashing) {
   const std::unique_ptr<BenchEngine> engine = NewShaleBenchEngine(options_);
   std::string value;
   size_t seen = 0;
+  EngineState state;
   EXPECT_FALSE(engine->Put("k", "v", false).ok());
   EXPECT_FALSE(engine->Get("k", &value).ok());
   EXPECT_FALSE(engine->Scan("", 0, &seen).ok());
   EXPECT_FALSE(engine->CompactAll().ok());
+  EXPECT_FALSE(engine->GetState(&state).ok());
   EXPECT_EQ(engine->WriteAmplification(), "n/a");
   engine->Close();  // closing what is not open is allowed
+}
+
+// ---- What the engine says of its tables and of its background work. ----------------------------
+
+// The value of the counter `name` in `state`, which must have it.
+uint64_t Counter(const EngineState& state, const std::string& name) {
+  for (const auto& [counter, value] : state.counters) {
+    if (counter == name) {
+      return value;
+    }
+  }
+  ADD_FAILURE() << "no counter " << name;
+  return 0;
+}
+
+TEST_F(BenchEngineTest, TheStateHasEveryLevelTheCountersInTheirOrderAndTheWriteAmplification) {
+  const std::unique_ptr<BenchEngine> engine = OpenFresh();
+  EngineState state;
+  ASSERT_OK(engine->GetState(&state));
+  EXPECT_EQ(state.files_per_level, std::vector<uint64_t>(7, 0)) << "seven levels, all empty";
+  EXPECT_EQ(state.bytes_per_level, std::vector<uint64_t>(7, 0));
+  EXPECT_FALSE(state.background_busy);
+  EXPECT_EQ(state.highest_score, 0);
+  std::vector<std::string> names;
+  for (const auto& [name, value] : state.counters) {
+    names.push_back(name);
+  }
+  // The order of the property "shale.counters", which the JSON keeps.
+  EXPECT_EQ(names,
+            (std::vector<std::string>{
+                "flushes", "compactions", "trivial_moves", "tombstones_dropped", "shadowed_dropped",
+                "user_bytes_written", "wal_bytes_written", "flush_bytes_written",
+                "compaction_bytes_read", "compaction_bytes_written", "write_groups", "wal_syncs",
+                "write_slowdowns", "write_stops", "bg_errors"}));
+  EXPECT_EQ(state.write_amplification, "0.00");
+
+  PutKeys(engine.get(), 100);
+  ASSERT_OK(engine->GetState(&state));
+  EXPECT_EQ(Counter(state, "user_bytes_written"), 100u * 16 + 10 * 2 + 90 * 3)
+      << "the key and value bytes of the puts: 16-digit keys, and the values v0 to v99";
+  EXPECT_EQ(state.write_amplification, engine->WriteAmplification());
+}
+
+// The flush that a full memtable queues is background work until it has run: a scheduler that runs
+// a task only when it is told to shows the work queued, and then done.
+TEST_F(BenchEngineTest, QueuedWorkIsBusyAndWorkThatHasRunIsNot) {
+  ManualScheduler scheduler;
+  options_.scheduler = &scheduler;
+  options_.write_buffer_size = 16384;
+  const std::unique_ptr<BenchEngine> engine = OpenFresh();
+
+  EngineState state;
+  for (int i = 0; i < 10000 && !state.background_busy; i++) {
+    ASSERT_OK(engine->Put(Key(i), std::string(100, 'v'), /*sync=*/false));
+    ASSERT_OK(engine->GetState(&state));
+  }
+  ASSERT_TRUE(state.background_busy) << "a full memtable queues its flush";
+  EXPECT_EQ(state.files_per_level[0], 0u) << "which nothing has run yet";
+
+  EXPECT_GT(scheduler.RunPending(), 0u);
+  ASSERT_OK(engine->GetState(&state));
+  EXPECT_FALSE(state.background_busy);
+  EXPECT_EQ(state.files_per_level[0], 1u);
+  EXPECT_GT(state.bytes_per_level[0], 0u);
+  EXPECT_EQ(Counter(state, "flushes"), 1u);
+}
+
+// Level 0 is due for compaction at four files. With the fourth flush done and its compaction
+// queued, the state says so: busy, and a level at a score of 1. Once the compaction has run,
+// neither.
+TEST_F(BenchEngineTest, ALevelThatIsDueScoresOneOrMoreUntilItsCompactionHasRun) {
+  ManualScheduler scheduler;
+  options_.scheduler = &scheduler;
+  options_.write_buffer_size = 16384;
+  const std::unique_ptr<BenchEngine> engine = OpenFresh();
+
+  // Each flush is run as soon as it is queued, and alone: RunOne() leaves queued what the task
+  // queues, which after the fourth is the compaction. The keys are spread over the same range in
+  // every memtable, so that the four tables overlap and the compaction merges them, where tables
+  // of keys in order would each be moved down alone.
+  EngineState state;
+  ASSERT_OK(engine->GetState(&state));
+  for (int i = 0; i < 40000 && state.files_per_level[0] < 4; i++) {
+    ASSERT_OK(engine->Put(Key(i * 7919 % 1000), std::string(100, 'v'), /*sync=*/false));
+    ASSERT_OK(engine->GetState(&state));
+    if (state.background_busy) {
+      ASSERT_TRUE(scheduler.RunOne()) << "the flush";
+      ASSERT_OK(engine->GetState(&state));
+    }
+  }
+  ASSERT_EQ(state.files_per_level[0], 4u) << "four flushes";
+  EXPECT_TRUE(state.background_busy) << "the fourth flush queued a compaction of level 0";
+  EXPECT_EQ(state.highest_score, 1.0) << "four files of a trigger of four";
+
+  EXPECT_GT(scheduler.RunPending(), 0u);
+  ASSERT_OK(engine->GetState(&state));
+  EXPECT_FALSE(state.background_busy);
+  EXPECT_EQ(state.files_per_level[0], 0u);
+  EXPECT_LT(state.highest_score, 1.0);
+  EXPECT_EQ(Counter(state, "compactions"), 1u);
+}
+
+// A database opened without a scheduler of the options' runs its background work on a thread of
+// its own, as shale's default does. Settle() waits for it until it has nothing left to do, and
+// nothing is queued again while nothing is written.
+TEST_F(BenchEngineTest, TheBackgroundOfADatabaseWithAThreadOfItsOwnSettles) {
+  options_.write_buffer_size = 16384;
+  options_.target_file_size = 16384;
+  options_.max_bytes_for_level_base = 65536;
+  const std::unique_ptr<BenchEngine> engine = OpenFresh();
+  for (int i = 0; i < 20000; i++) {
+    ASSERT_OK(engine->Put(Key(i * 7919 % 20000), std::string(100, 'v'), /*sync=*/false));
+  }
+
+  SettleOptions quick;
+  quick.poll = std::chrono::milliseconds(1);
+  SettleResult settled;
+  ASSERT_OK(Settle(engine.get(), quick, &settled));
+  EXPECT_TRUE(settled.state.Idle());
+  EXPECT_LT(settled.state.files_per_level[0], 4u);
+  EXPECT_GT(Counter(settled.state, "flushes"), 10u);
+  EXPECT_GT(Counter(settled.state, "compactions"), 0u);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  EngineState later;
+  ASSERT_OK(engine->GetState(&later));
+  EXPECT_FALSE(later.background_busy);
+  EXPECT_EQ(later.counters, settled.state.counters) << "nothing ran after it was idle";
+  EXPECT_EQ(later.files_per_level, settled.state.files_per_level);
+}
+
+// The score is the rule that shale's picker applies, which the engine does not report: level 0 is
+// its files over the trigger, and the smaller of the two triggers that it has, each level below
+// it its bytes over its limit, and the last level, which has nowhere to go, is never due.
+TEST(ShaleHighestScoreTest, IsTheRuleOfThePicker) {
+  Options options;  // a trigger of 4 files, a stop at 12, 10 MiB for level 1, ten times each level
+  std::vector<uint64_t> files(7, 0);
+  std::vector<uint64_t> bytes(7, 0);
+  EXPECT_EQ(ShaleHighestScore(files, bytes, options), 0);
+
+  files[0] = 3;
+  EXPECT_DOUBLE_EQ(ShaleHighestScore(files, bytes, options), 0.75);
+  bytes[1] = uint64_t{15} << 20;
+  EXPECT_DOUBLE_EQ(ShaleHighestScore(files, bytes, options), 1.5) << "15 MiB of level 1's 10";
+  bytes[2] = uint64_t{250} << 20;
+  EXPECT_DOUBLE_EQ(ShaleHighestScore(files, bytes, options), 2.5) << "250 MiB of level 2's 100";
+  bytes[5] = uint64_t{50000} << 20;
+  EXPECT_DOUBLE_EQ(ShaleHighestScore(files, bytes, options), 2.5)
+      << "50000 MiB of level 5's 100000 MiB is half, so level 2 still leads";
+  bytes[6] = uint64_t{1} << 50;
+  EXPECT_DOUBLE_EQ(ShaleHighestScore(files, bytes, options), 2.5) << "the last level is never due";
+
+  bytes[5] = 0;
+  options.max_bytes_for_level_base = uint64_t{20} << 20;
+  options.level_size_multiplier = 5;
+  EXPECT_DOUBLE_EQ(ShaleHighestScore(files, bytes, options), 2.5) << "250 MiB of level 2's 100";
+  bytes[2] = 0;
+  EXPECT_DOUBLE_EQ(ShaleHighestScore(files, bytes, options), 0.75) << "15 MiB of level 1's 20";
+
+  options.l0_stop_trigger = 2;
+  EXPECT_DOUBLE_EQ(ShaleHighestScore(files, bytes, options), 1.5)
+      << "level 0 is due at the smaller trigger: 3 files of 2";
 }
 
 }  // namespace

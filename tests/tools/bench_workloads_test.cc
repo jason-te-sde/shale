@@ -16,6 +16,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "bench_engine.h"
@@ -128,6 +129,24 @@ class FakeEngine final : public BenchEngine {
     return Status::OK();
   }
   std::string WriteAmplification() override { return "1.50"; }
+
+  // Busy for the first `busy_looks` calls, and with a level due for the first `due_looks`. Its
+  // tables are one level 0 file a key, and it counts the calls.
+  Status GetState(EngineState* state) override {
+    looks++;
+    puts_before_looks.push_back(puts.size());
+    if (!state_error.ok()) {
+      return state_error;
+    }
+    state->background_busy = looks <= busy_looks;
+    state->highest_score = looks <= due_looks ? 1.0 : 0.5;
+    state->files_per_level = {data_.size(), 0, 0};
+    state->bytes_per_level = {data_.size() * 40, 0, 0};
+    state->counters = {{"looks", looks}};
+    state->write_amplification = WriteAmplification();
+    return Status::OK();
+  }
+
   void Close() override {}
 
   const std::map<std::string, std::string>& data() const { return data_; }
@@ -145,6 +164,13 @@ class FakeEngine final : public BenchEngine {
   // How long each Put, Get and Scan takes at least, in microseconds, so that a test can tell the
   // time inside the engine from the rest of the loop.
   uint64_t call_delay_micros = 0;
+  // What GetState() says, and how often it was called.
+  uint64_t busy_looks = 0;
+  uint64_t due_looks = 0;
+  uint64_t looks = 0;
+  Status state_error;
+  // How many puts there had been at each GetState().
+  std::vector<size_t> puts_before_looks;
 
  private:
   void Delay() const {
@@ -633,6 +659,73 @@ TEST(BenchWorkloadsTest, AValueThatIsNotTheOneLastPutToItsKeyIsCaught) {
   EXPECT_TRUE(s.IsCorruption()) << s.ToString();
   EXPECT_TRUE(Mentions(s, "readrandom")) << s.ToString();
   EXPECT_TRUE(Mentions(s, "is not the value last put to it")) << s.ToString();
+}
+
+// ---- Waiting for the background. ---------------------------------------------------------------
+
+// Looks every millisecond, for at most `cap_ms`.
+SettleOptions Quick(int64_t cap_ms = 60000) {
+  SettleOptions options;
+  options.poll = std::chrono::milliseconds(1);
+  options.cap = std::chrono::milliseconds(cap_ms);
+  return options;
+}
+
+TEST(BenchWorkloadsTest, SettleReturnsAtTheFirstLookThatFindsTheEngineIdle) {
+  FakeEngine engine;
+  engine.busy_looks = 3;
+  SettleResult result;
+  ASSERT_OK(Settle(&engine, Quick(), &result));
+  EXPECT_EQ(engine.looks, 4u) << "three busy, then the one that is idle, and no more";
+  EXPECT_EQ(result.looks, 4u);
+  EXPECT_TRUE(result.state.Idle());
+  EXPECT_EQ(result.state.counters, (std::vector<std::pair<std::string, uint64_t>>{{"looks", 4}}))
+      << "the state it returns is the one it saw idle";
+  EXPECT_GE(result.seconds, 0.003) << "a millisecond between two looks";
+}
+
+TEST(BenchWorkloadsTest, SettleDoesNotWaitForAnEngineThatIsIdleAlready) {
+  FakeEngine engine;
+  SettleResult result;
+  ASSERT_OK(Settle(&engine, Quick(), &result));
+  EXPECT_EQ(engine.looks, 1u);
+  EXPECT_EQ(result.looks, 1u);
+  EXPECT_LT(result.seconds, 1.0);
+}
+
+// Nothing running is not enough: a level that is due is work that the engine has still to start.
+TEST(BenchWorkloadsTest, SettleWaitsForALevelThatIsDueEvenWithNothingRunning) {
+  FakeEngine engine;
+  engine.due_looks = 2;
+  SettleResult result;
+  ASSERT_OK(Settle(&engine, Quick(), &result));
+  EXPECT_EQ(engine.looks, 3u);
+  EXPECT_LT(result.state.highest_score, 1.0);
+}
+
+TEST(BenchWorkloadsTest, SettleGivesUpAtTheCapAndSaysWhatItSaw) {
+  FakeEngine engine;
+  engine.busy_looks = 1000000;
+  SettleResult result;
+  const Status s = Settle(&engine, Quick(30), &result);
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+  EXPECT_TRUE(s.ToString().find("30 ms") != std::string::npos) << s.ToString();
+  EXPECT_TRUE(s.ToString().find("busy") != std::string::npos) << s.ToString();
+  EXPECT_GE(result.seconds, 0.030);
+  EXPECT_LT(result.seconds, 10.0) << "it stops at the cap, give or take a look";
+  EXPECT_GE(result.looks, 2u);
+  EXPECT_TRUE(result.state.background_busy) << "the last state it saw";
+}
+
+TEST(BenchWorkloadsTest, SettleReturnsTheErrorOfTheEngine) {
+  FakeEngine engine;
+  engine.state_error = Status::IOError("the properties cannot be read");
+  SettleResult result;
+  const Status s = Settle(&engine, Quick(), &result);
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+  EXPECT_TRUE(s.ToString().find("the properties cannot be read") != std::string::npos)
+      << s.ToString();
+  EXPECT_EQ(engine.looks, 1u);
 }
 
 }  // namespace

@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include "bench_engine.h"
 #include "histogram.h"
@@ -334,6 +335,33 @@ Status RunSeekRandom(BenchEngine* engine, const WorkloadOptions& options,
 }
 
 }  // namespace
+
+Status Settle(BenchEngine* engine, const SettleOptions& options, SettleResult* result) {
+  *result = SettleResult();
+  const Clock::time_point begin = Clock::now();
+  while (true) {
+    Status looked = engine->GetState(&result->state);
+    result->looks++;
+    const Clock::time_point now = Clock::now();
+    result->seconds = std::chrono::duration<double>(now - begin).count();
+    if (!looked.ok()) {
+      return looked;
+    }
+    if (result->state.Idle()) {
+      return Status::OK();
+    }
+    if (now - begin >= options.cap) {
+      const EngineState& state = result->state;
+      return Status::IOError("the engine's background work did not finish",
+                             "after " + std::to_string(options.cap.count()) + " ms: background " +
+                                 (state.background_busy ? "busy" : "not busy") +
+                                 ", highest compaction score " +
+                                 std::to_string(state.highest_score) + ", files per level " +
+                                 FilesPerLevelText(state.files_per_level));
+    }
+    std::this_thread::sleep_for(options.poll);
+  }
+}
 
 Status RunWriteBenchmark(BenchEngine* engine, const WorkloadOptions& options, Benchmark benchmark,
                          Populated* populated, RunResult* result) {

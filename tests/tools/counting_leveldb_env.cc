@@ -6,7 +6,10 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace shale {
 namespace {
@@ -53,6 +56,31 @@ leveldb::Status CountingLevelDBEnv::Wrap(const leveldb::Status& made, const std:
     *file = new CountingFile(*file, &log_syncs_, is_log);
   }
   return made;
+}
+
+HoldingLevelDBEnv::HoldingLevelDBEnv() : leveldb::EnvWrapper(leveldb::Env::Default()) {}
+
+void HoldingLevelDBEnv::Schedule(void (*function)(void* arg), void* arg) {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  held_.emplace_back(function, arg);
+}
+
+int HoldingLevelDBEnv::RunHeld() {
+  int ran = 0;
+  while (true) {
+    std::vector<std::pair<void (*)(void*), void*>> tasks;
+    {
+      const std::lock_guard<std::mutex> lock(mutex_);
+      tasks.swap(held_);
+    }
+    if (tasks.empty()) {
+      return ran;
+    }
+    for (const auto& [function, arg] : tasks) {
+      function(arg);
+      ran++;
+    }
+  }
 }
 
 }  // namespace shale

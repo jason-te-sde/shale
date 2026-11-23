@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -147,6 +148,34 @@ struct RunResult {
   /// Returns the megabytes (of kBenchMegabyte bytes) over the time.
   double MbPerSecond() const { return static_cast<double>(bytes) / kBenchMegabyte / seconds; }
 };
+
+/// How long Settle() waits for an engine's background work, and how often it looks.
+struct SettleOptions {
+  /// The time between two looks.
+  std::chrono::milliseconds poll{10};
+  /// The longest it waits, from its first look.
+  std::chrono::milliseconds cap{300000};
+};
+
+/// What Settle() saw.
+struct SettleResult {
+  /// The time from its first look to its last.
+  double seconds = 0;
+  /// How many times it looked.
+  uint64_t looks = 0;
+  /// The state of its last look: idle, unless it gave up.
+  EngineState state;
+};
+
+/// Waits until `engine` is idle, as EngineState::Idle() says: no background task queued or
+/// running, and no level due for compaction. It looks at once, and then every `options.poll`, and
+/// returns at the first look that finds the engine idle. `result` is filled in whatever it returns.
+/// @param engine the engine, with a database open.
+/// @param options how often to look, and for how long.
+/// @param result receives the time it waited, the looks, and the last state it saw.
+/// @return OK once the engine is idle; an IOError that says what it saw last, if the engine was
+///   not idle `options.cap` after the first look; and the engine's own error if a look fails.
+Status Settle(BenchEngine* engine, const SettleOptions& options, SettleResult* result);
 
 /// Runs one run of the write benchmark `benchmark`: opens a database at `options.db` that is empty,
 /// puts the keys, and records what it left in `*populated` and the run in `*result`. overwrite

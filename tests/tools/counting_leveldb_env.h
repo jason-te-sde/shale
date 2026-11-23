@@ -9,7 +9,10 @@
 #include <leveldb/env.h>
 
 #include <atomic>
+#include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace shale {
 
@@ -31,6 +34,24 @@ class CountingLevelDBEnv final : public leveldb::EnvWrapper {
                        leveldb::WritableFile** file);
 
   std::atomic<int> log_syncs_{0};
+};
+
+// The default Env, whose Schedule() holds the background work that LevelDB hands it, instead of
+// running it, until the test runs it with RunHeld() on its own thread. A database must not be
+// closed with work held: closing waits for it.
+class HoldingLevelDBEnv final : public leveldb::EnvWrapper {
+ public:
+  HoldingLevelDBEnv();
+
+  void Schedule(void (*function)(void* arg), void* arg) override;
+
+  // Runs the work that is held, and the work that it schedules in turn, until none is held, and
+  // returns how many tasks ran.
+  int RunHeld();
+
+ private:
+  std::mutex mutex_;
+  std::vector<std::pair<void (*)(void*), void*>> held_;
 };
 
 }  // namespace shale
