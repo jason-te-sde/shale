@@ -225,5 +225,115 @@ TEST(BenchReportTest, ASummaryOfRunsWithNoLatenciesHasNone) {
   EXPECT_DOUBLE_EQ(summary.spread_percent, 0) << "one run";
 }
 
+// ---- The background, and the tree a read ran on. ------------------------------------------------
+
+// A state in which every figure is its own.
+EngineState MakeState(bool busy, double score, uint64_t first_files, const char* wa) {
+  EngineState state;
+  state.background_busy = busy;
+  state.highest_score = score;
+  state.files_per_level = {first_files, 5, 50, 8, 0, 0, 0};
+  state.bytes_per_level = {first_files * 1000, 5001, 50002, 8003, 0, 0, 0};
+  state.counters = {{"flushes", 35}, {"compactions", first_files + 40}};
+  state.write_amplification = wa;
+  return state;
+}
+
+// A write summary whose runs waited 0.5 s, 0.25 s and 1.5 s for their background.
+Summary SettledSummary() {
+  Summary summary;
+  summary.benchmark = Benchmark::kOverwrite;
+  summary.source = Benchmark::kOverwrite;
+  summary.entries = 777;
+  const double waits[] = {0.5, 0.25, 1.5};
+  const char* settled_wa[] = {"7.10", "7.02", "7.39"};
+  for (int i = 0; i < 3; i++) {
+    RunResult run = MakeRun(1000, 1, 0.5, 1, 2, 3, 1.5, "6.13");
+    run.settle_seconds = waits[i];
+    run.returned = MakeState(true, 1.25, 5, "6.13");
+    run.settled = MakeState(false, 0.75, static_cast<uint64_t>(i), settled_wa[i]);
+    summary.runs.push_back(run);
+  }
+  TakeMedians(&summary);
+  return summary;
+}
+
+TEST(BenchReportTest, AWriteSummaryTakesTheMediansOfItsRunsWaitsAndOfTheirSettledFigures) {
+  const Summary summary = SettledSummary();
+  ASSERT_TRUE(summary.settle_seconds.has_value());
+  EXPECT_DOUBLE_EQ(*summary.settle_seconds, 0.5);
+  // 1000 operations over 0.5 s and the wait: 1000, 1333.3 and 500 a second.
+  ASSERT_TRUE(summary.settled_ops_per_sec.has_value());
+  EXPECT_DOUBLE_EQ(*summary.settled_ops_per_sec, 1000);
+  EXPECT_EQ(summary.settled_write_amplification, "7.10");
+  EXPECT_DOUBLE_EQ(summary.ops_per_sec, 2000)
+      << "the rate when the last write returned is as before";
+}
+
+TEST(BenchReportTest, AReadSummaryHasNoSettledFiguresOfItsOwnRuns) {
+  Summary summary = ScanSummary();
+  TakeMedians(&summary);
+  EXPECT_FALSE(summary.settled_ops_per_sec.has_value());
+  EXPECT_FALSE(summary.settled_write_amplification.has_value());
+}
+
+TEST(BenchReportTest, TheNotesOfAWriteGiveTheWaitAndTheRateCountingIt) {
+  const std::string row = FormatRow(SettledSummary(), 3);
+  EXPECT_TRUE(Has(row, "settled in 0.500 s: 1000 ops/s, write-amp 7.10")) << row;
+}
+
+TEST(BenchReportTest, TheNotesOfAReadGiveTheTreeItRanOn) {
+  Summary summary = ScanSummary();
+  summary.tree = MakeState(false, 0.75, 3, "n/a");
+  EXPECT_TRUE(Has(FormatRow(summary, 1), "files per level 3/5/50/8/0/0/0"))
+      << FormatRow(summary, 1);
+}
+
+TEST(BenchReportTest, TheJsonOfAWriteHasItsWaitsAndTheStateAtBothEnds) {
+  const std::string json = ResultsJson({SettledSummary()});
+  EXPECT_TRUE(Has(json, "\"settle_seconds\": 0.500000000")) << "the median";
+  EXPECT_TRUE(Has(json, "\"settled_ops_per_sec\": 1000.000000000"));
+  EXPECT_TRUE(Has(json, "\"settled_write_amplification\": \"7.10\""));
+  EXPECT_TRUE(Has(json, "\"tree\": null")) << "a write has no tree it ran on";
+  // The second run, which waited a quarter of a second.
+  EXPECT_TRUE(Has(json, "\"settle_seconds\": 0.250000000"));
+  EXPECT_TRUE(Has(json, "\"settled_ops_per_sec\": 1333.333333333"));
+  EXPECT_TRUE(Has(json, "\"returned\": {"));
+  EXPECT_TRUE(Has(json, "\"settled\": {"));
+  EXPECT_TRUE(Has(json, "\"background_busy\": true"));
+  EXPECT_TRUE(Has(json, "\"highest_score\": 1.250000000"));
+  EXPECT_TRUE(Has(json, "\"background_busy\": false"));
+  EXPECT_TRUE(Has(json, "\"highest_score\": 0.750000000"));
+  EXPECT_TRUE(Has(json, "\"write_amplification\": \"7.39\"")) << "the third run's, settled";
+  EXPECT_TRUE(Has(json, "\"compactions\": 45")) << "returned: five files in level 0";
+  EXPECT_TRUE(Has(json, "\"compactions\": 42")) << "the third run, settled";
+}
+
+TEST(BenchReportTest, TheJsonOfAStateListsItsLevelsAndCounters) {
+  JsonWriter json;
+  WriteStateJson(&json, MakeState(false, 0.75, 3, "7.39"));
+  const std::string text = json.Finish();
+  EXPECT_TRUE(Has(text, "\"files_per_level\": [\n    3,\n    5,\n    50,\n    8,")) << text;
+  EXPECT_TRUE(Has(text, "\"bytes_per_level\": [\n    3000,\n    5001,\n    50002,\n    8003,"))
+      << text;
+  EXPECT_TRUE(Has(text, "\"counters\": {\n    \"flushes\": 35,\n    \"compactions\": 43\n  }"))
+      << text;
+  EXPECT_TRUE(Has(text, "\"write_amplification\": \"7.39\"")) << text;
+}
+
+TEST(BenchReportTest, TheJsonOfAReadHasTheTreeItRanOnAndTheWaitAfterIt) {
+  Summary summary = ScanSummary();
+  summary.tree = MakeState(false, 0.5, 3, "n/a");
+  summary.settle_seconds = 0.125;
+  summary.compact_settle_seconds = 0.0625;
+  const std::string json = ResultsJson({summary});
+  EXPECT_TRUE(Has(json, "\"tree\": {")) << json;
+  EXPECT_TRUE(Has(json, "\"highest_score\": 0.500000000"));
+  EXPECT_TRUE(Has(json, "\"settle_seconds\": 0.125000000"));
+  EXPECT_TRUE(Has(json, "\"compact_settle_seconds\": 0.062500000"));
+  EXPECT_TRUE(Has(json, "\"settled_ops_per_sec\": null"));
+  EXPECT_TRUE(Has(json, "\"returned\": null")) << "a read run has no state of its own";
+}
+
 }  // namespace
 }  // namespace shale

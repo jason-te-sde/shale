@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "bench_engine.h"
 #include "bench_stats.h"
 #include "bench_workloads.h"
 
@@ -58,6 +59,23 @@ void TakeMedians(Summary* summary) {
     summary->write_amplification = MedianFigure(figures);
   }
 
+  if (runs.front().settle_seconds.has_value()) {
+    summary->settle_seconds =
+        MedianOf(runs, [](const RunResult& r) { return r.settle_seconds.value_or(0); });
+    summary->settled_ops_per_sec =
+        MedianOf(runs, [](const RunResult& r) { return r.SettledOpsPerSecond(); });
+  }
+  if (runs.front().settled.has_value()) {
+    std::vector<std::string> figures;
+    figures.reserve(runs.size());
+    for (const RunResult& run : runs) {
+      if (run.settled.has_value()) {
+        figures.push_back(run.settled->write_amplification);
+      }
+    }
+    summary->settled_write_amplification = MedianFigure(figures);
+  }
+
   double fastest = 0;
   double slowest = 0;
   for (size_t i = 0; i < runs.size(); i++) {
@@ -95,6 +113,14 @@ std::string Notes(const Summary& summary, uint64_t repeat) {
       case Benchmark::kOverwrite:
         break;
     }
+  }
+  if (summary.settle_seconds.has_value() && summary.settled_ops_per_sec.has_value()) {
+    notes += ", settled in " + Fixed(*summary.settle_seconds, 3) +
+             " s: " + Fixed(*summary.settled_ops_per_sec, 0) + " ops/s, write-amp " +
+             summary.settled_write_amplification.value_or("-");
+  }
+  if (summary.tree.has_value()) {
+    notes += ", files per level " + FilesPerLevelText(summary.tree->files_per_level);
   }
   if (repeat > 1) {
     notes += ", spread " + Fixed(summary.spread_percent, 1) + "%";
@@ -142,7 +168,45 @@ void WriteLatencyFields(JsonWriter* json, const std::optional<Latency>& latency)
   field("p999_us", &Latency::p999);
 }
 
+void WriteOptionalStateJson(JsonWriter* json, const std::optional<EngineState>& state) {
+  if (state.has_value()) {
+    WriteStateJson(json, *state);
+  } else {
+    json->Null();
+  }
+}
+
 }  // namespace
+
+void WriteStateJson(JsonWriter* json, const EngineState& state) {
+  json->BeginObject();
+  json->Key("background_busy");
+  json->Bool(state.background_busy);
+  json->Key("highest_score");
+  json->Number(state.highest_score);
+  json->Key("files_per_level");
+  json->BeginArray();
+  for (const uint64_t files : state.files_per_level) {
+    json->Integer(files);
+  }
+  json->EndArray();
+  json->Key("bytes_per_level");
+  json->BeginArray();
+  for (const uint64_t bytes : state.bytes_per_level) {
+    json->Integer(bytes);
+  }
+  json->EndArray();
+  json->Key("counters");
+  json->BeginObject();
+  for (const auto& [name, value] : state.counters) {
+    json->Key(name);
+    json->Integer(value);
+  }
+  json->EndObject();
+  json->Key("write_amplification");
+  json->String(state.write_amplification);
+  json->EndObject();
+}
 
 void WriteResultsJson(JsonWriter* json, const std::vector<Summary>& summaries) {
   json->BeginArray();
@@ -167,6 +231,16 @@ void WriteResultsJson(JsonWriter* json, const std::vector<Summary>& summaries) {
     json->OptionalString(summary.write_amplification);
     json->Key("spread_percent");
     json->Number(summary.spread_percent);
+    json->Key("settle_seconds");
+    json->OptionalNumber(summary.settle_seconds);
+    json->Key("settled_ops_per_sec");
+    json->OptionalNumber(summary.settled_ops_per_sec);
+    json->Key("settled_write_amplification");
+    json->OptionalString(summary.settled_write_amplification);
+    json->Key("compact_settle_seconds");
+    json->OptionalNumber(summary.compact_settle_seconds);
+    json->Key("tree");
+    WriteOptionalStateJson(json, summary.tree);
 
     json->Key("runs");
     json->BeginArray();
@@ -192,6 +266,16 @@ void WriteResultsJson(JsonWriter* json, const std::vector<Summary>& summaries) {
       json->OptionalString(run.write_amplification);
       json->Key("found");
       json->OptionalInteger(run.found);
+      json->Key("settle_seconds");
+      json->OptionalNumber(run.settle_seconds);
+      json->Key("settled_ops_per_sec");
+      json->OptionalNumber(run.settle_seconds.has_value()
+                               ? std::optional<double>(run.SettledOpsPerSecond())
+                               : std::nullopt);
+      json->Key("returned");
+      WriteOptionalStateJson(json, run.returned);
+      json->Key("settled");
+      WriteOptionalStateJson(json, run.settled);
       json->EndObject();
     }
     json->EndArray();

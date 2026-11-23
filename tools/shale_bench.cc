@@ -177,6 +177,16 @@ constexpr char kUsage[] =
     "read benchmark after it; that is not timed, and is in no line. The reads are checked\n"
     "against a record of what was written, and a wrong answer ends the run with status 1.\n"
     "\n"
+    "The background is waited for. After each run of a write benchmark, after a compaction and\n"
+    "before each benchmark, shale_bench waits until the engine has no background task queued or\n"
+    "running and no level due for compaction by the engine's own rule, looking every 10 ms for\n"
+    "at most 300 s; an engine that is still busy then ends the run with status 1. So no\n"
+    "benchmark runs while the work of another is still being done. The ops/s of a write is\n"
+    "taken when its last write returns, as db_bench takes it; its notes give the wait, the\n"
+    "ops/s counting it and the write amplification once settled, and a read's notes give the\n"
+    "files in each level of the tree it read. The JSON gives the engine's tables and counters\n"
+    "when the last write returned and once settled, and the tree of every read.\n"
+    "\n"
     "How the figures are made. ops/s is the operations of a run over the wall-clock time of its\n"
     "loop, which also makes each key and value and checks each answer; the JSON gives\n"
     "engine_seconds, the time inside the engine's calls, next to seconds for every run. A\n"
@@ -208,6 +218,9 @@ constexpr uint64_t kMaxNum = 4294967295;
 constexpr uint64_t kMaxBenchValueSize = uint64_t{1} << 20;
 constexpr uint64_t kMaxRepeat = 1000;
 constexpr uint64_t kMaxCacheSize = uint64_t{64} << 30;
+// How the background is waited for: a look every 10 ms, for at most 300 s.
+constexpr std::chrono::milliseconds kSettlePoll{10};
+constexpr std::chrono::milliseconds kSettleCap{300000};
 // The block cache of the LevelDB adapter, which is fixed (tools/bench_leveldb.cc).
 constexpr uint64_t kLevelDBCacheSize = uint64_t{8} << 20;
 
@@ -237,6 +250,8 @@ struct Config {
     workload.sync_num = 10000;
     workload.value_size = 100;
     workload.seed = 301;
+    workload.settle.poll = kSettlePoll;
+    workload.settle.cap = kSettleCap;
   }
 };
 
@@ -449,6 +464,10 @@ std::string BuildJson(const Config& config, const std::string& engine, const Mac
   json.Integer(EngineCacheSize(config));
   json.Key("diagnostic");
   json.Bool(IsDiagnostic(config));
+  json.Key("settle_poll_ms");
+  json.Integer(static_cast<uint64_t>(config.workload.settle.poll.count()));
+  json.Key("settle_cap_ms");
+  json.Integer(static_cast<uint64_t>(config.workload.settle.cap.count()));
   json.EndObject();
 
   json.Key("machine");
@@ -555,6 +574,11 @@ void PrintHeader(const Config& config, const std::string& engine, const Machine&
         static_cast<unsigned long long>(config.cache_size),
         static_cast<unsigned long long>(Options().block_cache_capacity));
   }
+  std::printf(
+      "# settle: after each write run and before each benchmark, until no background task is "
+      "queued or running and no level is due; a look every %lld ms, for at most %lld ms\n",
+      static_cast<long long>(config.workload.settle.poll.count()),
+      static_cast<long long>(config.workload.settle.cap.count()));
   std::printf("# machine: %s, %u logical cores\n", machine.cpu.c_str(), machine.logical_cores);
   std::printf("# system: %s\n", machine.uname.c_str());
   std::printf(
@@ -606,9 +630,22 @@ Status RunAll(const Config& config, BenchEngine* engine, std::vector<Summary>* s
         }
         summary.compact_seconds = std::chrono::duration<double>(Clock::now() - begin).count();
         compact_pending = false;
-        std::printf("# compacted after %s in %s s, which is in no line\n",
-                    BenchmarkName(source->written_by), Fixed(*summary.compact_seconds, 3).c_str());
+        SettleResult settled;
+        if (const Status s = Settle(engine, config.workload.settle, &settled); !s.ok()) {
+          return s;
+        }
+        summary.compact_settle_seconds = settled.seconds;
+        std::printf("# compacted after %s in %s s, then settled in %s s, which is in no line\n",
+                    BenchmarkName(source->written_by), Fixed(*summary.compact_seconds, 3).c_str(),
+                    Fixed(settled.seconds, 3).c_str());
       }
+      // The engine is settled here: by the write runs, by the compaction, or by the benchmark
+      // before. What it holds now is the tree that the runs read.
+      EngineState tree;
+      if (const Status s = engine->GetState(&tree); !s.ok()) {
+        return s;
+      }
+      summary.tree = std::move(tree);
       for (uint64_t run = 0; run < config.repeat; run++) {
         RunResult result;
         if (const Status s = RunReadBenchmark(engine, config.workload, benchmark, *source, &result);
@@ -617,6 +654,12 @@ Status RunAll(const Config& config, BenchEngine* engine, std::vector<Summary>* s
         }
         summary.runs.push_back(std::move(result));
       }
+      // Whatever the reads made the engine do is done before the next benchmark.
+      SettleResult settled;
+      if (const Status s = Settle(engine, config.workload.settle, &settled); !s.ok()) {
+        return s;
+      }
+      summary.settle_seconds = settled.seconds;
     }
 
     summary.source = source->written_by;

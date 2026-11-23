@@ -194,6 +194,8 @@ WorkloadOptions Options(uint64_t num = 60, uint64_t seed = 301) {
   options.sync_num = 9;
   options.value_size = 24;
   options.seed = seed;
+  options.settle.poll = std::chrono::milliseconds(1);
+  options.settle.cap = std::chrono::milliseconds(60000);
   return options;
 }
 
@@ -726,6 +728,67 @@ TEST(BenchWorkloadsTest, SettleReturnsTheErrorOfTheEngine) {
   EXPECT_TRUE(s.ToString().find("the properties cannot be read") != std::string::npos)
       << s.ToString();
   EXPECT_EQ(engine.looks, 1u);
+}
+
+// ---- A write run waits for the background, and says what it saw at both ends. -----------------
+
+TEST(BenchWorkloadsTest, AWriteRunGivesTheStateWhenItsLastWriteReturnedAndOnceSettled) {
+  FakeEngine engine;
+  engine.busy_looks = 3;
+  Populated populated;
+  RunResult result;
+  ASSERT_OK(RunWriteBenchmark(&engine, Options(), Benchmark::kFillSeq, &populated, &result));
+
+  // The first look is when the last write has returned; the settle looks until the fourth.
+  EXPECT_EQ(engine.puts_before_looks, (std::vector<size_t>{60, 60, 60, 60}));
+  ASSERT_TRUE(result.returned.has_value());
+  EXPECT_TRUE(result.returned->background_busy);
+  EXPECT_EQ(result.returned->counters,
+            (std::vector<std::pair<std::string, uint64_t>>{{"looks", 1}}));
+  ASSERT_TRUE(result.settled.has_value());
+  EXPECT_TRUE(result.settled->Idle());
+  EXPECT_EQ(result.settled->counters,
+            (std::vector<std::pair<std::string, uint64_t>>{{"looks", 4}}));
+  ASSERT_TRUE(result.settle_seconds.has_value());
+  EXPECT_GE(*result.settle_seconds, 0.002) << "two waits of a millisecond, at least";
+  // The rate counting the wait: the same operations over the loop and the wait.
+  EXPECT_DOUBLE_EQ(result.SettledOpsPerSecond(), 60 / (result.seconds + *result.settle_seconds));
+  EXPECT_LT(result.SettledOpsPerSecond(), result.OpsPerSecond());
+  EXPECT_EQ(result.write_amplification, "1.50") << "the figure when the last write returned";
+}
+
+TEST(BenchWorkloadsTest, AWriteRunWhoseBackgroundDoesNotFinishFailsAndSaysSo) {
+  FakeEngine engine;
+  engine.busy_looks = 1000000;
+  WorkloadOptions options = Options();
+  options.settle.cap = std::chrono::milliseconds(20);
+  Populated populated;
+  RunResult result;
+  const Status s = RunWriteBenchmark(&engine, options, Benchmark::kFillSeq, &populated, &result);
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+  EXPECT_TRUE(Mentions(s, "background work did not finish")) << s.ToString();
+}
+
+// overwrite times its puts on a database that owes nothing: the load is compacted, the database
+// opened again, and the background waited for, before the clock starts.
+TEST(BenchWorkloadsTest, OverwriteTimesItsPutsOnlyOnceTheLoadHasSettled) {
+  FakeEngine engine;
+  engine.busy_looks = 2;
+  Populated populated;
+  RunResult result;
+  ASSERT_OK(RunWriteBenchmark(&engine, Options(), Benchmark::kOverwrite, &populated, &result));
+  // Three looks after the load (two busy), then the look when the last write returned and the
+  // settle's one look, which find it idle.
+  EXPECT_EQ(engine.puts_before_looks, (std::vector<size_t>{60, 60, 60, 120, 120}));
+  EXPECT_FALSE(result.returned->background_busy) << "nothing to wait for after the overwrites";
+
+  FakeEngine stuck;
+  stuck.busy_looks = 1000000;
+  WorkloadOptions options = Options();
+  options.settle.cap = std::chrono::milliseconds(20);
+  const Status s = RunWriteBenchmark(&stuck, options, Benchmark::kOverwrite, &populated, &result);
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+  EXPECT_EQ(stuck.puts.size(), 60u) << "no put is timed on a load that has not settled";
 }
 
 }  // namespace

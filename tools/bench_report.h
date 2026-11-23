@@ -16,6 +16,7 @@
 #include <string_view>
 #include <vector>
 
+#include "bench_engine.h"
 #include "bench_workloads.h"
 
 namespace shale {
@@ -30,6 +31,10 @@ struct Summary {
   uint64_t entries = 0;
   /// How long the compaction before this benchmark took, if there was one.
   std::optional<double> compact_seconds;
+  /// How long the engine's background took to finish after that compaction.
+  std::optional<double> compact_settle_seconds;
+  /// For a read: the engine's state when its first run began, the tree that it read.
+  std::optional<EngineState> tree;
   /// Every run, in the order they were made.
   std::vector<RunResult> runs;
 
@@ -43,11 +48,20 @@ struct Summary {
   std::optional<std::string> write_amplification;
   /// How far apart the fastest and the slowest run were, as a share of the median, in percent.
   double spread_percent = 0;
+  /// For a write: the median over the runs of the wait for the background after the last write
+  /// (RunResult::settle_seconds). For a read: the wait for the background after its last run,
+  /// before the next benchmark.
+  std::optional<double> settle_seconds;
+  /// For a write: the median over the runs of operations a second counting that wait.
+  std::optional<double> settled_ops_per_sec;
+  /// For a write: the median of the runs' write amplification once settled, as text.
+  std::optional<std::string> settled_write_amplification;
 };
 
 /// Fills in the figures of `*summary` from its runs, each as the median over the runs of that
-/// figure: the rates, the latencies, the write amplification, and the spread. Needs at least one
-/// run.
+/// figure: the rates, the latencies, the write amplification, the spread, and for runs that waited
+/// for their background, the wait, the rate counting it and the write amplification once settled.
+/// Needs at least one run.
 /// @param summary the summary, whose `runs` are set.
 void TakeMedians(Summary* summary);
 
@@ -194,6 +208,13 @@ class JsonWriter {
   std::vector<bool> has_items_;
   bool after_key_ = false;
 };
+
+/// Writes `state` as an object, as the value of the key that is open in `*json` or as an item of
+/// the array that is: whether the background was busy, the highest compaction score, the files
+/// and the bytes of each level, the counters by name, and the write amplification.
+/// @param json where to write.
+/// @param state the state.
+void WriteStateJson(JsonWriter* json, const EngineState& state);
 
 /// Writes the array of the results of `summaries` as the value of the key that is open in `*json`:
 /// for each benchmark its summary, with the figures of every run.

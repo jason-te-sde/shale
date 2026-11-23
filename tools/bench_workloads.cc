@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 
 #include "bench_engine.h"
 #include "histogram.h"
@@ -386,6 +387,10 @@ Status RunWriteBenchmark(BenchEngine* engine, const WorkloadOptions& options, Be
     if (const Status s = engine->Open(options.db, /*fresh=*/false); !s.ok()) {
       return s;
     }
+    SettleResult load_settled;
+    if (const Status s = Settle(engine, options.settle, &load_settled); !s.ok()) {
+      return s;
+    }
   }
 
   const bool sync = benchmark == Benchmark::kFillSync;
@@ -422,6 +427,18 @@ Status RunWriteBenchmark(BenchEngine* engine, const WorkloadOptions& options, Be
   Finish(begin, end, operations, bytes, engine_micros, result);
   result->latency = SummarizeLatencies(histogram);
   result->write_amplification = engine->WriteAmplification();
+  // What the writes left the background, and how long it took to finish it.
+  EngineState returned;
+  if (const Status s = engine->GetState(&returned); !s.ok()) {
+    return s;
+  }
+  SettleResult settled;
+  if (const Status s = Settle(engine, options.settle, &settled); !s.ok()) {
+    return s;
+  }
+  result->settle_seconds = std::chrono::duration<double>(Clock::now() - end).count();
+  result->returned = std::move(returned);
+  result->settled = std::move(settled.state);
   return Status::OK();
 }
 

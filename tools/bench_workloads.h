@@ -61,6 +61,14 @@ bool BenchmarkWrites(Benchmark benchmark);
 /// Returns the benchmark that has `name`, or nothing if there is none.
 std::optional<Benchmark> FindBenchmark(std::string_view name);
 
+/// How long Settle() waits for an engine's background work, and how often it looks.
+struct SettleOptions {
+  /// The time between two looks.
+  std::chrono::milliseconds poll{10};
+  /// The longest it waits, from its first look.
+  std::chrono::milliseconds cap{300000};
+};
+
 /// What the workloads need to know, apart from the engine.
 struct WorkloadOptions {
   /// The directory of the database, which every write benchmark destroys and makes again.
@@ -73,6 +81,9 @@ struct WorkloadOptions {
   uint64_t value_size = 0;
   /// Seeds every stream of random numbers.
   uint64_t seed = 0;
+  /// How a write run waits for the engine's background once its last write has returned, and
+  /// overwrite once its load has been compacted.
+  SettleOptions settle;
 };
 
 /// What a write benchmark left in the database: which of the keys 0 ... num - 1 are there, and
@@ -142,19 +153,21 @@ struct RunResult {
   /// What the operations came to: the gets that found a key, the seeks that landed on an entry, the
   /// entries a scan visited. Nothing after a write.
   std::optional<uint64_t> found;
+  /// After a write: the time from the return of the last write to the look that found the engine's
+  /// background idle (Settle()).
+  std::optional<double> settle_seconds;
+  /// After a write: the engine's state when the last write returned, and once it had settled.
+  std::optional<EngineState> returned;
+  std::optional<EngineState> settled;
 
   /// Returns the operations over the time.
   double OpsPerSecond() const { return static_cast<double>(operations) / seconds; }
+  /// Returns the operations over the time and the wait for the background, after a write.
+  double SettledOpsPerSecond() const {
+    return static_cast<double>(operations) / (seconds + settle_seconds.value_or(0));
+  }
   /// Returns the megabytes (of kBenchMegabyte bytes) over the time.
   double MbPerSecond() const { return static_cast<double>(bytes) / kBenchMegabyte / seconds; }
-};
-
-/// How long Settle() waits for an engine's background work, and how often it looks.
-struct SettleOptions {
-  /// The time between two looks.
-  std::chrono::milliseconds poll{10};
-  /// The longest it waits, from its first look.
-  std::chrono::milliseconds cap{300000};
 };
 
 /// What Settle() saw.
@@ -179,9 +192,13 @@ Status Settle(BenchEngine* engine, const SettleOptions& options, SettleResult* r
 
 /// Runs one run of the write benchmark `benchmark`: opens a database at `options.db` that is empty,
 /// puts the keys, and records what it left in `*populated` and the run in `*result`. overwrite
-/// first loads every key in order, which is not timed, then compacts the database and opens it
-/// again, so that the engine's write amplification counts the overwrites alone and the overwrites
-/// start from a database with no work owed. Returns the first error of the engine.
+/// first loads every key in order, which is not timed, then compacts the database, opens it again
+/// and waits for its background (Settle()), so that the engine's write amplification counts the
+/// overwrites alone and the overwrites start from a database with no work owed. Once the last
+/// write has returned, the run reads the engine's state, waits for its background with
+/// `options.settle`, and reads it again: the run's time stops when the last write returns, as
+/// db_bench's does, and the wait is given beside it. Returns the first error of the engine, or
+/// Settle()'s error if the background did not finish.
 /// @param engine the engine to run on; its database is left open.
 /// @param options what to run.
 /// @param benchmark one for which BenchmarkWrites() is true.
