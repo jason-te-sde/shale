@@ -9,6 +9,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <utility>
 
 #include "bench_engine.h"
 #include "histogram.h"
@@ -335,6 +337,33 @@ Status RunSeekRandom(BenchEngine* engine, const WorkloadOptions& options,
 
 }  // namespace
 
+Status Settle(BenchEngine* engine, const SettleOptions& options, SettleResult* result) {
+  *result = SettleResult();
+  const Clock::time_point begin = Clock::now();
+  while (true) {
+    Status looked = engine->GetState(&result->state);
+    result->looks++;
+    const Clock::time_point now = Clock::now();
+    result->seconds = std::chrono::duration<double>(now - begin).count();
+    if (!looked.ok()) {
+      return looked;
+    }
+    if (result->state.Idle()) {
+      return Status::OK();
+    }
+    if (now - begin >= options.cap) {
+      const EngineState& state = result->state;
+      return Status::IOError("the engine's background work did not finish",
+                             "after " + std::to_string(options.cap.count()) + " ms: background " +
+                                 (state.background_busy ? "busy" : "not busy") +
+                                 ", highest compaction score " +
+                                 std::to_string(state.highest_score) + ", files per level " +
+                                 FilesPerLevelText(state.files_per_level));
+    }
+    std::this_thread::sleep_for(options.poll);
+  }
+}
+
 Status RunWriteBenchmark(BenchEngine* engine, const WorkloadOptions& options, Benchmark benchmark,
                          Populated* populated, RunResult* result) {
   if (const Status s = engine->Open(options.db, /*fresh=*/true); !s.ok()) {
@@ -356,6 +385,10 @@ Status RunWriteBenchmark(BenchEngine* engine, const WorkloadOptions& options, Be
       return s;
     }
     if (const Status s = engine->Open(options.db, /*fresh=*/false); !s.ok()) {
+      return s;
+    }
+    SettleResult load_settled;
+    if (const Status s = Settle(engine, options.settle, &load_settled); !s.ok()) {
       return s;
     }
   }
@@ -393,8 +426,45 @@ Status RunWriteBenchmark(BenchEngine* engine, const WorkloadOptions& options, Be
 
   Finish(begin, end, operations, bytes, engine_micros, result);
   result->latency = SummarizeLatencies(histogram);
-  result->write_amplification = engine->WriteAmplification();
+  // What the writes left the background, and how long it took to finish it. The run's write
+  // amplification is the one of that state, read with it, and not a second reading.
+  EngineState returned;
+  if (const Status s = engine->GetState(&returned); !s.ok()) {
+    return s;
+  }
+  result->write_amplification = returned.write_amplification;
+  SettleResult settled;
+  if (const Status s = Settle(engine, options.settle, &settled); !s.ok()) {
+    return s;
+  }
+  result->settle_seconds = std::chrono::duration<double>(Clock::now() - end).count();
+  result->returned = std::move(returned);
+  result->settled = std::move(settled.state);
   return Status::OK();
+}
+
+Populated RecordOfWrite(const WorkloadOptions& options, Benchmark benchmark) {
+  SHALE_CHECK(BenchmarkWrites(benchmark), "RecordOfWrite of a benchmark that reads");
+  // The puts of RunWriteBenchmark() in their order: the load of overwrite, every key in order, and
+  // then the keys of the benchmark's own stream. The values are not needed: a put's stamp is its
+  // number.
+  Populated populated;
+  populated.written_by = benchmark;
+  populated.stamp.assign(options.num, 0);
+  uint64_t puts = 0;
+  if (benchmark == Benchmark::kOverwrite) {
+    for (uint64_t index = 0; index < options.num; index++) {
+      populated.Mark(index, ++puts);
+    }
+  }
+  const uint64_t operations = benchmark == Benchmark::kFillSync ? options.sync_num : options.num;
+  Random keys(StreamSeed(options, benchmark, Stream::kKeys));
+  for (uint64_t i = 0; i < operations; i++) {
+    const uint64_t index =
+        benchmark == Benchmark::kFillSeq ? i : keys.Uniform(static_cast<uint32_t>(options.num));
+    populated.Mark(index, ++puts);
+  }
+  return populated;
 }
 
 Status RunReadBenchmark(BenchEngine* engine, const WorkloadOptions& options, Benchmark benchmark,

@@ -16,6 +16,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "bench_engine.h"
@@ -128,6 +129,31 @@ class FakeEngine final : public BenchEngine {
     return Status::OK();
   }
   std::string WriteAmplification() override { return "1.50"; }
+
+  // Busy for the first `busy_looks` calls, and with a level due for the first `due_looks`. Its
+  // tables are one level 0 file a key, it counts the calls, and its write amplification moves with
+  // them, "1.51" at the first, so that a figure read apart from a state can be told from it.
+  Status GetState(EngineState* state) override {
+    looks++;
+    puts_before_looks.push_back(puts.size());
+    if (!state_error.ok()) {
+      return state_error;
+    }
+    state->background_busy = looks <= busy_looks;
+    state->highest_score = looks <= due_looks ? 1.0 : 0.5;
+    state->files_per_level = {data_.size(), 0, 0};
+    state->bytes_per_level = {data_.size() * 40, 0, 0};
+    state->counters = {{"looks", looks}};
+    state->write_amplification = "1.5" + std::to_string(looks);
+    return Status::OK();
+  }
+
+  Status OpenExisting(const std::string& path) override {
+    opens.push_back({path, false});
+    existing_opens++;
+    return Status::OK();
+  }
+
   void Close() override {}
 
   const std::map<std::string, std::string>& data() const { return data_; }
@@ -145,6 +171,15 @@ class FakeEngine final : public BenchEngine {
   // How long each Put, Get and Scan takes at least, in microseconds, so that a test can tell the
   // time inside the engine from the rest of the loop.
   uint64_t call_delay_micros = 0;
+  // What GetState() says, and how often it was called.
+  uint64_t busy_looks = 0;
+  uint64_t due_looks = 0;
+  uint64_t looks = 0;
+  Status state_error;
+  // How many puts there had been at each GetState().
+  std::vector<size_t> puts_before_looks;
+  // How many times OpenExisting() was called.
+  int existing_opens = 0;
 
  private:
   void Delay() const {
@@ -168,6 +203,8 @@ WorkloadOptions Options(uint64_t num = 60, uint64_t seed = 301) {
   options.sync_num = 9;
   options.value_size = 24;
   options.seed = seed;
+  options.settle.poll = std::chrono::milliseconds(1);
+  options.settle.cap = std::chrono::milliseconds(60000);
   return options;
 }
 
@@ -334,7 +371,8 @@ TEST(BenchWorkloadsTest, AWriteRunAccountsForItsOperationsBytesAndLatencies) {
   EXPECT_EQ(result.bytes, 60u * (16 + 24));
   EXPECT_TRUE(result.latency.has_value());
   EXPECT_FALSE(result.found.has_value());
-  EXPECT_EQ(result.write_amplification, "1.50") << "the engine's figure, as the engine gave it";
+  EXPECT_EQ(result.write_amplification, "1.51")
+      << "the engine's figure, as the state when the last write returned gave it";
 }
 
 TEST(BenchWorkloadsTest, AFailedPutEndsTheRunWithItsStatus) {
@@ -633,6 +671,193 @@ TEST(BenchWorkloadsTest, AValueThatIsNotTheOneLastPutToItsKeyIsCaught) {
   EXPECT_TRUE(s.IsCorruption()) << s.ToString();
   EXPECT_TRUE(Mentions(s, "readrandom")) << s.ToString();
   EXPECT_TRUE(Mentions(s, "is not the value last put to it")) << s.ToString();
+}
+
+// ---- Waiting for the background. ---------------------------------------------------------------
+
+// Looks every millisecond, for at most `cap_ms`.
+SettleOptions Quick(int64_t cap_ms = 60000) {
+  SettleOptions options;
+  options.poll = std::chrono::milliseconds(1);
+  options.cap = std::chrono::milliseconds(cap_ms);
+  return options;
+}
+
+TEST(BenchWorkloadsTest, SettleReturnsAtTheFirstLookThatFindsTheEngineIdle) {
+  FakeEngine engine;
+  engine.busy_looks = 3;
+  SettleResult result;
+  ASSERT_OK(Settle(&engine, Quick(), &result));
+  EXPECT_EQ(engine.looks, 4u) << "three busy, then the one that is idle, and no more";
+  EXPECT_EQ(result.looks, 4u);
+  EXPECT_TRUE(result.state.Idle());
+  EXPECT_EQ(result.state.counters, (std::vector<std::pair<std::string, uint64_t>>{{"looks", 4}}))
+      << "the state it returns is the one it saw idle";
+  EXPECT_GE(result.seconds, 0.003) << "a millisecond between two looks";
+}
+
+TEST(BenchWorkloadsTest, SettleDoesNotWaitForAnEngineThatIsIdleAlready) {
+  FakeEngine engine;
+  SettleResult result;
+  ASSERT_OK(Settle(&engine, Quick(), &result));
+  EXPECT_EQ(engine.looks, 1u);
+  EXPECT_EQ(result.looks, 1u);
+  EXPECT_LT(result.seconds, 1.0);
+}
+
+// Nothing running is not enough: a level that is due is work that the engine has still to start.
+TEST(BenchWorkloadsTest, SettleWaitsForALevelThatIsDueEvenWithNothingRunning) {
+  FakeEngine engine;
+  engine.due_looks = 2;
+  SettleResult result;
+  ASSERT_OK(Settle(&engine, Quick(), &result));
+  EXPECT_EQ(engine.looks, 3u);
+  EXPECT_LT(result.state.highest_score, 1.0);
+}
+
+TEST(BenchWorkloadsTest, SettleGivesUpAtTheCapAndSaysWhatItSaw) {
+  FakeEngine engine;
+  engine.busy_looks = 1000000;
+  SettleResult result;
+  const Status s = Settle(&engine, Quick(30), &result);
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+  EXPECT_TRUE(s.ToString().find("30 ms") != std::string::npos) << s.ToString();
+  EXPECT_TRUE(s.ToString().find("busy") != std::string::npos) << s.ToString();
+  EXPECT_GE(result.seconds, 0.030);
+  EXPECT_LT(result.seconds, 10.0) << "it stops at the cap, give or take a look";
+  EXPECT_GE(result.looks, 2u);
+  EXPECT_TRUE(result.state.background_busy) << "the last state it saw";
+}
+
+TEST(BenchWorkloadsTest, SettleReturnsTheErrorOfTheEngine) {
+  FakeEngine engine;
+  engine.state_error = Status::IOError("the properties cannot be read");
+  SettleResult result;
+  const Status s = Settle(&engine, Quick(), &result);
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+  EXPECT_TRUE(s.ToString().find("the properties cannot be read") != std::string::npos)
+      << s.ToString();
+  EXPECT_EQ(engine.looks, 1u);
+}
+
+// ---- A write run waits for the background, and says what it saw at both ends. -----------------
+
+TEST(BenchWorkloadsTest, AWriteRunGivesTheStateWhenItsLastWriteReturnedAndOnceSettled) {
+  FakeEngine engine;
+  engine.busy_looks = 3;
+  Populated populated;
+  RunResult result;
+  ASSERT_OK(RunWriteBenchmark(&engine, Options(), Benchmark::kFillSeq, &populated, &result));
+
+  // The first look is when the last write has returned; the settle looks until the fourth.
+  EXPECT_EQ(engine.puts_before_looks, (std::vector<size_t>{60, 60, 60, 60}));
+  ASSERT_TRUE(result.returned.has_value());
+  EXPECT_TRUE(result.returned->background_busy);
+  EXPECT_EQ(result.returned->counters,
+            (std::vector<std::pair<std::string, uint64_t>>{{"looks", 1}}));
+  ASSERT_TRUE(result.settled.has_value());
+  EXPECT_TRUE(result.settled->Idle());
+  EXPECT_EQ(result.settled->counters,
+            (std::vector<std::pair<std::string, uint64_t>>{{"looks", 4}}));
+  ASSERT_TRUE(result.settle_seconds.has_value());
+  EXPECT_GE(*result.settle_seconds, 0.002) << "two waits of a millisecond, at least";
+  // The rate counting the wait: the same operations over the loop and the wait.
+  EXPECT_DOUBLE_EQ(result.SettledOpsPerSecond(), 60 / (result.seconds + *result.settle_seconds));
+  EXPECT_LT(result.SettledOpsPerSecond(), result.OpsPerSecond());
+  EXPECT_EQ(result.write_amplification, "1.51") << "the figure when the last write returned";
+}
+
+// The run's write amplification and its state when the last write returned are one reading of
+// the engine, so that the two cannot disagree when the background moves between two readings.
+TEST(BenchWorkloadsTest, AWriteRunsWriteAmplificationIsThatOfItsReturnedState) {
+  for (const Benchmark benchmark : {Benchmark::kFillSeq, Benchmark::kOverwrite}) {
+    FakeEngine engine;
+    engine.busy_looks = 2;
+    Populated populated;
+    RunResult result;
+    ASSERT_OK(RunWriteBenchmark(&engine, Options(), benchmark, &populated, &result));
+    ASSERT_TRUE(result.returned.has_value());
+    EXPECT_EQ(result.write_amplification, result.returned->write_amplification)
+        << BenchmarkName(benchmark);
+    EXPECT_NE(result.settled->write_amplification, result.returned->write_amplification)
+        << "the fake's figure moves from one reading to the next";
+  }
+}
+
+TEST(BenchWorkloadsTest, AWriteRunWhoseBackgroundDoesNotFinishFailsAndSaysSo) {
+  FakeEngine engine;
+  engine.busy_looks = 1000000;
+  WorkloadOptions options = Options();
+  options.settle.cap = std::chrono::milliseconds(20);
+  Populated populated;
+  RunResult result;
+  const Status s = RunWriteBenchmark(&engine, options, Benchmark::kFillSeq, &populated, &result);
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+  EXPECT_TRUE(Mentions(s, "background work did not finish")) << s.ToString();
+}
+
+// overwrite times its puts on a database that owes nothing: the load is compacted, the database
+// opened again, and the background waited for, before the clock starts.
+TEST(BenchWorkloadsTest, OverwriteTimesItsPutsOnlyOnceTheLoadHasSettled) {
+  FakeEngine engine;
+  engine.busy_looks = 2;
+  Populated populated;
+  RunResult result;
+  ASSERT_OK(RunWriteBenchmark(&engine, Options(), Benchmark::kOverwrite, &populated, &result));
+  // Three looks after the load (two busy), then the look when the last write returned and the
+  // settle's one look, which find it idle.
+  EXPECT_EQ(engine.puts_before_looks, (std::vector<size_t>{60, 60, 60, 120, 120}));
+  EXPECT_FALSE(result.returned->background_busy) << "nothing to wait for after the overwrites";
+
+  FakeEngine stuck;
+  stuck.busy_looks = 1000000;
+  WorkloadOptions options = Options();
+  options.settle.cap = std::chrono::milliseconds(20);
+  const Status s = RunWriteBenchmark(&stuck, options, Benchmark::kOverwrite, &populated, &result);
+  EXPECT_TRUE(s.IsIOError()) << s.ToString();
+  EXPECT_EQ(stuck.puts.size(), 60u) << "no put is timed on a load that has not settled";
+}
+
+// ---- The record of a write, worked out again without writing. ----------------------------------
+
+// The reads of a database that is already there are checked against the record of the write that
+// made it, which is worked out from the flags alone: it has to be the record that the write itself
+// keeps, key for key and stamp for stamp.
+TEST(BenchWorkloadsTest, TheRecordOfAWriteWorkedOutAgainIsTheOneTheWriteKept) {
+  for (const Benchmark benchmark :
+       {Benchmark::kFillSeq, Benchmark::kFillRandom, Benchmark::kFillSync, Benchmark::kOverwrite}) {
+    for (const auto& [num, seed] :
+         {std::pair<uint64_t, uint64_t>{60, 301}, {500, 7}, {1999, 123456789}}) {
+      const WorkloadOptions options = Options(num, seed);
+      Populated written;
+      RunResult result;
+      FakeEngine engine;
+      ASSERT_OK(RunWriteBenchmark(&engine, options, benchmark, &written, &result));
+
+      const Populated again = RecordOfWrite(options, benchmark);
+      EXPECT_EQ(again.written_by, benchmark);
+      EXPECT_EQ(again.stamp, written.stamp)
+          << BenchmarkName(benchmark) << " " << num << " " << seed;
+      EXPECT_EQ(again.entries, written.entries);
+      EXPECT_EQ(again.last_present, written.last_present);
+    }
+  }
+}
+
+TEST(BenchWorkloadsTest, ReadsCheckedAgainstARecordWorkedOutAgainPassOnWhatTheWriteLeft) {
+  Written written(Flaw::kNone, Benchmark::kOverwrite);
+  const Populated again = RecordOfWrite(Options(300), Benchmark::kOverwrite);
+  RunResult result;
+  for (const Benchmark benchmark : {Benchmark::kReadRandom, Benchmark::kReadMissing,
+                                    Benchmark::kReadSeq, Benchmark::kSeekRandom}) {
+    ASSERT_OK(RunReadBenchmark(&written.engine, Options(300), benchmark, again, &result))
+        << BenchmarkName(benchmark);
+  }
+  // A record of another seed is not the database's, and the reads say so.
+  const Populated other = RecordOfWrite(Options(300, 302), Benchmark::kOverwrite);
+  const Status s =
+      RunReadBenchmark(&written.engine, Options(300), Benchmark::kReadRandom, other, &result);
+  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
 }
 
 }  // namespace

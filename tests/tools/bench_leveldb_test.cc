@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "bench_engine.h"
+#include "bench_workloads.h"
 #include "counting_leveldb_env.h"
 #include "shale/status.h"
 #include "testkit/test_util.h"
@@ -122,6 +123,27 @@ TEST_F(BenchLevelDBTest, OpenFreshDiscardsWhatWasThereAndOpenNotFreshKeepsIt) {
   EXPECT_TRUE(gone.IsNotFound()) << "a fresh database must start empty: " << gone.ToString();
 }
 
+TEST_F(BenchLevelDBTest, OpenExistingKeepsWhatIsThere) {
+  std::unique_ptr<BenchEngine> engine = OpenFresh();
+  ASSERT_OK(engine->Put(Key(1), "one", /*sync=*/false));
+  engine->Close();
+
+  ASSERT_OK(engine->OpenExisting(path_));
+  std::string value;
+  ASSERT_OK(engine->Get(Key(1), &value));
+  EXPECT_EQ(value, "one");
+}
+
+// LevelDB makes the directory, its lock and its info log before it finds that there is no
+// database, so the engine looks first.
+TEST_F(BenchLevelDBTest, OpenExistingOfAPathWithNoDatabaseFailsAndMakesNothing) {
+  const std::unique_ptr<BenchEngine> engine = NewLevelDBBenchEngine();
+  EXPECT_FALSE(engine->OpenExisting(path_).ok());
+  EXPECT_FALSE(fs::exists(path_)) << "nothing was made at the path";
+  EngineState state;
+  EXPECT_FALSE(engine->GetState(&state).ok()) << "no database is open";
+}
+
 TEST_F(BenchLevelDBTest, ScanVisitsFromAKeyUpToTheLimit) {
   const std::unique_ptr<BenchEngine> engine = OpenFresh();
   PutKeys(engine.get(), 10);
@@ -211,11 +233,104 @@ TEST_F(BenchLevelDBTest, CallsOnAnEngineThatIsNotOpenFailInsteadOfCrashing) {
   const std::unique_ptr<BenchEngine> engine = NewLevelDBBenchEngine();
   std::string value;
   size_t seen = 0;
+  EngineState state;
   EXPECT_FALSE(engine->Put("k", "v", false).ok());
   EXPECT_FALSE(engine->Get("k", &value).ok());
   EXPECT_FALSE(engine->Scan("", 0, &seen).ok());
   EXPECT_FALSE(engine->CompactAll().ok());
+  EXPECT_FALSE(engine->GetState(&state).ok());
   engine->Close();  // closing what is not open is allowed
+}
+
+// ---- What the engine says of its tables and of its background work. ----------------------------
+
+TEST_F(BenchLevelDBTest, TheStateHasEveryLevelAndTheFiguresOfLevelDBsStatistics) {
+  const std::unique_ptr<BenchEngine> engine = OpenFresh();
+  EngineState state;
+  ASSERT_OK(engine->GetState(&state));
+  EXPECT_EQ(state.files_per_level, std::vector<uint64_t>(7, 0)) << "seven levels, all empty";
+  EXPECT_EQ(state.bytes_per_level, std::vector<uint64_t>(7, 0));
+  EXPECT_FALSE(state.background_busy);
+  EXPECT_EQ(state.highest_score, 0);
+  std::vector<std::string> names;
+  for (const auto& [name, value] : state.counters) {
+    names.push_back(name);
+  }
+  EXPECT_EQ(names, (std::vector<std::string>{"time_sec", "read_mb", "write_mb"}))
+      << "the columns of leveldb.stats, summed over the levels";
+  EXPECT_EQ(state.write_amplification, "n/a");
+}
+
+// The tables that the state counts are the files on disk, level by level as LevelDB keeps them:
+// their number and their bytes add up to what the directory holds.
+TEST_F(BenchLevelDBTest, TheTablesOfTheStateAreTheFilesOnDisk) {
+  const std::unique_ptr<BenchEngine> engine = OpenFresh();
+  for (int i = 0; i < 20000; i++) {
+    ASSERT_OK(engine->Put(Key(i * 7919 % 20000), std::string(400, 'v'), /*sync=*/false));
+  }
+  ASSERT_OK(engine->CompactAll());
+  SettleResult settled;
+  ASSERT_OK(Settle(engine.get(), SettleOptions{}, &settled));
+  const EngineState& state = settled.state;
+
+  uint64_t files = 0;
+  uint64_t bytes = 0;
+  for (size_t level = 0; level < state.files_per_level.size(); level++) {
+    files += state.files_per_level[level];
+    bytes += state.bytes_per_level[level];
+  }
+  uintmax_t disk_bytes = 0;
+  for (const fs::path& table : Tables()) {
+    disk_bytes += fs::file_size(table);
+  }
+  EXPECT_GT(files, 1u);
+  EXPECT_EQ(files, Tables().size());
+  EXPECT_EQ(bytes, disk_bytes);
+  EXPECT_EQ(state.files_per_level[0], 0u) << "a compaction of everything leaves level 0 empty";
+}
+
+// LevelDB runs its flushes and compactions through its Env's Schedule(). An Env that holds them
+// shows them queued, and then, once run, done.
+TEST_F(BenchLevelDBTest, HeldBackgroundWorkIsBusyAndWorkThatHasRunIsNot) {
+  HoldingLevelDBEnv env;
+  const std::unique_ptr<BenchEngine> engine = OpenFresh(&env);
+  // 6 MiB, over the write buffer of 4 MiB, which fills the memtable once and queues its flush.
+  const std::string value(1024, 'x');
+  for (int i = 0; i < 6 * 1024; i++) {
+    ASSERT_OK(engine->Put(Key(i), value, /*sync=*/false));
+  }
+  EngineState state;
+  ASSERT_OK(engine->GetState(&state));
+  EXPECT_TRUE(state.background_busy) << "the flush is queued and held";
+  EXPECT_EQ(state.files_per_level[0], 0u);
+
+  EXPECT_GT(env.RunHeld(), 0);
+  ASSERT_OK(engine->GetState(&state));
+  EXPECT_FALSE(state.background_busy);
+  EXPECT_GE(state.files_per_level[0] + state.files_per_level[1] + state.files_per_level[2], 1u)
+      << "the memtable was written out";
+  EXPECT_GT(state.counters.at(2).second, 0u) << "and LevelDB's statistics count its megabytes";
+  engine->Close();
+}
+
+// The score is LevelDB's own rule, which it does not report: level 0 is its files over 4, each
+// level below it its bytes over 10 MiB times 10 to the power level - 1, and the last level is
+// never due.
+TEST(LevelDBHighestScoreTest, IsTheRuleOfLevelDB) {
+  std::vector<uint64_t> files(7, 0);
+  std::vector<uint64_t> bytes(7, 0);
+  EXPECT_EQ(LevelDBHighestScore(files, bytes), 0);
+  files[0] = 3;
+  EXPECT_DOUBLE_EQ(LevelDBHighestScore(files, bytes), 0.75);
+  files[0] = 8;
+  EXPECT_DOUBLE_EQ(LevelDBHighestScore(files, bytes), 2.0);
+  files[0] = 0;
+  bytes[1] = uint64_t{15} << 20;
+  EXPECT_DOUBLE_EQ(LevelDBHighestScore(files, bytes), 1.5) << "15 MiB of level 1's 10";
+  bytes[3] = uint64_t{3000} << 20;
+  EXPECT_DOUBLE_EQ(LevelDBHighestScore(files, bytes), 3.0) << "3000 MiB of level 3's 1000";
+  bytes[6] = uint64_t{1} << 50;
+  EXPECT_DOUBLE_EQ(LevelDBHighestScore(files, bytes), 3.0) << "the last level is never due";
 }
 
 // ---- The settings the engines are held to, as far as a file shows them.

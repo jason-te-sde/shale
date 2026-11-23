@@ -121,6 +121,8 @@ out_has "all benchmarks: the output says where it ran" "# machine:"
 out_has "all benchmarks: the output says how it was built" "# build:"
 out_has "all benchmarks: the output says what its clock figure is" \
   "# clock: steady_clock, nominal period 1 ns, smallest step seen between two readings "
+out_has "all benchmarks: the output says how it waits for the background" \
+  "# settle: after each write run and before each benchmark"
 
 # The machine is named by the system's name, release and architecture, which is what uname -srm
 # prints, and by nothing that names the owner of the machine: not the host name, and not the
@@ -236,7 +238,51 @@ assert by["readrandom"]["mb_per_sec"] > 0
 assert by["readseq"]["p50_us"] is None and by["readseq"]["p999_us"] is None
 for name in ("readrandom", "readmissing", "seekrandom"):
     assert by[name]["p50_us"] is not None and by[name]["p999_us"] is not None, name
+
+# How the background is waited for, and what every write run saw when its last write returned and
+# once its background had settled.
+assert c["settle_poll_ms"] == 10 and c["settle_cap_ms"] == 300000, c
+
+def state_ok(s, where):
+    assert len(s["files_per_level"]) == 7 and len(s["bytes_per_level"]) == 7, where
+    assert all(isinstance(v, int) and v >= 0 for v in s["files_per_level"] + s["bytes_per_level"]), where
+    assert sum(s["bytes_per_level"]) > 0 or sum(s["files_per_level"]) == 0, where
+    assert isinstance(s["background_busy"], bool) and s["highest_score"] >= 0, where
+    assert list(s["counters"])[:2] == ["flushes", "compactions"], (where, s["counters"])
+    float(s["write_amplification"])
+
+for name in ("fillseq", "fillrandom", "fillsync", "overwrite"):
+    r = by[name]
+    for x in r["runs"]:
+        assert x["settle_seconds"] >= 0, (name, x)
+        slack = 1e-5 + 1e-9 / x["seconds"]
+        assert close(x["settled_ops_per_sec"], x["operations"] / (x["seconds"] + x["settle_seconds"]),
+                     slack), (name, x)
+        state_ok(x["returned"], (name, "returned"))
+        state_ok(x["settled"], (name, "settled"))
+        assert x["settled"]["background_busy"] is False and x["settled"]["highest_score"] < 1, x
+        assert x["returned"]["write_amplification"] == x["write_amplification"], x
+    assert close(r["settled_ops_per_sec"], statistics.median([x["settled_ops_per_sec"] for x in r["runs"]]))
+    assert close(r["settle_seconds"], statistics.median([x["settle_seconds"] for x in r["runs"]]))
+    float(r["settled_write_amplification"])
+    assert r["tree"] is None and r["compact_settle_seconds"] is None, name
+
+# Every read row says what tree it read: the one that the last write run left, once settled.
+left = by["overwrite"]["runs"][-1]["settled"]
+for name in ("readrandom", "readmissing", "readseq", "seekrandom"):
+    r = by[name]
+    state_ok(r["tree"], name)
+    assert r["tree"]["background_busy"] is False and r["tree"]["highest_score"] < 1, name
+    assert r["tree"]["files_per_level"] == left["files_per_level"], (name, r["tree"], left)
+    # The reads of shale leave the tree as they found it: no compaction is started by a read.
+    state_ok(r["after"], name)
+    assert r["after"]["files_per_level"] == r["tree"]["files_per_level"], (name, r["after"])
+    assert r["after"]["background_busy"] is False and r["after"]["highest_score"] < 1, name
+    assert r["settle_seconds"] >= 0 and r["settled_ops_per_sec"] is None, name
+    assert all(x["returned"] is None and x["settled"] is None for x in r["runs"]), name
 '
+out_has "the notes of a write give the wait" "settled in "
+out_has "the notes of a read give the tree it read" "files per level "
 
 # A trailing slash does not make the last component empty.
 check "a database path with a trailing slash" 0 "${small[@]}" --repeat=1 --db="$tmp/db-slash//" \
@@ -279,8 +325,15 @@ for r in d["results"]:
     if r["kind"] == "write":
         assert r["write_amplification"] == "n/a", (r["name"], r["write_amplification"])
         assert all(x["write_amplification"] == "n/a" for x in r["runs"]), r["name"]
+        for x in r["runs"]:
+            for s in (x["returned"], x["settled"]):
+                assert len(s["files_per_level"]) == 7 and s["write_amplification"] == "n/a", s
+                assert list(s["counters"]) == ["time_sec", "read_mb", "write_mb"], s["counters"]
+            assert x["settled"]["background_busy"] is False and x["settled"]["highest_score"] < 1
     else:
         assert r["write_amplification"] is None, r["name"]
+        assert len(r["tree"]["files_per_level"]) == 7 and r["tree"]["highest_score"] < 1, r["tree"]
+        assert len(r["after"]["files_per_level"]) == 7 and r["after"]["highest_score"] < 1, r["after"]
 '
   check "the same workload on shale" 0 "${small[@]}" --repeat=2 --db="$tmp/ldb2" --engine=shale \
     --json="$tmp/shale-for-ldb.json"
@@ -348,11 +401,114 @@ by = {r["name"]: r for r in d["results"]}
 assert by["readrandom"]["compact_seconds"] is not None and by["readrandom"]["compact_seconds"] > 0
 # Compacted once, before the first read benchmark, and not again before the next ones.
 assert all(by[n]["compact_seconds"] is None for n in ("readmissing", "readseq", "seekrandom"))
+# The background is waited for after the compaction too, and the reads say what tree it left.
+assert by["readrandom"]["compact_settle_seconds"] >= 0
+assert all(by[n]["compact_settle_seconds"] is None for n in ("readmissing", "readseq", "seekrandom"))
+assert by["readrandom"]["tree"]["files_per_level"][0] == 0, by["readrandom"]["tree"]
+assert by["seekrandom"]["tree"]["files_per_level"] == by["readrandom"]["tree"]["files_per_level"]
 '
 cases=$((cases + 1))
 if [ "$(digest "$tmp/plain.json")" != "$(digest "$tmp/compacted.json")" ]; then
   fail "compaction changed what the reads found" \
     "$(diff <(digest "$tmp/plain.json") <(digest "$tmp/compacted.json"))"
+fi
+
+# --- Reads on a database that is already there. ---------------------------------------------------
+
+# The database that fillrandom then overwrite leave, read later by another run as it is: the reads
+# find what the reads of one run that wrote it find, and are checked against the same record.
+reads=readrandom,readmissing,readseq,seekrandom
+check "a database to read later" 0 "${small[@]}" --repeat=1 --db="$tmp/ex" \
+  --benchmarks=fillrandom,overwrite
+check "the same writes, and the reads in the same run" 0 "${small[@]}" --repeat=1 --db="$tmp/ex0" \
+  --json="$tmp/ex-inline.json" --benchmarks=fillrandom,overwrite,$reads
+check "the reads of the database that is there" 0 "${small[@]}" --repeat=2 --db="$tmp/ex" \
+  --json="$tmp/ex.json" --existing_db=overwrite --benchmarks=$reads
+out_has "--existing_db: the output says what it opened" "# opened the database ex as it is, written by overwrite"
+row "--existing_db" readrandom
+reads_digest() {
+  python3 -I -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+for r in d["results"]:
+    if r["kind"] == "read":
+        print(r["name"], r["entries"], r["source"], [(x["operations"], x["bytes"], x["found"]) for x in r["runs"][:1]])
+' "$1"
+}
+cases=$((cases + 1))
+if [ "$(reads_digest "$tmp/ex.json")" != "$(reads_digest "$tmp/ex-inline.json")" ]; then
+  fail "the reads of the database that is there did not find what the reads after its writes found" \
+    "$(diff <(reads_digest "$tmp/ex.json") <(reads_digest "$tmp/ex-inline.json"))"
+fi
+json_has "--existing_db: the JSON" "$tmp/ex.json" '
+assert d["config"]["existing_db"] == "overwrite", d["config"]
+assert d["config"]["benchmarks"] == ["readrandom", "readmissing", "readseq", "seekrandom"]
+assert [r["name"] for r in d["results"]] == d["config"]["benchmarks"]
+o = d["existing_db_open"]
+assert o["settle_seconds"] >= 0, o
+assert len(o["opened"]["files_per_level"]) == 7 and len(o["settled"]["files_per_level"]) == 7, o
+assert o["settled"]["background_busy"] is False and o["settled"]["highest_score"] < 1, o
+for r in d["results"]:
+    assert r["source"] == "overwrite" and r["entries"] == 2000, r["name"]
+    assert r["tree"]["files_per_level"] == o["settled"]["files_per_level"], (r["name"], r["tree"])
+'
+json_has "a run that writes says it read no database that was there" "$tmp/ex-inline.json" '
+assert d["config"]["existing_db"] is None and d["existing_db_open"] is None, d["config"]
+'
+check "the reads of the database that is there, compacted first" 0 "${small[@]}" --repeat=1 \
+  --db="$tmp/ex" --json="$tmp/ex-compacted.json" --existing_db=overwrite --benchmarks=$reads \
+  --compact_before_reads
+out_has "--existing_db with --compact_before_reads compacts" "# compacted after overwrite"
+json_has "--existing_db with --compact_before_reads: the JSON" "$tmp/ex-compacted.json" '
+by = {r["name"]: r for r in d["results"]}
+assert by["readrandom"]["compact_seconds"] is not None
+assert by["readrandom"]["tree"]["files_per_level"][0] == 0, by["readrandom"]["tree"]
+'
+
+check "--existing_db where there is no database" 1 "${small[@]}" --repeat=1 --db="$tmp/no-db" \
+  --existing_db=overwrite --benchmarks=readseq
+err_has "--existing_db where there is no database" "opening the database at"
+cases=$((cases + 1))
+if [ -e "$tmp/no-db" ]; then
+  fail "--existing_db made a database where there was none" "$(ls -la "$tmp/no-db")"
+fi
+check "--existing_db of a database written with another seed" 1 --num=2000 --sync_num=20 \
+  --seed=8 --repeat=1 --db="$tmp/ex" --existing_db=overwrite --benchmarks=readrandom
+err_has "--existing_db of a database written with another seed" "readrandom failed"
+check "--existing_db names a benchmark that reads" 2 --db="$tmp/x" --existing_db=readseq \
+  --benchmarks=readseq
+err_has "--existing_db names a benchmark that reads" "--existing_db names the write benchmark"
+check "--existing_db names no benchmark" 2 --db="$tmp/x" --existing_db=nosuch --benchmarks=readseq
+err_has "--existing_db names no benchmark" "unknown benchmark 'nosuch'"
+check "--existing_db with a write in the list" 2 --db="$tmp/x" --existing_db=overwrite \
+  --benchmarks=overwrite,readseq
+err_has "--existing_db with a write in the list" "--existing_db runs only read benchmarks"
+check "--existing_db with the default list, which writes" 2 --db="$tmp/x" --existing_db=overwrite
+err_has "--existing_db with the default list, which writes" "--existing_db runs only read benchmarks"
+check "--existing_db without a value" 2 --db="$tmp/x" --existing_db
+err_has "--existing_db without a value" "--existing_db needs a value"
+check "--help mentions --existing_db" 0 --help
+out_has "--help mentions --existing_db" "--existing_db=WRITE"
+if [ "$leveldb" = leveldb ]; then
+  check "a LevelDB database to read later" 0 "${small[@]}" --repeat=1 --db="$tmp/lex" \
+    --engine=leveldb --benchmarks=fillrandom,overwrite
+  check "LevelDB's reads of the database that is there" 0 "${small[@]}" --repeat=1 --db="$tmp/lex" \
+    --engine=leveldb --json="$tmp/lex.json" --existing_db=overwrite --benchmarks=$reads
+  cases=$((cases + 1))
+  if [ "$(reads_digest "$tmp/lex.json")" != "$(reads_digest "$tmp/ex-inline.json")" ]; then
+    fail "LevelDB's reads of the database that is there did not find what shale's found" \
+      "$(diff <(reads_digest "$tmp/lex.json") <(reads_digest "$tmp/ex-inline.json"))"
+  fi
+  check "LevelDB where there is no database" 1 "${small[@]}" --repeat=1 --db="$tmp/no-ldb" \
+    --engine=leveldb --existing_db=overwrite --benchmarks=readseq
+  cases=$((cases + 1))
+  if [ -e "$tmp/no-ldb" ]; then
+    fail "--existing_db made a LevelDB database where there was none" "$(ls -la "$tmp/no-ldb")"
+  fi
+fi
+cases=$((cases + 1))
+if [ -e "$tmp/x" ]; then
+  fail "a usage error about --existing_db touched the database path" "$(ls -la "$tmp/x")"
 fi
 
 # --- --cache_size makes a diagnostic run, which cannot be taken for a main-table one. --------------
