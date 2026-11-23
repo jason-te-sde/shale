@@ -16,8 +16,8 @@ Paths in this file are written with those names.
 The session differs from the one of 2026-10 in the operating system (macOS 27.2.1, then 26.6.2). This session's
 `shale_bench` is linked against libc++ 2200.27.0 and libSystem 1359 (the SDK of macOS 27); 2026-10 recorded `otool -L`
 of the LevelDB library only, which names libc++ 2000.63.0 and libSystem 1356 in both sessions (section 0 has this
-session's record). It ran on the same machine as the superseded session
-of 2026-11-22, with the same compiler and libraries.
+session's record). It ran on the same machine as the superseded session of 2026-11-22, with the same compiler and
+libraries.
 
 0. The machine and every run
 ------------------------------------------------------------
