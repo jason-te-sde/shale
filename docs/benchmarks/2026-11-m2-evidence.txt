@@ -13,8 +13,10 @@ or, for the first session and the investigation, from their own records (section
 only its counts and shares. `$WORK` is the scratch directory of the session, `$DB` the database directory of a run.
 Paths in this file are written with those names.
 
-The session differs from the one of 2026-10 in the operating system (macOS 27.2.1, then 26.6.2), libc++ (2200.27.0, then
-2000.63.0) and libSystem (1359, then 1356); section 0 has the record. It ran on the same machine as the superseded session
+The session differs from the one of 2026-10 in the operating system (macOS 27.2.1, then 26.6.2). This session's
+`shale_bench` is linked against libc++ 2200.27.0 and libSystem 1359 (the SDK of macOS 27); 2026-10 recorded `otool -L`
+of the LevelDB library only, which names libc++ 2000.63.0 and libSystem 1356 in both sessions (section 0 has this
+session's record). It ran on the same machine as the superseded session
 of 2026-11-22, with the same compiler and libraries.
 
 0. The machine and every run
@@ -3241,7 +3243,7 @@ def moved_text(new, old):
     size = st.median(new) / st.median(old) - 1
     if sep and abs(size) >= 0.03:
         return f"moved ({'faster' if size > 0 else 'slower'} by {abs(size) * 100:.1f}%)"
-    return f"not distinguishable from run-to-run variation ({round(size * 100, 1) + 0:+.1f}%)"
+    return f"not distinguishable from run-to-run variation ({size * 100:+.1f}%)"
 
 
 def level_text(a, b):

@@ -231,7 +231,7 @@ LevelDB and RocksDB: the default that cannot lose a confirmed write.
 <!-- benchmarks:begin (copied from docs/benchmarks.md: replace everything up to the end marker) -->
 shale 0.1.2 next to v0.1.1 and LevelDB on one machine, through the same workloads and the same code (`shale_bench`), all
 built and run in one session on 2026-11-23. The ratio columns are 0.1.2 / v0.1.1 and 0.1.2 / LevelDB: above 1 means 0.1.2
-is faster. Each figure is the median of three runs, with the lowest and the highest in brackets. Every read was checked
+is faster. Each figure is a median, with the lowest and the highest run, or round, in brackets. Every read was checked
 against a record of what was written, and every shale build read the same files.
 
 In short:
@@ -313,12 +313,15 @@ The same, with `--compact_before_reads`: the clone is compacted once before `rea
 
 `fillsync` is a single run of each build, so its ratios are single-run ratios. The write rows of these single runs are not
 the figure to use either: in this session the write rows of every engine came out at one of two levels, and the single
-runs above fell at different levels (v0.1.1's `fillseq` and `fillrandom` at the higher, 0.1.2's at the lower).
+runs above fell at different levels (v0.1.1's `fillseq` and `fillrandom` at the higher, 0.1.2's at the lower). The write
+rounds below mix the two levels too, so their 0.1.2 / v0.1.1 ratios are not changes under the protocol's rule
+([the write rows](docs/benchmarks.md#2026-11-the-write-rows-in-interleaved-rounds)).
 
 The figure to use for a read row or a write row is the one of three rounds that ran the builds one after the other, in
 three orders (the median of the three rounds' medians, with the lowest and highest round in brackets), with the rules for
 what counts as a change and what counts as level, all in
-[docs/benchmarks.md](docs/benchmarks.md#2026-11-the-read-rows-in-interleaved-rounds). The reads, in rounds, first pass:
+[docs/benchmarks.md](docs/benchmarks.md#2026-11-the-read-rows-in-interleaved-rounds) (reads) and
+[docs/benchmarks.md](docs/benchmarks.md#2026-11-the-write-rows-in-interleaved-rounds) (writes). The reads, in rounds, first pass:
 
 | benchmark | v0.1.1 ops/s | 0.1.2 ops/s | LevelDB ops/s | 0.1.2 / v0.1.1 | 0.1.2 / LevelDB |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -356,7 +359,7 @@ E+F+G is 0.1.2; [docs/benchmarks.md](docs/benchmarks.md#2026-11-e-made-compactio
 | --- | ---: | ---: | ---: | ---: |
 | compaction of the whole range, s | 2.593 (2.554 to 2.671) | 1.530 (1.515 to 1.564) | 1.574 (1.539 to 1.587) | 1.509 (1.473 to 1.528) |
 
-What each row is, how the engines were matched, and the latency and write-amplification figures are in
+What each row is, how the engines were matched, and the write-amplification figures are in
 [docs/benchmarks.md](docs/benchmarks.md).
 <!-- benchmarks:end -->
 

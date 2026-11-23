@@ -79,8 +79,9 @@ machine was not idle: the desktop applications that were open ran during the ses
 for the load to fall each time it was above its limit.
 
 **What differs from the machine of 2026-10.** The operating system (macOS 26.6.2, build 25G83, then; `Darwin
-25.6.0`), the system C++ library that `shale_bench` loads (libc++ 2200.27.0, then 2000.63.0) and libSystem (1359, then
-1356). The compiler (Apple clang 21.0.0, clang-2100.3.34.2), cmake (4.4.3), LevelDB (`leveldb 1.23_2`) and snappy
+25.6.0`). This session's `shale_bench` is linked against libc++ 2200.27.0 and libSystem 1359 (the SDK of macOS 27);
+2026-10 recorded `otool -L` of the LevelDB library only, which names libc++ 2000.63.0 and libSystem 1356 in both
+sessions, so the record does not show whether the system libraries changed. The compiler (Apple clang 21.0.0, clang-2100.3.34.2), cmake (4.4.3), LevelDB (`leveldb 1.23_2`) and snappy
 (`snappy 1.3.1`) are the same. The disk was 75% full, then 94%. **The figures of 2026-11 are therefore not comparable
 with those of 2026-10 below.** The comparison that this section reports is the one made inside the 2026-11 session:
 v0.1.1 against the steps and LevelDB, built and run on the same day, in interleaved rounds.
@@ -271,17 +272,23 @@ pass. Each row is given twice: its ops/s when the last write returned, and its o
 | overwrite | not distinguishable from run-to-run variation (+8.8%) | 0.81; the rounds do not interleave (all three of 0.1.2's below LevelDB's) |
 | overwrite, settled | not distinguishable from run-to-run variation (+25.7%) | 0.83; the rounds do not interleave (all three of 0.1.2's below LevelDB's) |
 
-**Two levels.** Every engine's write rows came out at one of two levels, 10% to 25% apart, and the brackets above show
-it. `overwrite`, when the last write returned, round by round (rounds 1, 2 and 3): v0.1.1 193,101, 232,344 and 193,321;
+**Two levels.** Every engine's write rows came out at one of two levels, 12% to 24% apart in the rounds (the highest
+round over the lowest of a row), and the brackets above show it. `overwrite`, when the last write returned, round by round (rounds 1, 2 and 3): v0.1.1 193,101, 232,344 and 193,321;
 0.1.2 210,310, 211,349 and 170,588; LevelDB 261,279, 260,332 and 217,565. The repeats of one run mostly agree (within 3%
 on `overwrite` in 16 of the 20 runs), but the level changed within runs as well as between them: between the benchmarks
 of one run (v0.1.1's run of the commands as given has `fillseq` and `fillrandom` at the higher level and `overwrite` at
-the lower), and between the repeats of one benchmark (E's `fillrandom` in round 1: 223,368, 244,825 and 257,095). The
+the lower), and between the repeats of one benchmark (E's `fillrandom` in round 1: 223,368, 244,825 and 257,095). Across the repeats of the run of the commands as given the
+gap is up to 30% (0.1.2's `overwrite`: 162,654 against 211,349), and LevelDB's `fillrandom` repeats there (163,880,
+178,775 and 210,993) fit neither level. The
 runs at the lower level fell mostly in three stretches of the session, about 04:23 to 04:35, 05:02 to 05:04 and 05:16 to
 05:21, for whichever engine was running then; the read rounds, which ran between the first two, show no such split
 (section "The two levels of 2026-10" above). Why was not examined. The medians follow whichever level two of the three
 rounds fell at, so the medians above compare different levels: v0.1.1's `fillrandom` and `overwrite` had two rounds at
-the lower level, and 0.1.2's one. No rule of the protocol reads the levels apart; every run of each build, with its
+the lower level, and 0.1.2's one. Paired by round, which puts the two engines minutes apart in the same stretch of the
+session, 0.1.2 / LevelDB is 0.949, 0.975 and 0.932 on `fillseq` and 0.967, 0.981 and 0.971 on `fillrandom` when the last
+write returned, and 1.012, 1.026 and 1.015 on `fillrandom` settled: below LevelDB in every round in the first two rows
+and above it in every round in the third. "Level with" in the table above is the verdict of the protocol's rule, which
+the interleaving of the rounds meets because of the two levels. No rule of the protocol reads the levels apart; every run of each build, with its
 repeats and the time it started, is in the evidence file (section 3).
 
 `fillsync` was not put through rounds (one run of each build, above).
@@ -301,7 +308,9 @@ Over the four compacted runs of each build (the run of the commands as given and
 | compaction of the whole range, s | 2.593 (2.554 to 2.671) | 1.530 (1.515 to 1.564) | 1.574 (1.539 to 1.587) | 1.509 (1.473 to 1.528) |
 
 v0.1.1 took 1.69 times as long as E. The readahead of F cut the `pread` calls of that compaction from 47,907 (v0.1.1) to
-1,750 (0.1.2) for the same 200 MB (the probe, below); the time with E+F is not below E's. (LevelDB compacted its own
+1,750 (0.1.2) for about 200 MB of input (the probe, below); the time with E+F is not below E's. All four v0.1.1 runs (2.554 to 2.671 s)
+took longer than all four of E's (1.515 to 1.564 s), by 69% at the medians; the protocol sets no rule for this figure, and
+the statement is that of the four runs of each. (LevelDB compacted its own
 database, of other files, in 1.712 to 1.782 s; that is not a comparison of the same work.)
 
 **After `overwrite`.** In every one of the 12 runs of `overwrite` of each shale build (the three repeats of the run of the
@@ -328,7 +337,7 @@ background work, and none of E's; the settled row counts it. In the rounds, neit
 revision did, outside the protocol and under a load of 1.8 to 3.0: with a scheduler that runs every background task as soon
 as it is queued, so that both builds make the same 87 compactions in the same order and write byte-identical databases,
 each compaction took 1.01 to 1.49 times as long in v0.1.1 as in E, with a median of 1.2. Slowing E's table reads by 4
-microseconds each reproduced v0.1.1's counters byte for byte, and giving v0.1.1's compaction more time reproduced E's (the
+microseconds each reproduced v0.1.1's counters byte for byte in two runs of three, and giving v0.1.1's compaction more time reproduced E's (the
 evidence file, section 6).
 
 ### 2026-11: where each change moved the figures
@@ -352,7 +361,7 @@ Compacted before the reads:
 | readrandom | 407,256 | 381,189 | 378,929 | 423,632 | 0.94, moved (slower by 6.4%) | 0.99, not distinguishable from run-to-run variation (-0.6%) | 1.12, moved (faster by 11.8%) |
 | readmissing | 4,414,066 | 4,392,495 | 4,381,372 | 5,100,292 | 1.00, not distinguishable from run-to-run variation (-0.5%) | 1.00, not distinguishable from run-to-run variation (-0.3%) | 1.16, moved (faster by 16.4%) |
 | readseq | 6,116,191 | 9,413,105 | 10,720,053 | 12,096,543 | 1.54, moved (faster by 53.9%) | 1.14, moved (faster by 13.9%) | 1.13, moved (faster by 12.8%) |
-| seekrandom | 307,174 | 338,314 | 338,254 | 383,746 | 1.10, moved (faster by 10.1%) | 1.00, not distinguishable from run-to-run variation (+0.0%) | 1.13, moved (faster by 13.4%) |
+| seekrandom | 307,174 | 338,314 | 338,254 | 383,746 | 1.10, moved (faster by 10.1%) | 1.00, not distinguishable from run-to-run variation (-0.0%) | 1.13, moved (faster by 13.4%) |
 
 Writes, in rounds, when the last write returned and settled:
 
@@ -436,7 +445,7 @@ with the lowest and highest in brackets.
 
 What a large cache does to shale in this run: it roughly doubles the throughput of `readrandom` and `seekrandom` (the last
 column), and with it all three rounds of 0.1.2 are above all three of LevelDB as configured on every row (on first-pass
-`seekrandom` by 1.9%). No probe was taken with the large cache, so what the calls and the time of these rows are is not
+`seekrandom` by 1.6% at the closest rounds, the medians being 1.9% apart). No probe was taken with the large cache, so what the calls and the time of these rows are is not
 examined. The comparison says what the cache is worth and not that the engines are matched.
 
 ### 2026-11: allocations per operation
@@ -518,7 +527,7 @@ files stay at commit `3270703` (pull request #27, which was not merged), and non
 ### 2026-11: what these numbers do not say
 
 - They are one machine on one day, after an operating system update. They do not carry over to the figures of 2026-10
-  below, which were measured on macOS 26.6.2 with another libc++, nor to those of the superseded first session.
+  below, which were measured on macOS 26.6.2, nor to those of the superseded first session.
 - Three rounds is few. For two builds that do not differ, the three rounds of one lie entirely on one side of the three of
   the other 1 time in 10, which is why a change needs a difference of 3% as well to be called moved.
 - The machine was not idle during the session: the quiet check waited for the load to fall each time it was 2.0 or more,
