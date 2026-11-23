@@ -295,6 +295,7 @@ TEST(BenchReportTest, TheJsonOfAWriteHasItsWaitsAndTheStateAtBothEnds) {
   EXPECT_TRUE(Has(json, "\"settled_ops_per_sec\": 1000.000000000"));
   EXPECT_TRUE(Has(json, "\"settled_write_amplification\": \"7.10\""));
   EXPECT_TRUE(Has(json, "\"tree\": null")) << "a write has no tree it ran on";
+  EXPECT_TRUE(Has(json, "\"after\": null")) << "its runs have their own states";
   // The second run, which waited a quarter of a second.
   EXPECT_TRUE(Has(json, "\"settle_seconds\": 0.250000000"));
   EXPECT_TRUE(Has(json, "\"settled_ops_per_sec\": 1333.333333333"));
@@ -324,10 +325,13 @@ TEST(BenchReportTest, TheJsonOfAStateListsItsLevelsAndCounters) {
 TEST(BenchReportTest, TheJsonOfAReadHasTheTreeItRanOnAndTheWaitAfterIt) {
   Summary summary = ScanSummary();
   summary.tree = MakeState(false, 0.5, 3, "n/a");
+  summary.after = MakeState(false, 0.25, 2, "n/a");
   summary.settle_seconds = 0.125;
   summary.compact_settle_seconds = 0.0625;
   const std::string json = ResultsJson({summary});
   EXPECT_TRUE(Has(json, "\"tree\": {")) << json;
+  EXPECT_TRUE(Has(json, "\"after\": {")) << json;
+  EXPECT_TRUE(Has(json, "\"highest_score\": 0.250000000")) << "the state the reads left";
   EXPECT_TRUE(Has(json, "\"highest_score\": 0.500000000"));
   EXPECT_TRUE(Has(json, "\"settle_seconds\": 0.125000000"));
   EXPECT_TRUE(Has(json, "\"compact_settle_seconds\": 0.062500000"));

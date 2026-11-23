@@ -35,6 +35,9 @@ struct Summary {
   std::optional<double> compact_settle_seconds;
   /// For a read: the engine's state when its first run began, the tree that it read.
   std::optional<EngineState> tree;
+  /// For a read: the engine's state once its background had settled after the last run, the tree
+  /// that the reads left. It differs from `tree` only for an engine whose reads start compactions.
+  std::optional<EngineState> after;
   /// Every run, in the order they were made.
   std::vector<RunResult> runs;
 

@@ -274,6 +274,10 @@ for name in ("readrandom", "readmissing", "readseq", "seekrandom"):
     state_ok(r["tree"], name)
     assert r["tree"]["background_busy"] is False and r["tree"]["highest_score"] < 1, name
     assert r["tree"]["files_per_level"] == left["files_per_level"], (name, r["tree"], left)
+    # The reads of shale leave the tree as they found it: no compaction is started by a read.
+    state_ok(r["after"], name)
+    assert r["after"]["files_per_level"] == r["tree"]["files_per_level"], (name, r["after"])
+    assert r["after"]["background_busy"] is False and r["after"]["highest_score"] < 1, name
     assert r["settle_seconds"] >= 0 and r["settled_ops_per_sec"] is None, name
     assert all(x["returned"] is None and x["settled"] is None for x in r["runs"]), name
 '
@@ -329,6 +333,7 @@ for r in d["results"]:
     else:
         assert r["write_amplification"] is None, r["name"]
         assert len(r["tree"]["files_per_level"]) == 7 and r["tree"]["highest_score"] < 1, r["tree"]
+        assert len(r["after"]["files_per_level"]) == 7 and r["after"]["highest_score"] < 1, r["after"]
 '
   check "the same workload on shale" 0 "${small[@]}" --repeat=2 --db="$tmp/ldb2" --engine=shale \
     --json="$tmp/shale-for-ldb.json"

@@ -241,6 +241,8 @@ void WriteResultsJson(JsonWriter* json, const std::vector<Summary>& summaries) {
     json->OptionalNumber(summary.compact_settle_seconds);
     json->Key("tree");
     WriteOptionalStateJson(json, summary.tree);
+    json->Key("after");
+    WriteOptionalStateJson(json, summary.after);
 
     json->Key("runs");
     json->BeginArray();

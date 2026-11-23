@@ -195,7 +195,8 @@ constexpr char kUsage[] =
     "taken when its last write returns, as db_bench takes it; its notes give the wait, the\n"
     "ops/s counting it and the write amplification once settled, and a read's notes give the\n"
     "files in each level of the tree it read. The JSON gives the engine's tables and counters\n"
-    "when the last write returned and once settled, and the tree of every read.\n"
+    "when the last write returned and once settled, and for every read the tree it read and\n"
+    "the tree it left.\n"
     "\n"
     "How the figures are made. ops/s is the operations of a run over the wall-clock time of its\n"
     "loop, which also makes each key and value and checks each answer; the JSON gives\n"
@@ -731,6 +732,7 @@ Status RunAll(const Config& config, BenchEngine* engine, std::vector<Summary>* s
         return s;
       }
       summary.settle_seconds = settled.seconds;
+      summary.after = std::move(settled.state);
     }
 
     summary.source = source->written_by;
