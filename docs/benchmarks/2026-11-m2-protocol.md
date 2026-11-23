@@ -509,9 +509,10 @@ git diff --quiet c7af18b P -- src include CMakeLists.txt CMakePresets.json
 must succeed, or measurement stops. `build.sh` records each build in `$WORK/builds.txt`: the name, the
 two commits as full SHAs, the SHA-256 of its `tools/` (of the sorted list of its files' SHA-256), the
 LevelDB that CMake found, and the time. Before M, the driver stops unless the check above succeeds
-with the checkout at `P`, every build was made with `P`'s `tools/`, the four SHA-256 of `tools/` are
-the same and are those recorded, and every build found LevelDB. Before this revision was merged, a dry
-run built all four from its branch and ran every block of 9.5 with them.
+with the checkout at `P`, every build was made from the engine commit that the table above gives its
+name, every build was made with `P`'s `tools/`, the four SHA-256 of `tools/` are the same and are those
+recorded, and every build found LevelDB. Before this revision was merged, a dry run built all four from
+its branch and ran every block of 9.5 with them.
 
 ### 9.4 The first-pass databases (rule 2)
 
@@ -530,8 +531,8 @@ same way.
   steps are kept under `docs/benchmarks/2026-11-m2-masters/`.
 - **Copied for every run.** Every read run of A, B and C, in both passes, and every probe of D, reads an
   APFS clone of its engine's database (`cp -c -R`), made by `measure.sh` (9.9) before the quiet check
-  of the run, and read once first in the first pass (9.5). No run sees the files or the compactions of
-  another. The compacted pass is the same command with `--compact_before_reads`, on its own clone.
+  of the run, every file of which it reads once first (9.5). No run sees the files or the compactions
+  of another. The compacted pass is the same command with `--compact_before_reads`, on its own clone.
 - **Checked at the end.** After D, the SHA-256 of every file is taken again and must equal the record.
   If it does not, the session is void and the controller is told.
 
@@ -548,18 +549,22 @@ Every run goes through `measure.sh`. `<reads>` is `readrandom,readmissing,readse
 clone" means that `measure.sh` makes `$DB` an APFS clone of `$WORK/master-shale`, or of
 `$WORK/master-leveldb` for `leveldb`, and "empty" that it makes `$DB` empty.
 
-**A first-pass clone is read once before its run.** Before every first-pass read run (A, B and C) and
-every probe in the first-pass state (D), `measure.sh` reads every file of the clone once
-(`find "$DB" -type f -exec cat {} + > /dev/null`), for every shale build and for LevelDB alike, before
-the quiet check, so that the reading is over before the check and the run start. The reason is the
-operating system's cache. A clone is a new file, and its blocks are not in the cache when it is made,
-where a database that a run had just written had them in the first session and in 2026-10. The review of
-this revision measured it: v0.1.1's `readrandom` (Release, 20,000 keys, `--repeat=3`) on a clone made
-just before the run read 480,548 operations a second in its first repetition, with a p99.9 of 269 us,
-against 1,474,473 and 1,478,433, with a p99.9 of 1.3 us, in the next two. Unread, the first repetition
-of every first-pass row would read its blocks from the disk, and the later two would not. The compacted
-pass is not read first: the compaction writes the files that its reads read, as a write benchmark
-does.
+**Every clone is read once before its run.** Before every run that reads a clone (M's open, every read
+run of A, B and C in both passes, and every probe of D in both states), `measure.sh` reads every file of
+the clone once (`find "$DB" -type f -exec cat {} + > /dev/null`), for every shale build and for LevelDB
+alike, before the quiet check, so that the reading is over before the check and the run start. The
+reason is the operating system's cache. A clone is a new file, and its blocks are not in the cache when
+it is made, where a database that a run had just written had them in the first session and in 2026-10.
+The review of this revision measured it: v0.1.1's `readrandom` (Release, 20,000 keys, `--repeat=3`) on
+a clone made just before the run read 480,548 operations a second in its first repetition, with a
+p99.9 of 269 us, against 1,474,473 and 1,478,433, with a p99.9 of 1.3 us, in the next two. Unread, the
+first repetition of every first-pass row would read its blocks from the disk, and the later two would
+not. The compacted pass is read first too. A compaction of the whole range leaves as it is a table of
+the deepest level that no table above it overlaps, in LevelDB and in shale (`DB::CompactRange()` says
+so): in the review, 3 of the 12 tables that a compacted LevelDB clone read at 200,000 keys (6.4 of about
+29 MB) were the database's own files, which nothing had read, while shale's compaction rewrote every
+table at 300,000 keys. How many such tables there are depends on the tree, so the rule is the same for
+every clone.
 
 **M.** For `shale` with `final` and for `leveldb`:
 
@@ -655,17 +660,22 @@ session's records.
 These replace section 8's for the second session; section 8 keeps the texts that the first session used.
 `table.py` reads the files of both sessions; a figure that a file does not have is `n/a`.
 
-The session's `$WORK/measure.sh` is the text below, with the load limit of 2.0, and the driver refuses to
-start with any other. A dry run, with `DRY_RUN=1`, may raise that limit and differ in nothing else, and
-the driver then writes the limit it used into the dry run's evidence. The dry runs of this revision were
-made so, because another agent's work kept the load above 2.
+Every script that the session runs is the text below, and so is every source of a probe it runs:
+`measure.sh`, `driver.sh`, `build.sh`, `table.py`, `check-table.sh`, `profile.sh`, `build-probe.sh`,
+`probe.cc` and `interpose.c`. The driver compares each of them with this section of the protocol in the
+checkout before M, refuses to start if one differs, and writes their SHA-256 into the evidence.
+`measure.sh` keeps the load limit of 2.0. A dry run, with `DRY_RUN=1`, may raise that limit and differ in
+nothing else, and the driver then writes the limit it used into the dry run's evidence. The dry runs of
+this revision were made so, because another agent's work kept the load above 2. The scripts that read
+the samples after the session (`sample_parse.py` and its categories) are not run by the driver, and the
+evidence gives them as before.
 
 #### `measure.sh`
 
-Usage as in section 8, with two more variables. `DB_FROM=<directory>` makes `$DB` an APFS clone of that
-directory instead of an empty one, and `DB_WARM=1` then reads every file of the clone once. Both are
-done before the quiet check. The record of a run says which, in a line `database:`. A database that
-cannot be made as asked is recorded and stops the run with status 4, before the command runs.
+Usage as in section 8, with one more variable: `DB_FROM=<directory>` makes `$DB` an APFS clone of that
+directory instead of an empty one, and every file of the clone is then read once. Both are done before
+the quiet check. The record of a run says which, in a line `database:`. A database that cannot be made
+as asked is recorded and stops the run with status 4, before the command runs.
 
 ```bash
 #!/usr/bin/env bash
@@ -674,10 +684,10 @@ cannot be made as asked is recorded and stops the run with status 4, before the 
 # appends the record of the run to $EVIDENCE. $BENCH is the command (shale_bench, or a probe), $DB the
 # database directory, $WORK the scratch directory. $DB is made empty, or, if $DB_FROM is set, an APFS
 # clone of the directory $DB_FROM (cp -c -R), so that the run reads the files of that database and
-# none of another run's; with $DB_WARM=1 as well, every file of the clone is then read once, so that
-# its blocks are in the operating system's cache when the run starts, as a database that a run has
-# just written has them. All of that is done before the quiet check, so that the check waits for the
-# machine to be quiet after it. Paths under $WORK and $DB are written to the record as $WORK and $DB.
+# none of another run's; every file of a clone is then read once, so that its blocks are in the
+# operating system's cache when the run starts, as a database that a run has just written has them.
+# All of that is done before the quiet check, so that the check waits for the machine to be quiet
+# after it. Paths under $WORK and $DB are written to the record as $WORK and $DB.
 # Standard output and standard error are kept in $WORK/logs (never in the repository), and a
 # non-empty standard error is named in the record. Exit status: the run's, 3 if the machine was not
 # quiet within two hours of wall time, or 4 if the database could not be made as asked (the run is
@@ -688,21 +698,15 @@ label=$1; shift
 in_work() { local s=$*; echo "${s//"$WORK"/\$WORK}"; }
 rm -rf "$DB"
 if [ -n "${DB_FROM:-}" ]; then
-  made="an APFS clone of $(in_work "$DB_FROM") (cp -c -R)"
+  made="an APFS clone of $(in_work "$DB_FROM") (cp -c -R), every file read once before the quiet check"
   if ! mkdir -p "$(dirname "$DB")" || ! cp -c -R "$DB_FROM" "$DB"; then
     echo "$label: the clone of $(in_work "$DB_FROM") could not be made at $(in_work "$DB")" | tee -a "$EVIDENCE" >&2
     exit 4
   fi
-  if [ "${DB_WARM:-0}" = 1 ]; then
-    if ! find "$DB" -type f -exec cat {} + > /dev/null; then
-      echo "$label: the files of the clone at $(in_work "$DB") could not be read" | tee -a "$EVIDENCE" >&2
-      exit 4
-    fi
-    made="$made, every file read once before the quiet check"
+  if ! find "$DB" -type f -exec cat {} + > /dev/null; then
+    echo "$label: the files of the clone at $(in_work "$DB") could not be read" | tee -a "$EVIDENCE" >&2
+    exit 4
   fi
-elif [ "${DB_WARM:-0}" = 1 ]; then
-  echo "$label: DB_WARM=1 without DB_FROM: there is no clone to read" | tee -a "$EVIDENCE" >&2
-  exit 4
 else
   made="empty"
   mkdir -p "$DB"
@@ -874,22 +878,30 @@ if __name__ == "__main__":
 
 #### `check-table.sh`
 
-Usage: `WORK=$WORK check-table.sh`, which the driver runs before M. It runs `table.py` over a fixture
-kept in `$WORK/table-fixture/` and compares the output with the one kept there, which was checked
-against the files by hand. The fixture is a file of the first session (v0.1.1's of block A, from
-`3270703`), writes of shale and of LevelDB at 200,000 keys (LevelDB's busy when their last write
-returned), and LevelDB first-pass reads that compacted while they ran, alone and as three rounds.
+Usage: `WORK=$WORK check-table.sh`, from the root of the repository checkout; the driver runs it before
+M and writes its result into the evidence, with the SHA-256 of every file of the fixture. It runs
+`table.py` over the fixture that the repository keeps in
+[`2026-11-m2-table-fixture/`](2026-11-m2-table-fixture/expected.md), and compares the output with
+`expected.md` there, which was checked against the files by hand. The fixture is a file of the first
+session (v0.1.1's of block A, from `3270703`), writes of shale and of LevelDB at 200,000 keys (LevelDB's
+busy when their last write returned), and LevelDB first-pass reads at 20,000 keys that compacted while
+they ran, alone and as three rounds. It is a fixture of the script and not a result.
 
 ```bash
 #!/usr/bin/env bash
-# check-table.sh: runs table.py over the recorded fixture in $WORK/table-fixture (a file of the first
-# session, writes of shale and LevelDB of which LevelDB's were busy when the last write returned, and
-# reads of LevelDB that compacted while they ran, alone and as three rounds) and compares the output
-# with the one recorded there, which was checked against the files by hand. Exit status 0 if they
-# agree, 1 if not.
+# check-table.sh: runs $WORK/table.py over the fixture that the repository keeps beside the protocol,
+# docs/benchmarks/2026-11-m2-table-fixture/, and compares the output with expected.md there, which
+# was checked against the files by hand. The fixture is a file of the first session, writes of shale
+# and LevelDB of which LevelDB's were busy when the last write returned, and reads of LevelDB that
+# compacted while they ran, alone and as three rounds. Run from the root of the repository checkout.
+# Exit status 0 if they agree, 1 if not.
 set -uo pipefail
 : "${WORK:?}"
-fixture="$WORK/table-fixture"
+fixture=docs/benchmarks/2026-11-m2-table-fixture
+if [ ! -f "$fixture/expected.md" ]; then
+  echo "check-table: no fixture at $fixture; run from the root of the repository checkout" >&2
+  exit 1
+fi
 got=$(cd "$fixture" && for files in first-session-v011.json shale-writes.json leveldb-writes.json \
   leveldb-first.json "leveldb-first-1.json leveldb-first-2.json leveldb-first-3.json"; do
   echo "## $files"
@@ -942,10 +954,11 @@ echo "$name engine $(git -C "$REPO" rev-parse "$engine") tools $(git -C "$REPO" 
 #### `driver.sh`
 
 Usage: `WORK=$WORK driver.sh`, run from the root of the repository checkout at `P`. It makes the checks
-(`measure.sh` is the text above, the builds of 9.3, `check-table.sh`) and then every run of 9.5 in its
-order through `measure.sh`. `NUM`, `R`, `MEASURE`, `EVIDENCE` and `DRY_RUN` may be set for a dry run; the
-session sets none of them. It writes `$WORK/driver.done` when it ends, whatever the reason, its progress
-to `$WORK/driver.log`, and a line `STOP:` to the evidence when it stops early.
+(the texts of this section, the builds of 9.3, `check-table.sh`) and then every run of 9.5 in its order
+through `measure.sh`. With `CHECK_ONLY=1` it stops after the checks, which lets them be made before Go.
+`NUM`, `R`, `MEASURE`, `EVIDENCE` and `DRY_RUN` may be set for a dry run; the session sets none of them.
+It writes `$WORK/driver.done` when it ends, whatever the reason, its progress to `$WORK/driver.log`, and
+a line `STOP:` to the evidence when it stops early.
 
 ```bash
 #!/usr/bin/env bash
@@ -970,48 +983,76 @@ master() { [ "$1" = leveldb ] && echo "$WORK/master-leveldb" || echo "$WORK/mast
 tools_digest() { (cd "$1" && find tools -type f | LC_ALL=C sort | xargs shasum -a 256 | shasum -a 256 | cut -d' ' -f1); }
 
 say "checks"
-# 1. The session's measure.sh is the text of section 9.9, with the load limit of 2.0. A dry run
-#    (DRY_RUN=1) may differ in that limit alone, and says so in the evidence.
+# 1. Every script that the session runs, and every source of a probe it runs, is the text of section
+#    9.9. A dry run (DRY_RUN=1) may differ in the load limit of measure.sh alone, and says so in the
+#    evidence.
 protocol=docs/benchmarks/2026-11-m2-protocol.md
-text=$(awk '$0 == "#### `measure.sh`" { p = 1; next } p && /^```/ { if (++c == 2) exit; next } p && c == 1' "$protocol")
-[ -n "$text" ] || stop "no measure.sh in $protocol" 6
-if [ "$text" != "$(cat "$MEASURE")" ]; then
-  if [ "${DRY_RUN:-0}" = 1 ] && [ "$(sed 's/exit !(l < [0-9.]*)/exit !(l < 2.0)/' "$MEASURE")" = "$text" ]; then
-    echo "DRY RUN: measure.sh is the text of section 9.9 with the load limit $(grep -o 'exit !(l < [0-9.]*' "$MEASURE" | grep -o '[0-9.]*$') instead of 2.0" >> "$EVIDENCE"
-  else
-    stop "the measure.sh given is not the measure.sh of section 9.9" 6
+text_of() { awk -v h="#### \`$1\`" '$0 == h { p = 1; next } p && /^```/ { if (++c == 2) exit; next } p && c == 1' "$protocol"; }
+pinned() {
+  local name=$1 file=$2 text
+  text=$(text_of "$name")
+  [ -n "$text" ] || stop "no $name in section 9.9 of $protocol" 6
+  [ -f "$file" ] && [ "$text" = "$(cat "$file")" ] && return 0
+  if [ "$name" = measure.sh ] && [ "${DRY_RUN:-0}" = 1 ] &&
+    [ "$(sed 's/exit !(l < [0-9.]*)/exit !(l < 2.0)/' "$file")" = "$text" ]; then
+    echo "DRY RUN: measure.sh is the text of section 9.9 with the load limit $(grep -o 'exit !(l < [0-9.]*' "$file" | grep -o '[0-9.]*$') instead of 2.0" >> "$EVIDENCE"
+    return 0
   fi
-fi
-# 2. The four builds have the tools/ of this checkout, the same in each and as builds.txt records it,
-#    with LevelDB found; and the engine of final is that of E+F+G.
+  stop "the $name given is not the $name of section 9.9" 6
+}
+scripts=(measure.sh "$MEASURE" driver.sh "${BASH_SOURCE[0]}" build.sh "$WORK/build.sh"
+  table.py "$WORK/table.py" check-table.sh "$WORK/check-table.sh" profile.sh "$WORK/probe/profile.sh"
+  build-probe.sh "$WORK/probe/build-probe.sh" probe.cc "$WORK/probe/probe.cc"
+  interpose.c "$WORK/probe/interpose.c")
+for ((i = 0; i < ${#scripts[@]}; i += 2)); do pinned "${scripts[i]}" "${scripts[i + 1]}"; done
+# The probes and the interposer were built after their sources, and the probes after their builds.
+for b in v011 final; do
+  [ "$WORK/probe/probe-$b" -nt "$WORK/probe/probe.cc" ] && [ "$WORK/probe/probe-$b" -nt "$(bin $b)" ] ||
+    stop "probe-$b is missing, or older than probe.cc or the build" 6
+done
+[ "$WORK/probe/interpose.dylib" -nt "$WORK/probe/interpose.c" ] || stop "interpose.dylib is missing, or older than interpose.c" 6
+# 2. The four builds are the engine commits of section 9.3, each with the tools/ of this checkout,
+#    the same in each and as builds.txt records it, with LevelDB found; and the engine of final is
+#    that of E+F+G.
 git diff --quiet c7af18b HEAD -- src include CMakeLists.txt CMakePresets.json || stop "the checkout's engine is not c7af18b's" 6
 digest=""
 for n in v011 e ef final; do
+  case $n in v011) engine=9fefedf ;; e) engine=194417f ;; ef) engine=2f95cb6 ;; final) engine=c7af18b ;; esac
+  engine=$(git rev-parse "$engine^{commit}")
   d=$(tools_digest "$WORK/$n")
   rec=$(grep "^$n engine " "$WORK/builds.txt" | tail -1)
+  [ "$(echo "$rec" | awk '{print $3}')" = "$engine" ] || stop "build $n was not made from the engine commit $engine" 6
   tools_rev=$(echo "$rec" | awk '{print $5}')
   [ -n "$tools_rev" ] && [ "$(git rev-parse "$tools_rev:tools")" = "$(git rev-parse HEAD:tools)" ] || stop "build $n was not made with the tools/ of this checkout" 6
   case "$rec" in *"tools-sha256 $d found leveldb"*) ;; *) stop "build $n: tools/ $d, or its LevelDB, is not what builds.txt records" 6;; esac
   [ -z "$digest" ] || [ "$d" = "$digest" ] || stop "the four builds' tools/ differ" 6
   digest=$d
 done
-echo "checks: the four builds have the tools/ of $(git rev-parse --short HEAD) (SHA-256 $digest) and found LevelDB" >> "$EVIDENCE"
-# 3. The table script reads its recorded fixture as recorded.
-WORK=$WORK bash "$WORK/check-table.sh" >> "$log" 2>&1 || stop "table.py does not read its fixture as recorded" 6
+# 3. The table script reads the fixture that the repository keeps beside the protocol as recorded.
+result=$(WORK=$WORK bash "$WORK/check-table.sh" 2>&1) || { echo "$result" >> "$log"; stop "table.py does not read its fixture as recorded" 6; }
+{
+  echo "checks, all passed:"
+  echo "  the scripts, each the text of section 9.9 (SHA-256):"
+  for ((i = 0; i < ${#scripts[@]}; i += 2)); do echo "    $(shasum -a 256 < "${scripts[i + 1]}" | cut -d' ' -f1)  ${scripts[i]}"; done
+  echo "  the builds: v011 9fefedf, e 194417f, ef 2f95cb6, final c7af18b, each with the tools/ of $(git rev-parse --short HEAD) (SHA-256 $digest), LevelDB found"
+  echo "  the table fixture, docs/benchmarks/2026-11-m2-table-fixture/ (SHA-256):"
+  (cd docs/benchmarks/2026-11-m2-table-fixture && shasum -a 256 -- *) | sed 's/^/    /'
+  echo "  $result"
+} >> "$EVIDENCE"
 say "checks passed"
+if [ "${CHECK_ONLY:-0}" = 1 ]; then say "CHECK_ONLY: stopped after the checks"; exit 0; fi
 
 # run <label> <build> <database> <args...>: one run of shale_bench through measure.sh. <database> is
-# "-" for an empty one, "clone:<dir>" for a clone of <dir>, or "warm:<dir>" for a clone of <dir> whose
-# every file is read once before the quiet check. A failure is run again once; a second failure, a
-# quiet check that timed out or a database that could not be made stops the driver.
+# "-" for an empty one, or a directory, of which measure.sh makes a clone and reads every file once
+# before the quiet check. A failure is run again once; a second failure, a quiet check that timed out
+# or a database that could not be made stops the driver.
 run() {
-  local label=$1 build=$2 database=$3; shift 3
-  local from="" warm=0
-  case $database in clone:*) from=${database#clone:};; warm:*) from=${database#warm:} warm=1;; esac
+  local label=$1 build=$2 from=$3; shift 3
+  [ "$from" = - ] && from=""
   for attempt in 1 2; do
     say "start $label (attempt $attempt)"
     local l=$label; [ $attempt = 2 ] && l="$label (rerun)"
-    DB_FROM=$from DB_WARM=$warm BENCH=$(bin "$build") bash "$MEASURE" "$l" "$@"
+    DB_FROM=$from BENCH=$(bin "$build") bash "$MEASURE" "$l" "$@"
     local rc=$?
     say "end $label rc=$rc"
     [ $rc = 0 ] && return 0
@@ -1030,7 +1071,7 @@ for e in shale leveldb; do
   # opened once as it is, so that what its log held is in a table and the background is done
   # again: every clone of it then opens with nothing to replay.
   DB=$made run "M write $e" $b - $(eng $b) --benchmarks=fillrandom,overwrite --num=$NUM --repeat=1 --db=$made --json=$R/2026-11-m2-masters/$e-write.json
-  DB=$m run "M open $e" $b "clone:$made" $(eng $b) --existing_db=overwrite --benchmarks=readseq --num=$NUM --repeat=1 --db=$m --json=$R/2026-11-m2-masters/$e-open.json
+  DB=$m run "M open $e" $b "$made" $(eng $b) --existing_db=overwrite --benchmarks=readseq --num=$NUM --repeat=1 --db=$m --json=$R/2026-11-m2-masters/$e-open.json
   (cd "$m" && find . -type f | LC_ALL=C sort | xargs shasum -a 256) > "$m.sha256"
   {
     echo "M record $e"
@@ -1043,18 +1084,18 @@ for e in shale leveldb; do
   say "master $e recorded"
 done
 
-# A first-pass run reads a clone whose files were read once before the quiet check; a compacted run
-# reads a plain clone, since the compaction writes the files that its reads read.
+# Every read run reads a clone of its engine's database, every file of which measure.sh has read once
+# before the quiet check, in both passes.
 say "A writes"
 for b in $ALL; do run "A writes $b" $b - $(eng $b) --benchmarks=fillseq,fillrandom,fillsync,overwrite --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-$b-writes.json; done
 say "A first pass"
-for b in $ALL; do run "A first $b" $b "warm:$(master $b)" $(eng $b) --existing_db=overwrite --benchmarks=$READS --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-$b.json; done
+for b in $ALL; do run "A first $b" $b "$(master $b)" $(eng $b) --existing_db=overwrite --benchmarks=$READS --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-$b.json; done
 say "A compacted pass"
-for b in $ALL; do run "A compacted $b" $b "clone:$(master $b)" $(eng $b) --existing_db=overwrite --benchmarks=$READS --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-$b-compacted.json --compact_before_reads; done
+for b in $ALL; do run "A compacted $b" $b "$(master $b)" $(eng $b) --existing_db=overwrite --benchmarks=$READS --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-$b-compacted.json --compact_before_reads; done
 say "B"
 for r in 1 2 3; do
-  for b in $(order $r); do run "B first r$r $b" $b "warm:$(master $b)" $(eng $b) --existing_db=overwrite --benchmarks=$READS --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-reads/$b-first-$r.json; done
-  for b in $(order $r); do run "B compacted r$r $b" $b "clone:$(master $b)" $(eng $b) --existing_db=overwrite --benchmarks=$READS --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-reads/$b-compacted-$r.json --compact_before_reads; done
+  for b in $(order $r); do run "B first r$r $b" $b "$(master $b)" $(eng $b) --existing_db=overwrite --benchmarks=$READS --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-reads/$b-first-$r.json; done
+  for b in $(order $r); do run "B compacted r$r $b" $b "$(master $b)" $(eng $b) --existing_db=overwrite --benchmarks=$READS --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-reads/$b-compacted-$r.json --compact_before_reads; done
 done
 say "W"
 for r in 1 2 3; do
@@ -1067,22 +1108,19 @@ for r in 1 2 3; do
     for b in $co; do
       extra=(); [ $pass = compacted ] && extra=(--compact_before_reads)
       cs=(); [ $b = final ] && cs=(--cache_size=1073741824)
-      database="warm:$(master $b)"; [ $pass = compacted ] && database="clone:$(master $b)"
-      run "C $pass r$r $b" $b "$database" $(eng $b) ${cs[@]+"${cs[@]}"} --existing_db=overwrite --benchmarks=$READS --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-diagnostic/$b-$pass-$r.json ${extra[@]+"${extra[@]}"}
+      run "C $pass r$r $b" $b "$(master $b)" $(eng $b) ${cs[@]+"${cs[@]}"} --existing_db=overwrite --benchmarks=$READS --num=$NUM --repeat=3 --db=$DB --json=$R/2026-11-m2-diagnostic/$b-$pass-$r.json ${extra[@]+"${extra[@]}"}
     done
   done
 done
 say "D"
-# probe <build> <label> <state> <args to profile.sh between the label and the database>: the probe
-# reads $DB, which measure.sh makes a clone of the shale database before the quiet check, read once
-# in the first-pass state.
+# probe <build> <label> <args to profile.sh between the label and the database>: the probe reads
+# $DB, which measure.sh makes a clone of the shale database and reads once before the quiet check.
 probe() {
-  local build=$1 label=$2 state=$3; shift 3
-  local warm=1; [ "$state" = compacted ] && warm=0
+  local build=$1 label=$2; shift 2
   for attempt in 1 2; do
     local l=$label; [ $attempt = 2 ] && l="$label (rerun)"
     say "start probe $label (attempt $attempt)"
-    DB_FROM=$WORK/master-shale DB_WARM=$warm BENCH=$WORK/probe/profile.sh bash "$MEASURE" "$l" "$WORK/probe/probe-$build" "$label" "$@" "$DB" overwrite; local rc=$?
+    DB_FROM=$WORK/master-shale BENCH=$WORK/probe/profile.sh bash "$MEASURE" "$l" "$WORK/probe/probe-$build" "$label" "$@" "$DB" overwrite; local rc=$?
     local san=${l//[^A-Za-z0-9._-]/_}
     [ $rc = 3 ] && stop "quiet check timed out" 3
     [ $rc = 4 ] && stop "the database could not be made" 4
@@ -1094,13 +1132,13 @@ probe() {
 for b in v011 final; do
   for state in first compacted; do
     c=0; [ $state = compacted ] && c=1
-    probe $b "count-$b-$state" $state "$NUM" $READS 1 1 1 $c
+    probe $b "count-$b-$state" "$NUM" $READS 1 1 1 $c
   done
   for state in first compacted; do
     c=0; [ $state = compacted ] && c=1
     for bench in readrandom:3 readseq:40 seekrandom:2; do
       n=${bench%%:*}; loops=${bench##*:}
-      probe $b "prof-$b-$state-$n" $state "$NUM" $n "MARK loop $n" 4 $loops $c
+      probe $b "prof-$b-$state-$n" "$NUM" $n "MARK loop $n" 4 $loops $c
     done
   done
 done
@@ -1117,18 +1155,281 @@ say "ALL DONE"
 
 #### The probe
 
-The probe (`probe.cc`), `profile.sh`, `interpose.c` and the scripts that read the samples are scratch
-files, as in the first session, and the evidence gives each one that changed as a diff against the
-first session's. The revision changes two of them:
+The probe and its scripts live in `$WORK/probe/`, as in the first session; the texts below are the ones
+the session uses, and the evidence gives the diff of each against the first session's. `probe.cc` drives
+the engines through shale_bench's own adapters (`NewShaleBenchEngine(Options())` and
+`NewLevelDBBenchEngine()`), so a write waits for the background as shale_bench's does; with
+`PROBE_EXISTING=overwrite` it opens its database as it is and checks its reads against
+`RecordOfWrite()`, as `--existing_db` does; it waits for the background after a `PROBE_COMPACT`
+compaction and after each read benchmark; and it prints the engine's state after each benchmark.
+`profile.sh` takes every argument in a fixed place, and the probe opens the database given as it is:
+`$DB`, which `measure.sh` made a clone of the shale database, and read, before the quiet check.
+`build-probe.sh` is the one compile command of section 4 D, unchanged, run for `v011` and `final` before
+Go; `interpose.dylib` is built from `interpose.c` with `cc -dynamiclib -O2 -o interpose.dylib
+interpose.c`, as in 2026-10. The driver checks that each binary is newer than its source.
 
-- `probe.cc` drives the engines through shale_bench's own adapters (`NewShaleBenchEngine(Options())` and
-  `NewLevelDBBenchEngine()`), so a write waits for the background as shale_bench's does; with
-  `PROBE_EXISTING=overwrite` it opens its database as it is and checks its reads against
-  `RecordOfWrite()`, as `--existing_db` does; it waits for the background after a `PROBE_COMPACT`
-  compaction and after each read benchmark; and it prints the engine's state after each benchmark.
-- `profile.sh` takes every argument in a fixed place: `<probe> <label> <num> <benchmarks>
-  <mark-or-delay> <seconds> <loops> <compact 0|1> <database, or -> <write that made it, or ->`, and the
-  probe opens the database given as it is: `$DB`, which `measure.sh` made a clone of the shale database
-  before the quiet check, and read once in the first-pass state.
+#### `profile.sh`
 
-The compile command of the probes and of `interpose.dylib` is the one of section 4 D, unchanged.
+```bash
+#!/usr/bin/env bash
+# profile.sh <probe> <label> <num> <benchmarks> <mark-or-delay> <seconds> <loops> <compact 0|1> <database or -> <existing write or ->
+# Runs the probe and samples it: after a line matching the pattern <mark> appears, or after <delay> seconds
+# when the mark is a number. <database> is the directory the probe opens, as it is, as the database that
+# <existing write> made: the clone that measure.sh made at $DB before the quiet check (and read once, in
+# the first-pass state). With "-" the probe gets an empty directory of its own, removed after the run.
+# Revised from profile-2026-11-22.sh for the settled protocol: every argument in a fixed place, and the
+# database given.
+set -uo pipefail
+S=$SCRATCH
+probe=$1 label=$2 num=$3 benches=$4 mark=$5 secs=$6 loops=$7 compact=$8 database=$9 existing=${10}
+if [ "$database" = - ]; then
+  db="$S/probe-db"; rm -rf "$db"; mkdir -p "$db"
+else
+  db=$database
+fi
+out="$S/prof-$label"
+if [ "$compact" = 1 ]; then export PROBE_COMPACT=1; else unset PROBE_COMPACT; fi
+if [ "$existing" != - ]; then export PROBE_EXISTING=$existing; else unset PROBE_EXISTING; fi
+DYLD_INSERT_LIBRARIES="$S/interpose.dylib" "$probe" "${ENGINE:-shale}" "$num" "$db" "$benches" 0 "$loops" > "$out.out" 2>&1 &
+pid=$!
+if [[ "$mark" =~ ^[0-9]+$ ]]; then
+  sleep "$mark"
+else
+  until grep -qE "$mark" "$out.out" || ! kill -0 $pid 2>/dev/null; do sleep 0.2; done
+  sleep 0.3
+fi
+sample $pid "$secs" -file "$out.sample.txt" > /dev/null 2>&1
+wait $pid
+echo "$label: probe exit $?"
+if [ "$database" = - ]; then rm -rf "$db"; fi
+```
+
+#### `build-probe.sh`
+
+```bash
+#!/usr/bin/env bash
+# build-probe.sh <name>: the one compile command for both probes.
+set -euo pipefail
+n=$1; B=$WORK/$n/build
+c++ -O2 -g -std=c++20 -I"$WORK/$n/include" -I"$WORK/$n/tools" -I"$(brew --prefix leveldb)/include" \
+  "$WORK/probe/probe.cc" -o "$WORK/probe/probe-$n" \
+  "$B/tools/libshale_bench_support.a" "$B/tools/libshale_bench_leveldb.a" \
+  "$B/src/libshale_db.a" "$B/src/libshale_io.a" "$B/src/libshale_core.a" "$B/src/libshale_util.a" \
+  -L"$(brew --prefix leveldb)/lib" -lleveldb
+```
+
+#### `probe.cc`
+
+```cpp
+// A scratch probe, not part of the repository: runs the shale_bench workloads once through the
+// same functions and the same engine adapters as shale_bench, on shale or on LevelDB, and prints
+// the engine's state after each benchmark, so that a row can be explained from what the engine says
+// it did.
+//
+// Revised for the settled protocol (section 9 of the protocol), from probe-2026-11-22.cc:
+// - the engines are shale_bench's own adapters (NewShaleBenchEngine(Options()) and
+//   NewLevelDBBenchEngine()), with the options shale_bench gives them by default;
+// - a write benchmark waits for the background as shale_bench does (RunWriteBenchmark() settles);
+// - with PROBE_EXISTING set to the write benchmark that made the database at <db>, the database is
+//   opened as it is and its background waited for, as shale_bench --existing_db does, and the reads
+//   are checked against RecordOfWrite();
+// - PROBE_COMPACT compacts once before the first read, then waits for the background;
+// - after each read benchmark the background is waited for, as shale_bench does.
+#include <dlfcn.h>
+
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <memory>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "bench_engine.h"
+#include "bench_leveldb.h"
+#include "bench_workloads.h"
+#include "shale/options.h"
+
+using namespace shale;
+
+static void Snap(const std::string& label) {
+  using Fn = void (*)(const char*);
+  static Fn fn = reinterpret_cast<Fn>(dlsym(RTLD_DEFAULT, "interpose_snapshot"));
+  if (fn) fn(label.c_str());
+}
+
+static void PrintState(BenchEngine* engine, const char* when) {
+  EngineState s;
+  Status st = engine->GetState(&s);
+  if (!st.ok()) {
+    std::printf("state %s: %s\n", when, st.ToString().c_str());
+    return;
+  }
+  std::string counters;
+  for (const auto& [name, value] : s.counters) counters += " " + name + "=" + std::to_string(value);
+  std::printf("state %s: busy=%d score=%.3f levels %s wa %s counters%s\n", when,
+              s.background_busy ? 1 : 0, s.highest_score, FilesPerLevelText(s.files_per_level).c_str(),
+              s.write_amplification.c_str(), counters.c_str());
+  std::fflush(stdout);
+}
+
+static int Fail(const char* what, const Status& s) {
+  std::printf("%s failed: %s\n", what, s.ToString().c_str());
+  return 1;
+}
+
+int main(int argc, char** argv) {
+  if (argc < 5) {
+    std::fprintf(stderr, "probe <shale|leveldb> <num> <db> <bench,bench...> [pause_ms_before_each] [loops]\n");
+    return 2;
+  }
+  const std::string engine_name = argv[1];
+  WorkloadOptions options;
+  options.num = std::strtoull(argv[2], nullptr, 10);
+  options.sync_num = 10000;
+  options.value_size = 100;
+  options.seed = 301;
+  options.db = argv[3];
+  std::vector<Benchmark> list;
+  {
+    std::string l = argv[4];
+    size_t st = 0;
+    while (true) {
+      size_t c = l.find(',', st);
+      auto n = FindBenchmark(l.substr(st, c == std::string::npos ? c : c - st));
+      if (!n) { std::fprintf(stderr, "bad benchmark\n"); return 2; }
+      list.push_back(*n);
+      if (c == std::string::npos) break;
+      st = c + 1;
+    }
+  }
+  const int pause_ms = argc > 5 ? std::atoi(argv[5]) : 0;
+  const int loops = argc > 6 ? std::atoi(argv[6]) : 1;
+  const std::unique_ptr<BenchEngine> e =
+      engine_name == "shale" ? NewShaleBenchEngine(Options()) : NewLevelDBBenchEngine();
+  std::optional<Populated> source;
+  bool compact_pending = false;
+  if (const char* existing = std::getenv("PROBE_EXISTING"); existing != nullptr && *existing != '\0') {
+    const std::optional<Benchmark> written_by = FindBenchmark(existing);
+    if (!written_by || !BenchmarkWrites(*written_by)) { std::fprintf(stderr, "bad PROBE_EXISTING\n"); return 2; }
+    if (Status s = e->OpenExisting(options.db); !s.ok()) return Fail("open existing", s);
+    PrintState(e.get(), "opened");
+    SettleResult settled;
+    if (Status s = Settle(e.get(), options.settle, &settled); !s.ok()) return Fail("settle after open", s);
+    std::printf("MARK opened existing, settled in %.3f s\n", settled.seconds);
+    PrintState(e.get(), "settled");
+    source = RecordOfWrite(options, *written_by);
+    compact_pending = std::getenv("PROBE_COMPACT") != nullptr;
+  }
+  for (Benchmark b : list) {
+    RunResult r;
+    Status s;
+    if (pause_ms) std::this_thread::sleep_for(std::chrono::milliseconds(pause_ms));
+    Snap(std::string("before ") + BenchmarkName(b));
+    if (BenchmarkWrites(b)) {
+      Populated p;
+      s = RunWriteBenchmark(e.get(), options, b, &p, &r);
+      source = std::move(p);
+      compact_pending = std::getenv("PROBE_COMPACT") != nullptr;
+    } else {
+      if (!source) { std::fprintf(stderr, "a read with no database to read\n"); return 2; }
+      if (compact_pending) {
+        Status c = e->CompactAll();
+        compact_pending = false;
+        SettleResult settled;
+        Status w = c.ok() ? Settle(e.get(), options.settle, &settled) : c;
+        std::printf("MARK compacted %s\n", w.ok() ? "ok" : w.ToString().c_str()); std::fflush(stdout);
+        if (!w.ok()) return Fail("compact", w);
+      }
+      std::printf("MARK loop %s x%d\n", BenchmarkName(b), loops); std::fflush(stdout);
+      Snap(std::string("loop start ") + BenchmarkName(b));
+      for (int i = 0; i < loops; i++) {
+        s = RunReadBenchmark(e.get(), options, b, *source, &r);
+        if (!s.ok()) break;
+      }
+      Snap(std::string("after ") + std::to_string(loops) + " x " + BenchmarkName(b));
+      if (s.ok()) {
+        SettleResult settled;
+        s = Settle(e.get(), options.settle, &settled);
+      }
+    }
+    if (!s.ok()) return Fail(BenchmarkName(b), s);
+    std::printf("== %s %s: %.0f ops/s, %.3f s, engine %.3f s, wa %s\n", engine_name.c_str(), BenchmarkName(b), r.OpsPerSecond(), r.seconds, r.engine_seconds, r.write_amplification ? r.write_amplification->c_str() : "-");
+    if (r.latency) std::printf("   p50 %.2f p99 %.2f p99.9 %.2f us, avg %.2f us\n", r.latency->p50, r.latency->p99, r.latency->p999, r.latency->average);
+    if (r.settle_seconds) std::printf("   settled in %.3f s: %.0f ops/s\n", *r.settle_seconds, r.SettledOpsPerSecond());
+    PrintState(e.get(), "after");
+  }
+  return 0;
+}
+```
+
+#### `interpose.c`
+
+```c
+#include <fcntl.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+#include <stdatomic.h>
+
+static atomic_long fullfsync, fsync_calls, fcntl_other;
+static atomic_long fullfsync_fail;
+static atomic_long n_pread, n_read, n_write, n_pwrite, n_mmap, n_munmap;
+static atomic_long b_pread, b_write;
+
+#define DYLD_INTERPOSE(_replacement, _replacee) \
+  __attribute__((used)) static struct { const void* replacement; const void* replacee; } \
+  _interpose_##_replacee __attribute__((section("__DATA,__interpose"))) = { \
+    (const void*)(unsigned long)&_replacement, (const void*)(unsigned long)&_replacee };
+
+static int my_fcntl(int fd, int cmd, ...) {
+  va_list ap;
+  va_start(ap, cmd);
+  long arg = va_arg(ap, long);
+  va_end(ap);
+  int r = fcntl(fd, cmd, arg);
+  if (cmd == F_FULLFSYNC) {
+    atomic_fetch_add(&fullfsync, 1);
+    if (r != 0) atomic_fetch_add(&fullfsync_fail, 1);
+  } else {
+    atomic_fetch_add(&fcntl_other, 1);
+  }
+  return r;
+}
+static int my_fsync(int fd) {
+  atomic_fetch_add(&fsync_calls, 1);
+  return fsync(fd);
+}
+static ssize_t my_pread(int fd, void* b, size_t n, off_t o) { ssize_t r = pread(fd, b, n, o); atomic_fetch_add(&n_pread, 1); if (r > 0) atomic_fetch_add(&b_pread, r); return r; }
+static ssize_t my_read(int fd, void* b, size_t n) { atomic_fetch_add(&n_read, 1); return read(fd, b, n); }
+static ssize_t my_write(int fd, const void* b, size_t n) { ssize_t r = write(fd, b, n); atomic_fetch_add(&n_write, 1); if (r > 0) atomic_fetch_add(&b_write, r); return r; }
+static ssize_t my_pwrite(int fd, const void* b, size_t n, off_t o) { atomic_fetch_add(&n_pwrite, 1); return pwrite(fd, b, n, o); }
+static void* my_mmap(void* a, size_t l, int p, int f, int fd, off_t o) { atomic_fetch_add(&n_mmap, 1); return mmap(a, l, p, f, fd, o); }
+static int my_munmap(void* a, size_t l) { atomic_fetch_add(&n_munmap, 1); return munmap(a, l); }
+DYLD_INTERPOSE(my_fcntl, fcntl)
+DYLD_INTERPOSE(my_pread, pread)
+DYLD_INTERPOSE(my_read, read)
+DYLD_INTERPOSE(my_write, write)
+DYLD_INTERPOSE(my_pwrite, pwrite)
+DYLD_INTERPOSE(my_mmap, mmap)
+DYLD_INTERPOSE(my_munmap, munmap)
+DYLD_INTERPOSE(my_fsync, fsync)
+
+static long last[12];
+void interpose_snapshot(const char* label) {
+  long cur[12] = {atomic_load(&n_pread), atomic_load(&b_pread), atomic_load(&n_read), atomic_load(&n_write), atomic_load(&b_write), atomic_load(&n_pwrite), atomic_load(&n_mmap), atomic_load(&n_munmap), atomic_load(&fullfsync), atomic_load(&fsync_calls), 0, 0};
+  fprintf(stderr, "SNAP %-28s pread=%ld (%ld B) read=%ld write=%ld (%ld B) pwrite=%ld mmap=%ld munmap=%ld F_FULLFSYNC=%ld fsync=%ld\n", label,
+          cur[0]-last[0], cur[1]-last[1], cur[2]-last[2], cur[3]-last[3], cur[4]-last[4], cur[5]-last[5], cur[6]-last[6], cur[7]-last[7], cur[8]-last[8], cur[9]-last[9]);
+  for (int k = 0; k < 12; k++) last[k] = cur[k];
+}
+
+__attribute__((destructor)) static void report(void) {
+  fprintf(stderr, "interpose: pread=%ld (%ld bytes) read=%ld write=%ld (%ld bytes) pwrite=%ld mmap=%ld munmap=%ld\n", atomic_load(&n_pread), atomic_load(&b_pread), atomic_load(&n_read), atomic_load(&n_write), atomic_load(&b_write), atomic_load(&n_pwrite), atomic_load(&n_mmap), atomic_load(&n_munmap));
+  fprintf(stderr, "interpose: F_FULLFSYNC=%ld (failed %ld) fsync=%ld other_fcntl=%ld\n",
+          atomic_load(&fullfsync), atomic_load(&fullfsync_fail), atomic_load(&fsync_calls),
+          atomic_load(&fcntl_other));
+}
+```
