@@ -94,6 +94,27 @@ TEST_F(BenchEngineTest, OpenFreshDiscardsWhatWasThereAndOpenNotFreshKeepsIt) {
   EXPECT_TRUE(gone.IsNotFound()) << "a fresh database must start empty: " << gone.ToString();
 }
 
+TEST_F(BenchEngineTest, OpenExistingKeepsWhatIsThere) {
+  std::unique_ptr<BenchEngine> engine = OpenFresh();
+  ASSERT_OK(engine->Put(Key(1), "one", /*sync=*/false));
+  engine->Close();
+
+  ASSERT_OK(engine->OpenExisting(kPath));
+  std::string value;
+  ASSERT_OK(engine->Get(Key(1), &value));
+  EXPECT_EQ(value, "one");
+}
+
+TEST_F(BenchEngineTest, OpenExistingOfAPathWithNoDatabaseFailsAndMakesNothing) {
+  const std::unique_ptr<BenchEngine> engine = NewShaleBenchEngine(options_);
+  EXPECT_FALSE(engine->OpenExisting("/nodb").ok());
+  std::vector<std::string> children;
+  EXPECT_FALSE(env_->GetChildren("/nodb", &children).ok() && !children.empty())
+      << "nothing was made at the path";
+  EngineState state;
+  EXPECT_FALSE(engine->GetState(&state).ok()) << "no database is open";
+}
+
 TEST_F(BenchEngineTest, ScanVisitsFromAKeyUpToTheLimit) {
   const std::unique_ptr<BenchEngine> engine = OpenFresh();
   PutKeys(engine.get(), 10);

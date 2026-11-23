@@ -169,20 +169,13 @@ class ShaleBenchEngine final : public BenchEngine {
         return destroyed;
       }
     }
-    // A scheduler with a thread of its own for each database, as shale makes for a database that is
-    // opened without one, unless the options gave one; either way, counted.
-    if (given_scheduler_ == nullptr) {
-      thread_scheduler_ = NewThreadScheduler();
-    }
-    counting_scheduler_ = std::make_unique<TaskCountingScheduler>(
-        given_scheduler_ != nullptr ? given_scheduler_ : thread_scheduler_.get());
-    Options options = options_;
-    options.scheduler = counting_scheduler_.get();
-    const Status opened = DB::Open(options, path, &db_);
-    if (!opened.ok()) {
-      Close();
-    }
-    return opened;
+    return OpenDatabase(path, /*create_if_missing=*/true);
+  }
+
+  // shale makes nothing at a path that holds no database when it is not asked to create one.
+  Status OpenExisting(const std::string& path) override {
+    Close();
+    return OpenDatabase(path, /*create_if_missing=*/false);
   }
 
   Status Put(std::string_view key, std::string_view value, bool sync) override {
@@ -272,6 +265,24 @@ class ShaleBenchEngine final : public BenchEngine {
 
  private:
   static Status NotOpen() { return Status::InvalidArgument("the benchmark database is not open"); }
+
+  Status OpenDatabase(const std::string& path, bool create_if_missing) {
+    // A scheduler with a thread of its own for each database, as shale makes for a database that is
+    // opened without one, unless the options gave one; either way, counted.
+    if (given_scheduler_ == nullptr) {
+      thread_scheduler_ = NewThreadScheduler();
+    }
+    counting_scheduler_ = std::make_unique<TaskCountingScheduler>(
+        given_scheduler_ != nullptr ? given_scheduler_ : thread_scheduler_.get());
+    Options options = options_;
+    options.scheduler = counting_scheduler_.get();
+    options.create_if_missing = create_if_missing;
+    const Status opened = DB::Open(options, path, &db_);
+    if (!opened.ok()) {
+      Close();
+    }
+    return opened;
+  }
 
   Options options_;
   Scheduler* const given_scheduler_;

@@ -123,6 +123,27 @@ TEST_F(BenchLevelDBTest, OpenFreshDiscardsWhatWasThereAndOpenNotFreshKeepsIt) {
   EXPECT_TRUE(gone.IsNotFound()) << "a fresh database must start empty: " << gone.ToString();
 }
 
+TEST_F(BenchLevelDBTest, OpenExistingKeepsWhatIsThere) {
+  std::unique_ptr<BenchEngine> engine = OpenFresh();
+  ASSERT_OK(engine->Put(Key(1), "one", /*sync=*/false));
+  engine->Close();
+
+  ASSERT_OK(engine->OpenExisting(path_));
+  std::string value;
+  ASSERT_OK(engine->Get(Key(1), &value));
+  EXPECT_EQ(value, "one");
+}
+
+// LevelDB makes the directory, its lock and its info log before it finds that there is no
+// database, so the engine looks first.
+TEST_F(BenchLevelDBTest, OpenExistingOfAPathWithNoDatabaseFailsAndMakesNothing) {
+  const std::unique_ptr<BenchEngine> engine = NewLevelDBBenchEngine();
+  EXPECT_FALSE(engine->OpenExisting(path_).ok());
+  EXPECT_FALSE(fs::exists(path_)) << "nothing was made at the path";
+  EngineState state;
+  EXPECT_FALSE(engine->GetState(&state).ok()) << "no database is open";
+}
+
 TEST_F(BenchLevelDBTest, ScanVisitsFromAKeyUpToTheLimit) {
   const std::unique_ptr<BenchEngine> engine = OpenFresh();
   PutKeys(engine.get(), 10);

@@ -408,6 +408,104 @@ if [ "$(digest "$tmp/plain.json")" != "$(digest "$tmp/compacted.json")" ]; then
     "$(diff <(digest "$tmp/plain.json") <(digest "$tmp/compacted.json"))"
 fi
 
+# --- Reads on a database that is already there. ---------------------------------------------------
+
+# The database that fillrandom then overwrite leave, read later by another run as it is: the reads
+# find what the reads of one run that wrote it find, and are checked against the same record.
+reads=readrandom,readmissing,readseq,seekrandom
+check "a database to read later" 0 "${small[@]}" --repeat=1 --db="$tmp/ex" \
+  --benchmarks=fillrandom,overwrite
+check "the same writes, and the reads in the same run" 0 "${small[@]}" --repeat=1 --db="$tmp/ex0" \
+  --json="$tmp/ex-inline.json" --benchmarks=fillrandom,overwrite,$reads
+check "the reads of the database that is there" 0 "${small[@]}" --repeat=2 --db="$tmp/ex" \
+  --json="$tmp/ex.json" --existing_db=overwrite --benchmarks=$reads
+out_has "--existing_db: the output says what it opened" "# opened the database ex as it is, written by overwrite"
+row "--existing_db" readrandom
+reads_digest() {
+  python3 -I -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+for r in d["results"]:
+    if r["kind"] == "read":
+        print(r["name"], r["entries"], r["source"], [(x["operations"], x["bytes"], x["found"]) for x in r["runs"][:1]])
+' "$1"
+}
+cases=$((cases + 1))
+if [ "$(reads_digest "$tmp/ex.json")" != "$(reads_digest "$tmp/ex-inline.json")" ]; then
+  fail "the reads of the database that is there did not find what the reads after its writes found" \
+    "$(diff <(reads_digest "$tmp/ex.json") <(reads_digest "$tmp/ex-inline.json"))"
+fi
+json_has "--existing_db: the JSON" "$tmp/ex.json" '
+assert d["config"]["existing_db"] == "overwrite", d["config"]
+assert d["config"]["benchmarks"] == ["readrandom", "readmissing", "readseq", "seekrandom"]
+assert [r["name"] for r in d["results"]] == d["config"]["benchmarks"]
+o = d["existing_db_open"]
+assert o["settle_seconds"] >= 0, o
+assert len(o["opened"]["files_per_level"]) == 7 and len(o["settled"]["files_per_level"]) == 7, o
+assert o["settled"]["background_busy"] is False and o["settled"]["highest_score"] < 1, o
+for r in d["results"]:
+    assert r["source"] == "overwrite" and r["entries"] == 2000, r["name"]
+    assert r["tree"]["files_per_level"] == o["settled"]["files_per_level"], (r["name"], r["tree"])
+'
+json_has "a run that writes says it read no database that was there" "$tmp/ex-inline.json" '
+assert d["config"]["existing_db"] is None and d["existing_db_open"] is None, d["config"]
+'
+check "the reads of the database that is there, compacted first" 0 "${small[@]}" --repeat=1 \
+  --db="$tmp/ex" --json="$tmp/ex-compacted.json" --existing_db=overwrite --benchmarks=$reads \
+  --compact_before_reads
+out_has "--existing_db with --compact_before_reads compacts" "# compacted after overwrite"
+json_has "--existing_db with --compact_before_reads: the JSON" "$tmp/ex-compacted.json" '
+by = {r["name"]: r for r in d["results"]}
+assert by["readrandom"]["compact_seconds"] is not None
+assert by["readrandom"]["tree"]["files_per_level"][0] == 0, by["readrandom"]["tree"]
+'
+
+check "--existing_db where there is no database" 1 "${small[@]}" --repeat=1 --db="$tmp/no-db" \
+  --existing_db=overwrite --benchmarks=readseq
+err_has "--existing_db where there is no database" "opening the database at"
+cases=$((cases + 1))
+if [ -e "$tmp/no-db" ]; then
+  fail "--existing_db made a database where there was none" "$(ls -la "$tmp/no-db")"
+fi
+check "--existing_db of a database written with another seed" 1 --num=2000 --sync_num=20 \
+  --seed=8 --repeat=1 --db="$tmp/ex" --existing_db=overwrite --benchmarks=readrandom
+err_has "--existing_db of a database written with another seed" "readrandom failed"
+check "--existing_db names a benchmark that reads" 2 --db="$tmp/x" --existing_db=readseq \
+  --benchmarks=readseq
+err_has "--existing_db names a benchmark that reads" "--existing_db names the write benchmark"
+check "--existing_db names no benchmark" 2 --db="$tmp/x" --existing_db=nosuch --benchmarks=readseq
+err_has "--existing_db names no benchmark" "unknown benchmark 'nosuch'"
+check "--existing_db with a write in the list" 2 --db="$tmp/x" --existing_db=overwrite \
+  --benchmarks=overwrite,readseq
+err_has "--existing_db with a write in the list" "--existing_db runs only read benchmarks"
+check "--existing_db with the default list, which writes" 2 --db="$tmp/x" --existing_db=overwrite
+err_has "--existing_db with the default list, which writes" "--existing_db runs only read benchmarks"
+check "--existing_db without a value" 2 --db="$tmp/x" --existing_db
+err_has "--existing_db without a value" "--existing_db needs a value"
+check "--help mentions --existing_db" 0 --help
+out_has "--help mentions --existing_db" "--existing_db=WRITE"
+if [ "$leveldb" = leveldb ]; then
+  check "a LevelDB database to read later" 0 "${small[@]}" --repeat=1 --db="$tmp/lex" \
+    --engine=leveldb --benchmarks=fillrandom,overwrite
+  check "LevelDB's reads of the database that is there" 0 "${small[@]}" --repeat=1 --db="$tmp/lex" \
+    --engine=leveldb --json="$tmp/lex.json" --existing_db=overwrite --benchmarks=$reads
+  cases=$((cases + 1))
+  if [ "$(reads_digest "$tmp/lex.json")" != "$(reads_digest "$tmp/ex-inline.json")" ]; then
+    fail "LevelDB's reads of the database that is there did not find what shale's found" \
+      "$(diff <(reads_digest "$tmp/lex.json") <(reads_digest "$tmp/ex-inline.json"))"
+  fi
+  check "LevelDB where there is no database" 1 "${small[@]}" --repeat=1 --db="$tmp/no-ldb" \
+    --engine=leveldb --existing_db=overwrite --benchmarks=readseq
+  cases=$((cases + 1))
+  if [ -e "$tmp/no-ldb" ]; then
+    fail "--existing_db made a LevelDB database where there was none" "$(ls -la "$tmp/no-ldb")"
+  fi
+fi
+cases=$((cases + 1))
+if [ -e "$tmp/x" ]; then
+  fail "a usage error about --existing_db touched the database path" "$(ls -la "$tmp/x")"
+fi
+
 # --- --cache_size makes a diagnostic run, which cannot be taken for a main-table one. --------------
 
 # The default run says that its cache is the default one, and prints no diagnostic line.

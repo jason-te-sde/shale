@@ -207,6 +207,13 @@ Status Settle(BenchEngine* engine, const SettleOptions& options, SettleResult* r
 Status RunWriteBenchmark(BenchEngine* engine, const WorkloadOptions& options, Benchmark benchmark,
                          Populated* populated, RunResult* result);
 
+/// Returns the record of what the write benchmark `benchmark` leaves in a database, worked out from
+/// `options` without an engine: the record that RunWriteBenchmark() keeps when it runs it with the
+/// same options. It is what the reads of a database that is already there are checked against.
+/// @param options the options that the database was written with.
+/// @param benchmark one for which BenchmarkWrites() is true.
+Populated RecordOfWrite(const WorkloadOptions& options, Benchmark benchmark);
+
 /// Runs one run of the read benchmark `benchmark` on the database that `populated` describes, which
 /// the engine has open, and checks every answer against it. Returns Corruption, naming the
 /// benchmark and the key, for a key that was written and is not found, one that was not written

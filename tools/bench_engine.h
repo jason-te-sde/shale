@@ -64,6 +64,11 @@ class BenchEngine {
   /// @param fresh whether to destroy an existing database at `path` before opening it.
   virtual Status Open(const std::string& path, bool fresh) = 0;
 
+  /// Opens the database at `path` as it is, without making one: a path that holds no database is
+  /// an error, and nothing is made there. A database that this engine has open is closed first.
+  /// @param path the directory of the database.
+  virtual Status OpenExisting(const std::string& path) = 0;
+
   /// Sets `key` to `value`.
   /// @param sync whether the write is on stable storage when the call returns, which is what the
   ///   engine means by a synced write: the same guarantee that its own default for a synced write

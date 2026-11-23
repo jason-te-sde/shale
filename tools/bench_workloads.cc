@@ -442,6 +442,30 @@ Status RunWriteBenchmark(BenchEngine* engine, const WorkloadOptions& options, Be
   return Status::OK();
 }
 
+Populated RecordOfWrite(const WorkloadOptions& options, Benchmark benchmark) {
+  SHALE_CHECK(BenchmarkWrites(benchmark), "RecordOfWrite of a benchmark that reads");
+  // The puts of RunWriteBenchmark() in their order: the load of overwrite, every key in order, and
+  // then the keys of the benchmark's own stream. The values are not needed: a put's stamp is its
+  // number.
+  Populated populated;
+  populated.written_by = benchmark;
+  populated.stamp.assign(options.num, 0);
+  uint64_t puts = 0;
+  if (benchmark == Benchmark::kOverwrite) {
+    for (uint64_t index = 0; index < options.num; index++) {
+      populated.Mark(index, ++puts);
+    }
+  }
+  const uint64_t operations = benchmark == Benchmark::kFillSync ? options.sync_num : options.num;
+  Random keys(StreamSeed(options, benchmark, Stream::kKeys));
+  for (uint64_t i = 0; i < operations; i++) {
+    const uint64_t index =
+        benchmark == Benchmark::kFillSeq ? i : keys.Uniform(static_cast<uint32_t>(options.num));
+    populated.Mark(index, ++puts);
+  }
+  return populated;
+}
+
 Status RunReadBenchmark(BenchEngine* engine, const WorkloadOptions& options, Benchmark benchmark,
                         const Populated& populated, RunResult* result) {
   switch (benchmark) {

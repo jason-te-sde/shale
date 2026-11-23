@@ -124,6 +124,7 @@ constexpr char kUsage[] =
     "usage: shale_bench --db=PATH [--engine=shale|leveldb] [--benchmarks=LIST]\n"
     "                   [--num=1000000] [--sync_num=10000] [--value_size=100] [--repeat=3]\n"
     "                   [--seed=301] [--json=FILE] [--compact_before_reads] [--cache_size=BYTES]\n"
+    "                   [--existing_db=WRITE]\n"
     "\n"
     "Runs db_bench-style workloads against shale and prints one line for each benchmark:\n"
     "the median over --repeat runs of operations a second, megabytes a second (of 2^20 bytes,\n"
@@ -176,6 +177,15 @@ constexpr char kUsage[] =
     "--compact_before_reads compacts the database once between a write benchmark and the first\n"
     "read benchmark after it; that is not timed, and is in no line. The reads are checked\n"
     "against a record of what was written, and a wrong answer ends the run with status 1.\n"
+    "\n"
+    "--existing_db=WRITE opens the database at --db as it is and runs only reads on it: nothing\n"
+    "is destroyed or written by the benchmarks, --benchmarks may name only read benchmarks, and\n"
+    "a path that holds no database is an error. WRITE is the write benchmark that made the\n"
+    "database, with the same --num, --sync_num, --value_size and --seed: the reads are checked\n"
+    "against what it writes, which shale_bench works out again without writing, so the first\n"
+    "read of a database made otherwise that finds a difference ends the run with status 1. The\n"
+    "background is waited for after the open, which may write what the log holds into a table\n"
+    "as any open does, and the database is compacted after that with --compact_before_reads.\n"
     "\n"
     "The background is waited for. After each run of a write benchmark, after a compaction and\n"
     "before each benchmark, shale_bench waits until the engine has no background task queued or\n"
@@ -244,6 +254,8 @@ struct Config {
   bool compact_before_reads = false;
   uint64_t cache_size = Options().block_cache_capacity;
   bool cache_size_given = false;
+  // The write benchmark that made the database that --existing_db reads, if it is given.
+  std::optional<Benchmark> existing_db;
 
   Config() {
     workload.num = 1000000;
@@ -429,7 +441,15 @@ std::string LastComponent(const std::string& path) {
 
 // ---- The JSON. ----------------------------------------------------------------------------------
 
+// What the open of a database that is already there found, and the wait for its background.
+struct ExistingOpen {
+  EngineState opened;
+  double settle_seconds = 0;
+  EngineState settled;
+};
+
 std::string BuildJson(const Config& config, const std::string& engine, const Machine& machine,
+                      const std::optional<ExistingOpen>& existing,
                       const std::vector<Summary>& summaries) {
   JsonWriter json;
   json.BeginObject();
@@ -468,6 +488,12 @@ std::string BuildJson(const Config& config, const std::string& engine, const Mac
   json.Integer(static_cast<uint64_t>(config.workload.settle.poll.count()));
   json.Key("settle_cap_ms");
   json.Integer(static_cast<uint64_t>(config.workload.settle.cap.count()));
+  json.Key("existing_db");
+  if (config.existing_db.has_value()) {
+    json.String(BenchmarkName(*config.existing_db));
+  } else {
+    json.Null();
+  }
   json.EndObject();
 
   json.Key("machine");
@@ -502,6 +528,20 @@ std::string BuildJson(const Config& config, const std::string& engine, const Mac
 
   json.Key("megabyte_bytes");
   json.Integer(static_cast<uint64_t>(kBenchMegabyte));
+
+  json.Key("existing_db_open");
+  if (existing.has_value()) {
+    json.BeginObject();
+    json.Key("opened");
+    WriteStateJson(&json, existing->opened);
+    json.Key("settle_seconds");
+    json.Number(existing->settle_seconds);
+    json.Key("settled");
+    WriteStateJson(&json, existing->settled);
+    json.EndObject();
+  } else {
+    json.Null();
+  }
 
   json.Key("results");
   WriteResultsJson(&json, summaries);
@@ -594,12 +634,43 @@ void PrintHeader(const Config& config, const std::string& engine, const Machine&
   std::fflush(stdout);
 }
 
+// Opens the database that --existing_db reads, which `written_by` made, as it is, and waits for its
+// background.
+Status OpenExistingDatabase(const Config& config, Benchmark written_by, BenchEngine* engine,
+                            ExistingOpen* existing) {
+  if (const Status s = engine->OpenExisting(config.workload.db); !s.ok()) {
+    return s;
+  }
+  if (const Status s = engine->GetState(&existing->opened); !s.ok()) {
+    return s;
+  }
+  SettleResult settled;
+  if (const Status s = Settle(engine, config.workload.settle, &settled); !s.ok()) {
+    return s;
+  }
+  existing->settle_seconds = settled.seconds;
+  existing->settled = std::move(settled.state);
+  std::printf(
+      "# opened the database %s as it is, written by %s: settled in %s s, files per level %s\n",
+      LastComponent(config.workload.db).c_str(), BenchmarkName(written_by),
+      Fixed(existing->settle_seconds, 3).c_str(),
+      FilesPerLevelText(existing->settled.files_per_level).c_str());
+  std::fflush(stdout);
+  return Status::OK();
+}
+
 // Runs the benchmarks in the order of the list. Returns the status of the first one that fails, and
 // says which in `*failed`.
 Status RunAll(const Config& config, BenchEngine* engine, std::vector<Summary>* summaries,
               Benchmark* failed) {
+  // A database that is already there is read as the write that made it left it, and compacted
+  // first if that is asked for.
   std::optional<Populated> source;
   bool compact_pending = false;
+  if (config.existing_db.has_value()) {
+    source = RecordOfWrite(config.workload, *config.existing_db);
+    compact_pending = config.compact_before_reads;
+  }
   PrintTableHeader();
 
   for (const Benchmark benchmark : config.benchmarks) {
@@ -686,6 +757,18 @@ int Run(const Config& config) {
   const std::unique_ptr<BenchEngine> engine = MakeEngine(config);
   PrintHeader(config, engine->Name(), machine);
 
+  std::optional<ExistingOpen> existing;
+  if (config.existing_db.has_value()) {
+    existing.emplace();
+    if (const Status s =
+            OpenExistingDatabase(config, *config.existing_db, engine.get(), &*existing);
+        !s.ok()) {
+      std::fprintf(stderr, "shale_bench: opening the database at %s failed: %s\n",
+                   config.workload.db.c_str(), s.ToString().c_str());
+      return kExitFailed;
+    }
+  }
+
   std::vector<Summary> summaries;
   Benchmark failed = config.benchmarks.front();
   if (const Status s = RunAll(config, engine.get(), &summaries, &failed); !s.ok()) {
@@ -696,7 +779,7 @@ int Run(const Config& config) {
 
   if (!config.json.empty()) {
     if (const Status s = json_file.WriteAndClose(
-            config.json, BuildJson(config, engine->Name(), machine, summaries));
+            config.json, BuildJson(config, engine->Name(), machine, existing, summaries));
         !s.ok()) {
       std::fprintf(stderr, "shale_bench: %s\n", s.ToString().c_str());
       return kExitFailed;
@@ -794,8 +877,8 @@ std::string ParseFlags(const std::vector<std::string>& words, Config* config, bo
     const auto number_flag =
         std::find_if(number_flags.begin(), number_flags.end(),
                      [&name](const NumberFlag& flag) { return name == flag.name; });
-    const bool is_text_flag =
-        name == "db" || name == "json" || name == "benchmarks" || name == "engine";
+    const bool is_text_flag = name == "db" || name == "json" || name == "benchmarks" ||
+                              name == "engine" || name == "existing_db";
     if (number_flag == number_flags.end() && !is_text_flag) {
       return "unknown flag --" + EscapeBytes(name);
     }
@@ -821,6 +904,17 @@ std::string ParseFlags(const std::vector<std::string>& words, Config* config, bo
         return wrong;
       }
       config->engine = *value;
+    } else if (name == "existing_db") {
+      const std::optional<Benchmark> write = FindBenchmark(*value);
+      if (!write.has_value()) {
+        return "unknown benchmark '" + EscapeBytes(*value) +
+               "' in --existing_db; the benchmarks are " + BenchmarkNames();
+      }
+      if (!BenchmarkWrites(*write)) {
+        return "--existing_db names the write benchmark that made the database, and " +
+               std::string(BenchmarkName(*write)) + " reads";
+      }
+      config->existing_db = write;
     } else if (value->empty()) {
       return "--" + name + " needs a path, and it is empty";
     } else {
@@ -839,6 +933,15 @@ std::string ParseFlags(const std::vector<std::string>& words, Config* config, bo
     return "--db=PATH is needed to say where the database goes";
   }
   // Checked before anything runs, so that a list that cannot work is not found out half way.
+  if (config->existing_db.has_value()) {
+    for (const Benchmark benchmark : config->benchmarks) {
+      if (BenchmarkWrites(benchmark)) {
+        return std::string("--existing_db runs only read benchmarks, and ") +
+               BenchmarkName(benchmark) + " in --benchmarks writes";
+      }
+    }
+    return "";
+  }
   bool written = false;
   for (const Benchmark benchmark : config->benchmarks) {
     if (BenchmarkWrites(benchmark)) {

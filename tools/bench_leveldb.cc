@@ -206,19 +206,22 @@ class LevelDBBenchEngine final : public BenchEngine {
 
   Status Open(const std::string& path, bool fresh) override {
     Close();
-    // The cache is new at every open, as the cache that is part of a shale database is: a database
-    // that was opened again starts with nothing cached, and not with what the one before it read.
-    cache_.reset(leveldb::NewLRUCache(kBlockCacheCapacity));
-    options_.block_cache = cache_.get();
     if (fresh) {
       if (const leveldb::Status destroyed = leveldb::DestroyDB(path, options_); !destroyed.ok()) {
         return ToStatus(destroyed);
       }
     }
-    leveldb::DB* db = nullptr;
-    const leveldb::Status opened = leveldb::DB::Open(options_, path, &db);
-    db_.reset(db);
-    return ToStatus(opened);
+    return OpenDatabase(path, /*create_if_missing=*/true);
+  }
+
+  // LevelDB makes the directory, its lock and its info log before it finds that there is no
+  // database at the path, so the engine looks for the database's CURRENT file first.
+  Status OpenExisting(const std::string& path) override {
+    Close();
+    if (!task_env_->FileExists(path + "/CURRENT")) {
+      return Status::InvalidArgument("leveldb", "there is no database at " + path);
+    }
+    return OpenDatabase(path, /*create_if_missing=*/false);
   }
 
   Status Put(std::string_view key, std::string_view value, bool sync) override {
@@ -301,6 +304,18 @@ class LevelDBBenchEngine final : public BenchEngine {
 
  private:
   static Status NotOpen() { return Status::InvalidArgument("the benchmark database is not open"); }
+
+  Status OpenDatabase(const std::string& path, bool create_if_missing) {
+    // The cache is new at every open, as the cache that is part of a shale database is: a database
+    // that was opened again starts with nothing cached, and not with what the one before it read.
+    cache_.reset(leveldb::NewLRUCache(kBlockCacheCapacity));
+    options_.block_cache = cache_.get();
+    options_.create_if_missing = create_if_missing;
+    leveldb::DB* db = nullptr;
+    const leveldb::Status opened = leveldb::DB::Open(options_, path, &db);
+    db_.reset(db);
+    return ToStatus(opened);
+  }
 
   // What shale reads with, which is checksummed: LevelDB's default is not to verify, so it is
   // asked to. A read fills the cache, as it does by default in both.

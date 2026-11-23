@@ -147,6 +147,12 @@ class FakeEngine final : public BenchEngine {
     return Status::OK();
   }
 
+  Status OpenExisting(const std::string& path) override {
+    opens.push_back({path, false});
+    existing_opens++;
+    return Status::OK();
+  }
+
   void Close() override {}
 
   const std::map<std::string, std::string>& data() const { return data_; }
@@ -171,6 +177,8 @@ class FakeEngine final : public BenchEngine {
   Status state_error;
   // How many puts there had been at each GetState().
   std::vector<size_t> puts_before_looks;
+  // How many times OpenExisting() was called.
+  int existing_opens = 0;
 
  private:
   void Delay() const {
@@ -789,6 +797,48 @@ TEST(BenchWorkloadsTest, OverwriteTimesItsPutsOnlyOnceTheLoadHasSettled) {
   const Status s = RunWriteBenchmark(&stuck, options, Benchmark::kOverwrite, &populated, &result);
   EXPECT_TRUE(s.IsIOError()) << s.ToString();
   EXPECT_EQ(stuck.puts.size(), 60u) << "no put is timed on a load that has not settled";
+}
+
+// ---- The record of a write, worked out again without writing. ----------------------------------
+
+// The reads of a database that is already there are checked against the record of the write that
+// made it, which is worked out from the flags alone: it has to be the record that the write itself
+// keeps, key for key and stamp for stamp.
+TEST(BenchWorkloadsTest, TheRecordOfAWriteWorkedOutAgainIsTheOneTheWriteKept) {
+  for (const Benchmark benchmark :
+       {Benchmark::kFillSeq, Benchmark::kFillRandom, Benchmark::kFillSync, Benchmark::kOverwrite}) {
+    for (const auto& [num, seed] :
+         {std::pair<uint64_t, uint64_t>{60, 301}, {500, 7}, {1999, 123456789}}) {
+      const WorkloadOptions options = Options(num, seed);
+      Populated written;
+      RunResult result;
+      FakeEngine engine;
+      ASSERT_OK(RunWriteBenchmark(&engine, options, benchmark, &written, &result));
+
+      const Populated again = RecordOfWrite(options, benchmark);
+      EXPECT_EQ(again.written_by, benchmark);
+      EXPECT_EQ(again.stamp, written.stamp)
+          << BenchmarkName(benchmark) << " " << num << " " << seed;
+      EXPECT_EQ(again.entries, written.entries);
+      EXPECT_EQ(again.last_present, written.last_present);
+    }
+  }
+}
+
+TEST(BenchWorkloadsTest, ReadsCheckedAgainstARecordWorkedOutAgainPassOnWhatTheWriteLeft) {
+  Written written(Flaw::kNone, Benchmark::kOverwrite);
+  const Populated again = RecordOfWrite(Options(300), Benchmark::kOverwrite);
+  RunResult result;
+  for (const Benchmark benchmark : {Benchmark::kReadRandom, Benchmark::kReadMissing,
+                                    Benchmark::kReadSeq, Benchmark::kSeekRandom}) {
+    ASSERT_OK(RunReadBenchmark(&written.engine, Options(300), benchmark, again, &result))
+        << BenchmarkName(benchmark);
+  }
+  // A record of another seed is not the database's, and the reads say so.
+  const Populated other = RecordOfWrite(Options(300, 302), Benchmark::kOverwrite);
+  const Status s =
+      RunReadBenchmark(&written.engine, Options(300), Benchmark::kReadRandom, other, &result);
+  EXPECT_TRUE(s.IsCorruption()) << s.ToString();
 }
 
 }  // namespace
